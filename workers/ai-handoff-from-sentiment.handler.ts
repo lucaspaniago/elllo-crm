@@ -11,7 +11,8 @@ import { serviceFromMessage } from "@/lib/atendimento/origem-mensagem";
 
 import type { EventHandler, HandlerResult } from "@/lib/event-log/dispatcher";
 import { CHAVES_DO_CLIMA } from "@/lib/ai/decisao/metadados-do-clima";
-import { triggerHandoff } from "@/lib/ai/handoff/orchestrator";
+import { triggerHandoff, type TriggerHandoffInput } from "@/lib/ai/handoff/orchestrator";
+import { aplicaSondagemDeProducao } from "@/lib/escalacao/sondagem-de-sentimento";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { logger } from "@/lib/logger";
 
@@ -65,7 +66,7 @@ export const aiHandoffFromSentimentHandler: EventHandler = {
       if (lead) leadId = (lead as { id: string }).id;
     }
 
-    const result = await triggerHandoff({
+    const passagem: TriggerHandoffInput = {
       serviceBoundary: boundary,
       conversationId,
       organizationId: row.organization_id,
@@ -78,7 +79,20 @@ export const aiHandoffFromSentimentHandler: EventHandler = {
         message_id: messageId,
         source: "ai.sentiment_alert",
       },
+    };
+
+    // Fork elllo: UMA pergunta discreta antes de passar (lib/escalacao/
+    // sondagem-de-sentimento.ts). `null` = sem sondagem, a passagem de sempre.
+    const sondagem = await aplicaSondagemDeProducao(admin, {
+      row,
+      boundary,
+      conversationId,
+      contactId,
+      passagem,
     });
+    if (sondagem) return { consumer_key: AI_HANDOFF_FROM_SENTIMENT_KEY, ...sondagem };
+
+    const result = await triggerHandoff(passagem);
 
     if (!result.triggered) {
       logger.info("[ai-handoff-from-sentiment] handoff not triggered", {

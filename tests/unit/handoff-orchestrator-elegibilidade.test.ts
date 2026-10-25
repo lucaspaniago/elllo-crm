@@ -86,4 +86,39 @@ describe("triggerHandoff · gate de elegibilidade", () => {
     expect(avisarLeadDoCrm).toHaveBeenCalledOnce();
     expect(r.triggered).toBe(true);
   });
+
+  // Fork elllo — a passagem que conclui uma SONDAGEM.
+  it("com sondagem: repassa o silêncio dela ao gate, e sem `avisarLead` não avisa o cliente", async () => {
+    decidir.mockResolvedValue({ permite: true, motivo: "gate_aberto", bloqueioPorAllowlist: false });
+    const prazo = "2026-10-25T14:10:00.000Z";
+    const r = await triggerHandoff({
+      conversationId: CONV,
+      organizationId: ORG,
+      reason: "low_sentiment",
+      origem: "sentimento",
+      sondagem: { silencioAte: prazo, avisarLead: false },
+    });
+    expect(decidir.mock.calls[0]?.[1]).toMatchObject({ ignorarSilencioAte: prazo });
+    expect(avisarLeadDoCrm).not.toHaveBeenCalled();
+    expect(r.triggered).toBe(true);
+    expect(r.aviso).toBeNull();
+  });
+
+  it("com sondagem respondida (`avisarLead`): avisa o cliente como sempre", async () => {
+    decidir.mockResolvedValue({ permite: true, motivo: "gate_aberto", bloqueioPorAllowlist: false });
+    await triggerHandoff({
+      conversationId: CONV,
+      organizationId: ORG,
+      reason: "low_sentiment",
+      origem: "sentimento",
+      sondagem: { silencioAte: "2026-10-25T14:10:00.000Z", avisarLead: true },
+    });
+    expect(avisarLeadDoCrm).toHaveBeenCalledOnce();
+  });
+
+  it("sem sondagem: o gate é chamado como antes do fork, sem `ignorarSilencioAte`", async () => {
+    decidir.mockResolvedValue({ permite: true, motivo: "autorizado", bloqueioPorAllowlist: false });
+    await triggerHandoff({ conversationId: CONV, organizationId: ORG, reason: "low_sentiment", origem: "sentimento" });
+    expect(decidir.mock.calls[0]?.[1]).not.toHaveProperty("ignorarSilencioAte");
+  });
 });

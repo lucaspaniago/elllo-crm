@@ -22,4 +22,14 @@ export const TEXTOS_AVISO_DE_PASSAGEM = {
   "irritação real": { es: "irritación real" },
   "engano": { es: "equivocación" },
   "outro motivo": { es: "otro motivo" },
+  // As frases de reserva da sondagem (lib/escalacao/sondagem-de-sentimento.ts).
+  "Oi! Acho que posso ter me perdido aqui. Posso te ajudar com algo?": {
+    es: "¡Hola! Creo que me perdí un poco aquí. ¿Te puedo ayudar con algo?",
+  },
+  "Oi! Quero ter certeza de que entendi direito. Como posso te ajudar?": {
+    es: "¡Hola! Quiero asegurarme de haber entendido bien. ¿Cómo te puedo ayudar?",
+  },
+  "Desculpe se não fui claro. Me conta o que você precisa?": {
+    es: "Perdón si no fui claro. ¿Me cuentas qué necesitas?",
+  },
 };

@@ -234,6 +234,26 @@ describe("toda passagem para humano avisa o lead antes", () => {
    * ganhar um irmão exportado de outro arquivo, o `Step 0` deixa de valer para
    * ele e ninguém percebe.
    */
+  /**
+   * Fork elllo — a ÚNICA passagem do orquestrador sem aviso ao cliente é a que
+   * conclui uma SONDAGEM sem resposta (`lib/escalacao/sondagem-de-sentimento.ts`):
+   * o cliente já recebeu a pergunta da sondagem e não voltou, e um "já acionei o
+   * time" para quem foi embora é ruído. Esta guarda prende a exceção ao lugar
+   * dela: a condição no orquestrador é exatamente essa, e a sondagem só pede
+   * `avisarLead: false` depois de a pergunta ter saído.
+   */
+  it("fork elllo: o orquestrador só deixa de avisar na sondagem sem resposta", () => {
+    const fonte = ler("lib/ai/handoff/orchestrator.ts");
+    expect(fonte).toContain("input.sondagem && !input.sondagem.avisarLead");
+    expect(fonte.indexOf("input.sondagem && !input.sondagem.avisarLead")).toBeLessThan(
+      fonte.indexOf("avisarLeadDoCrm("),
+    );
+    const sondagem = ler("lib/escalacao/sondagem-de-sentimento.ts");
+    expect(sondagem).toContain("avisarLead: respondeu");
+    expect(sondagem.indexOf("deps.enviar(")).toBeGreaterThan(0);
+    expect(sondagem.indexOf("deps.enviar(")).toBeLessThan(sondagem.indexOf("avisarLead: respondeu"));
+  });
+
   it("triggerHandoff é definido num lugar só", () => {
     const definidores = ARQUIVOS_QUE_DEFINEM_TRIGGER_HANDOFF;
     expect(definidores).toEqual(["lib/ai/handoff/orchestrator.ts"]);
