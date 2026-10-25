@@ -56791,6 +56791,18 @@ grant execute on function public.fn_definir_aviso_de_caso(uuid,uuid,text,text,bo
 drop function if exists public.fn_definir_aviso_de_caso(uuid,uuid,text,text,boolean,boolean);
 drop function if exists public.fn_definir_aviso_de_caso(uuid,uuid,text,text,boolean,boolean,boolean);
 
+-- ---- fork elllo: o aviso de caso em partes (migration 9001) ----
+-- `partes_enviadas` é o progresso do aviso fatiado (resposta por WhatsApp
+-- ligada): a rodada seguinte manda a próxima parte e nunca reenvia uma anterior.
+alter table public.entregas_de_aviso_de_caso
+  add column if not exists partes_enviadas smallint not null default 0;
+
+alter table public.entregas_de_aviso_de_caso
+  drop constraint if exists entregas_de_aviso_de_caso_partes_enviadas_check;
+alter table public.entregas_de_aviso_de_caso
+  add constraint entregas_de_aviso_de_caso_partes_enviadas_check
+  check (partes_enviadas between 0 and 20);
+
 -- ---- #3042: desmarcar o exemplo tira do RAG os trechos já aprendidos da conversa (migration 0688) ----
 -- Desmarcar `usable_for_rag` só impedia ingestões futuras; os `ai_chunks` já gravados da conversa
 -- seguiam alcançáveis por `retrieve_top_k_chunks`. A função remove os trechos cujo
