@@ -253,12 +253,12 @@ describe("9002 — idempotência e configuração", () => {
     expect(erro).toMatch(/duplicate key|unique/i);
   });
 
-  it("os botões nascem com o padrão do dono: aviso ligado, sondagem de 10 min", () => {
+  it("os botões nascem com o padrão do dono: aviso ligado, janela de tolerância de 30 min (9003)", () => {
     expect(
       valor(
         `select aviso_de_passagem_ligado::text || '|' || sondagem_minutos from public.config_aviso_de_caso where organization_id = '${ORG_A}';`,
       ),
-    ).toBe("true|10");
+    ).toBe("true|30");
   });
 
   it("sondagem_minutos fora de 0..60 é recusada", () => {
