@@ -13,9 +13,8 @@
  *     Cliente: Maria
  *     Mensagem que disparou: "isso é um absurdo, ninguém resolve nada"
  *     Contexto: pediu a segunda via do boleto duas vezes sem resposta
- *     Sondagem: enviada · respondeu "não, tá tudo bem, era brincadeira"
- *     Avaliação da IA: provável brincadeira (78%)
- *     Indícios: tom de piada; respondeu logo à sondagem
+ *     Avaliação da IA: provável irritação real (88%)
+ *     Indícios: repetiu a reclamação depois da resposta da IA
  *     Recomendação: confirmar o boleto e seguir
  *
  *     ── segunda mensagem ──
@@ -40,8 +39,7 @@
  * piada, e é essa a pergunta que o dono precisa responder do celular. O
  * desvio é ESTREITO: até 160 caracteres, passado por `sanitizarTextoDoLead`
  * (sem link, sem CPF, sem telefone, sem marcador de formatação), e citado entre
- * aspas — é a fala do cliente, nunca uma afirmação do sistema. O mesmo vale
- * para a resposta à sondagem.
+ * aspas — é a fala do cliente, nunca uma afirmação do sistema.
  *
  * **O que o modelo escreveu também passa pela limpeza.** Indícios, recomendação
  * e contexto vêm da avaliação (`./avaliacao-da-passagem.ts`), que já os limpa;
@@ -57,7 +55,7 @@ import { sanitizarTextoDoLead } from "./sanitizar-texto-do-lead";
 import { primeiroNome } from "./texto-do-aviso";
 import { FRASE_DA_HIPOTESE, type HipoteseDaPassagem } from "./vocabulario-do-aviso-de-passagem";
 
-/** Teto do trecho do cliente (a mensagem que disparou e a resposta à sondagem). */
+/** Teto do trecho do cliente (a mensagem que disparou). */
 export const TETO_DO_TRECHO_DO_CLIENTE = 160;
 
 /** Tetos do que a avaliação escreveu — os mesmos do contrato Zod dela. */
@@ -77,11 +75,6 @@ export interface AvaliacaoParaOAviso {
   contexto: string | null;
 }
 
-/** A sondagem que precedeu a passagem, quando houve. */
-export type SondagemParaOAviso =
-  | { respondeu: true; resposta: string | null }
-  | { respondeu: false; minutos: number };
-
 export interface AvisoDePassagem {
   /** O nome da marca já resolvido por `marcaDaSaida(orgId)`. */
   marca: string;
@@ -90,9 +83,8 @@ export interface AvisoDePassagem {
   motivoCodigo: MotivoDaPassagem;
   /** `contacts.name` inteiro — o corte para o primeiro nome é feito aqui. */
   nomeDoCliente: string | null;
-  /** A última fala do cliente antes da sondagem (ou da passagem), CRUA. */
+  /** A última fala do cliente antes da passagem, CRUA. */
   mensagemQueDisparou: string | null;
-  sondagem: SondagemParaOAviso | null;
   /** `null` = avaliação indisponível (orçamento, erro, sem modelo). */
   avaliacao: AvaliacaoParaOAviso | null;
   /** O link já montado pelo servidor (`linkDaConversa`). É o ÚNICO link do texto. */
@@ -130,13 +122,6 @@ export function montarPartesDoAvisoDePassagem(aviso: AvisoDePassagem): string[] 
   const avaliacao = aviso.avaliacao;
   const contexto = sanitizarTextoDoLead(avaliacao?.contexto, TETOS_DA_AVALIACAO.contexto);
   if (contexto) linhas.push(`${t("Contexto")}: ${contexto}`);
-
-  if (aviso.sondagem) {
-    const desfecho = aviso.sondagem.respondeu
-      ? [t("respondeu"), citacao(aviso.sondagem.resposta)].filter(Boolean).join(" ")
-      : `${t("sem resposta em")} ${Math.max(0, Math.round(aviso.sondagem.minutos))} min`;
-    linhas.push(`${t("Sondagem")}: ${t("enviada")} · ${desfecho}`);
-  }
 
   if (avaliacao) {
     const pct = Math.round(Math.min(1, Math.max(0, avaliacao.confianca)) * 100);

@@ -19,7 +19,7 @@ import { describe, expect, it } from "vitest";
 import { EVENTO_PASSAGEM_REGISTRADA } from "@/lib/escalacao/vocabulario-do-aviso-de-passagem";
 import {
   aplicaAvisoDePassagem,
-  lerGatilhoESondagem,
+  lerMensagemQueDisparou,
   type AvisoDePassagemDeps,
   type ContatoDoAvisoDePassagem,
   type ConversaDoAvisoDePassagem,
@@ -61,8 +61,8 @@ const MENSAGENS: MensagemParaAvaliar[] = [
   {
     direction: "outbound",
     sent_via: "ai",
-    body: "Oi! Acho que posso ter me perdido aqui. Posso te ajudar com algo?",
-    metadata: { sondagem_de_passagem: { evento_id: "e" } },
+    body: "Entendo, vou verificar o boleto para você.",
+    metadata: null,
     created_at: new Date(AGORA.getTime() - 14 * 60_000).toISOString(),
   },
 ];
@@ -264,7 +264,7 @@ describe("aviso de passagem — o envio em duas partes", () => {
     expect(m.corpos).toHaveLength(1);
     expect(m.corpos[0]).toContain("🔔 Acme: atendimento passou para você");
     expect(m.corpos[0]).toContain('Mensagem que disparou: "isso é um absurdo"');
-    expect(m.corpos[0]).toContain("Sondagem: enviada · sem resposta em 14 min");
+    expect(m.corpos[0]).not.toContain("Sondagem");
     expect(m.corpos[0]).toContain("Avaliação da IA: provável irritação real (90%)");
     expect(m.avaliacoes()).toBe(1);
     const patch = m.patches.at(-1)!;
@@ -348,60 +348,27 @@ describe("aviso de passagem — o envio em duas partes", () => {
   });
 });
 
-describe("lerGatilhoESondagem", () => {
+describe("lerMensagemQueDisparou", () => {
   const em = (min: number) => new Date(AGORA.getTime() - min * 60_000).toISOString();
-  const passagemEm = AGORA;
 
-  it("sem sondagem: a última fala do cliente antes da passagem", () => {
-    const r = lerGatilhoESondagem(
+  it("a última fala do cliente antes da passagem; o que veio depois não conta", () => {
+    const r = lerMensagemQueDisparou(
       [
         { direction: "inbound", sent_via: null, body: "primeira", metadata: null, created_at: em(5) },
         { direction: "outbound", sent_via: "ai", body: "resposta", metadata: null, created_at: em(4) },
         { direction: "inbound", sent_via: null, body: "segunda", metadata: null, created_at: em(3) },
-        // Depois da passagem não conta.
         { direction: "inbound", sent_via: null, body: "depois", metadata: null, created_at: em(-5) },
       ],
-      passagemEm,
+      AGORA,
     );
-    expect(r).toEqual({ mensagemQueDisparou: "segunda", sondagem: null });
+    expect(r).toBe("segunda");
   });
 
-  it("com sondagem respondida: o gatilho é o de antes, a resposta é a de depois", () => {
-    const r = lerGatilhoESondagem(
-      [
-        { direction: "inbound", sent_via: null, body: "absurdo", metadata: null, created_at: em(12) },
-        {
-          direction: "outbound",
-          sent_via: "ai",
-          body: "posso ajudar?",
-          metadata: { sondagem_de_passagem: { evento_id: "e" } },
-          created_at: em(11),
-        },
-        { direction: "inbound", sent_via: null, body: "era brincadeira", metadata: null, created_at: em(9) },
-      ],
-      passagemEm,
+  it("sem fala do cliente com texto: null", () => {
+    const r = lerMensagemQueDisparou(
+      [{ direction: "outbound", sent_via: "ai", body: "oi", metadata: null, created_at: em(1) }],
+      AGORA,
     );
-    expect(r).toEqual({
-      mensagemQueDisparou: "absurdo",
-      sondagem: { respondeu: true, resposta: "era brincadeira" },
-    });
-  });
-
-  it("sondagem fora do alcance de 2 h não é desta passagem", () => {
-    const r = lerGatilhoESondagem(
-      [
-        {
-          direction: "outbound",
-          sent_via: "ai",
-          body: "posso ajudar?",
-          metadata: { sondagem_de_passagem: { evento_id: "e" } },
-          created_at: em(200),
-        },
-        { direction: "inbound", sent_via: null, body: "oi", metadata: null, created_at: em(1) },
-      ],
-      passagemEm,
-    );
-    expect(r.sondagem).toBeNull();
-    expect(r.mensagemQueDisparou).toBe("oi");
+    expect(r).toBeNull();
   });
 });

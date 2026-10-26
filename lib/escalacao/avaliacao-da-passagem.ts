@@ -110,7 +110,6 @@ export interface MensagemParaAvaliar {
 /** Quem falou, do ponto de vista de quem lê a transcrição. */
 function rotulo(m: MensagemParaAvaliar): string {
   if (m.direction === "inbound") return "cliente";
-  if (m.metadata?.sondagem_de_passagem) return "[sondagem]";
   if (m.metadata?.aviso_de_escalacao === true) return "[aviso]";
   return m.sent_via === "ai" ? "IA" : "equipe";
 }
@@ -142,7 +141,7 @@ export function promptDaAvaliacao(idioma: Idioma): string {
   const lingua = idiomaVisivelPorCodigo(idioma).nomeNativo;
   return `Você ajuda o dono de uma pequena empresa a entender por que o atendimento automático passou uma conversa de WhatsApp para uma pessoa.
 
-Leia a transcrição (as falas estão marcadas como cliente, IA, equipe, [sondagem] — uma pergunta discreta que a IA fez antes de passar — e [aviso]) e o motivo da passagem, e responda com:
+Leia a transcrição (as falas estão marcadas como cliente, IA, equipe e [aviso]) e o motivo da passagem, e responda com:
 - "hipotese": "brincadeira" (o cliente brincou, ironizou ou exagerou sem irritação de verdade), "irritacao_real" (há insatisfação real e alguém precisa agir), "engano" (a passagem foi um equívoco: mensagem mal lida, contexto que a IA não tinha) ou "outro";
 - "confianca": de 0 a 1;
 - "indicios": até 3 indícios curtos que sustentam a hipótese;
