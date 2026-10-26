@@ -40,9 +40,6 @@ const CHAMADORES: Record<string, string> = {
   "lib/mcp/tools/start-conversation.ts": "ferramenta MCP: o erro sobe ao cliente; o token da org parada já é recusado antes",
   "lib/inbox/encaminhar-mensagem.ts":
     "propaga o 403 org_suspended ao chamador da rota `forward`; nada é gravado — a linha do destino só nasce se o envio aceitar",
-  // Fork elllo.
-  "lib/escalacao/sondagem-de-sentimento.ts":
-    "o handler do clima já pula a org parada; na corrida, o envio recusado limpa a chave, devolve o silêncio e segue para a passagem — nada gravado que sobreviva",
 };
 
 const PORTA = "app/api/v1/messages/_handler.ts";
