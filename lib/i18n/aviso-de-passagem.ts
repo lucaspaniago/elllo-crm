@@ -1,11 +1,11 @@
 /**
- * Textos fixos do aviso de passagem ao dono (fork elllo).
+ * Textos fixos do aviso de passagem ao dono e da nota de tom áspero (fork elllo).
  *
  * Mesma regra do dicionário: a CHAVE é o texto em português, e falta de
  * tradução degrada para português. Mora num arquivo próprio — espalhado no
  * `DICIONARIO` como `TEXTOS_AGENDA_SERVICOS` — para o fork não tocar as
  * dezesseis mil linhas do dicionário a cada rebase. Chave que já existe lá
- * ("Motivo", "Cliente", "Abrir") NÃO se repete aqui.
+ * ("Motivo", "Cliente", "Mensagem", "Abrir") NÃO se repete aqui.
  */
 export const TEXTOS_AVISO_DE_PASSAGEM = {
   "atendimento passou para você": { es: "la atención pasó a ti" },
@@ -20,4 +20,6 @@ export const TEXTOS_AVISO_DE_PASSAGEM = {
   "irritação real": { es: "irritación real" },
   "engano": { es: "equivocación" },
   "outro motivo": { es: "otro motivo" },
+  // A nota de tom áspero (lib/escalacao/tolerancia-ao-sentimento.ts).
+  "tom áspero, segui atendendo": { es: "tono áspero, seguí atendiendo" },
 };

@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import {
   TETO_DO_TRECHO_DO_CLIENTE,
   linkDaConversa,
+  montarNotaDeTomAspero,
   montarPartesDoAvisoDePassagem,
   type AvisoDePassagem,
 } from "@/lib/escalacao/texto-do-aviso-de-passagem";
@@ -137,5 +138,51 @@ describe("montarPartesDoAvisoDePassagem", () => {
     expect(montarPartesDoAvisoDePassagem({ ...BASE, marca: "Zap do João" })[0]).toContain(
       "🔔 Zap do João:",
     );
+  });
+});
+
+describe("montarNotaDeTomAspero", () => {
+  const NOTA = {
+    marca: "Acme",
+    idioma: "pt-BR" as const,
+    nomeDoCliente: "Ana Paula Paniago",
+    mensagem: "Oi, idiota",
+    avaliacao: { hipotese: "brincadeira" as const, confianca: 0.85 },
+    link: linkDaConversa("https://crm.exemplo.com.br", CONVERSA),
+  };
+
+  it("uma mensagem só, curta, com o link no fim", () => {
+    expect(montarNotaDeTomAspero(NOTA)).toBe(
+      [
+        "🔔 Acme: tom áspero, segui atendendo",
+        "Cliente: Ana",
+        'Mensagem: "Oi, idiota"',
+        "Avaliação da IA: provável brincadeira (85%)",
+        `Abrir: https://crm.exemplo.com.br/app/inbox?id=${CONVERSA}`,
+      ].join("\n"),
+    );
+  });
+
+  it("o trecho é limpo e curto; linha sem conteúdo não aparece", () => {
+    const nota = montarNotaDeTomAspero({
+      ...NOTA,
+      nomeDoCliente: null,
+      mensagem: "liga 31998966398 https://mal.example " + "a".repeat(300),
+    });
+    expect(nota).not.toContain("998966398");
+    expect(nota).not.toContain("mal.example");
+    expect(nota).not.toContain("Cliente:");
+    const linha = nota.split("\n").find((l) => l.startsWith("Mensagem:"))!;
+    expect([...linha.slice(linha.indexOf('"') + 1, linha.lastIndexOf('"'))].length).toBeLessThanOrEqual(
+      TETO_DO_TRECHO_DO_CLIENTE,
+    );
+    expect(montarNotaDeTomAspero({ ...NOTA, mensagem: null })).not.toContain("Mensagem:");
+  });
+
+  it("espanhol", () => {
+    const nota = montarNotaDeTomAspero({ ...NOTA, idioma: "es", avaliacao: { hipotese: "engano", confianca: 0.7 } });
+    expect(nota).toContain("tono áspero, seguí atendiendo");
+    expect(nota).toContain("Mensaje:");
+    expect(nota).toContain("Evaluación de la IA: probable equivocación (70%)");
   });
 });

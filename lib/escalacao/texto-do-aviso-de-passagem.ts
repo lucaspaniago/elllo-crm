@@ -46,6 +46,22 @@
  * limpar de novo aqui é o que mantém esta função total e segura sozinha.
  *
  * **Linha sem conteúdo não aparece** — a mesma regra do aviso de caso.
+ *
+ * ## A nota de tom áspero (`montarNotaDeTomAspero`)
+ *
+ * A irmã curta do aviso, para quando a conversa NÃO passou: a tolerância ao
+ * sentimento (`./tolerancia-ao-sentimento.ts`) registrou uma irritação que a IA
+ * acha que foi brincadeira ou engano, e a IA segue atendendo. Uma mensagem só,
+ * com o link no fim:
+ *
+ *     🔔 Acme: tom áspero, segui atendendo
+ *     Cliente: Maria
+ *     Mensagem: "oi, idiota"
+ *     Avaliação da IA: provável brincadeira (85%)
+ *     Abrir: https://crm.exemplo.com.br/app/inbox?id=<conversa>
+ *
+ * O trecho segue o MESMO desvio estreito do aviso (até 160 caracteres, limpo,
+ * entre aspas) — sem ele, "tom áspero" não diz ao dono se ele precisa olhar.
  */
 import { traduzir } from "@/lib/i18n/dicionario";
 import type { Idioma } from "@/lib/i18n/idiomas";
@@ -143,4 +159,35 @@ export function montarPartesDoAvisoDePassagem(aviso: AvisoDePassagem): string[] 
   }
 
   return [linhas.join("\n"), `${t("Abrir")}: ${aviso.link}`];
+}
+
+/** A nota de tom áspero (ver o cabeçalho). */
+export interface NotaDeTomAspero {
+  /** O nome da marca já resolvido por `marcaDaSaida(orgId)`. */
+  marca: string;
+  /** O idioma da ORGANIZAÇÃO, já normalizado. */
+  idioma: Idioma;
+  /** `contacts.name` inteiro — o corte para o primeiro nome é feito aqui. */
+  nomeDoCliente: string | null;
+  /** A fala do cliente que disparou o alerta de clima, CRUA. */
+  mensagem: string | null;
+  avaliacao: { hipotese: HipoteseDaPassagem; confianca: number };
+  /** O link já montado pelo servidor (`linkDaConversa`). É o ÚNICO link do texto. */
+  link: string;
+}
+
+/** A nota numa mensagem só. Função total: nunca lança. */
+export function montarNotaDeTomAspero(nota: NotaDeTomAspero): string {
+  const t = (texto: string): string => traduzir(texto, nota.idioma);
+  const linhas: string[] = [`🔔 ${nota.marca}: ${t("tom áspero, segui atendendo")}`];
+  const cliente = primeiroNome(nota.nomeDoCliente);
+  if (cliente) linhas.push(`${t("Cliente")}: ${cliente}`);
+  const trecho = citacao(nota.mensagem);
+  if (trecho) linhas.push(`${t("Mensagem")}: ${trecho}`);
+  const pct = Math.round(Math.min(1, Math.max(0, nota.avaliacao.confianca)) * 100);
+  linhas.push(
+    `${t("Avaliação da IA")}: ${t("provável")} ${t(FRASE_DA_HIPOTESE[nota.avaliacao.hipotese])} (${pct}%)`,
+  );
+  linhas.push(`${t("Abrir")}: ${nota.link}`);
+  return linhas.join("\n");
 }

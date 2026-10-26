@@ -133,6 +133,16 @@ describe("avaliarPassagem", () => {
     expect(chamadas[0]?.prompt).toContain("cliente: isso é um absurdo kkk");
   });
 
+  it("situação tom_aspero (a tolerância): avalia sem passagem nenhuma, com o prompt da conversa em curso", async () => {
+    const { d, chamadas } = deps();
+    const r = await avaliarPassagem(d, { ...ENTRADA, situacao: "tom_aspero" });
+    expect(r).toMatchObject({ disponivel: true, hipotese: "brincadeira" });
+    expect(chamadas[0]?.prompt).toContain("Situação: o tom do cliente ficou áspero");
+    expect(chamadas[0]?.prompt).not.toContain("Motivo da passagem");
+    expect(chamadas[0]?.system).toContain("O atendimento automático continua conversando com ele");
+    expect(chamadas[0]?.system).not.toContain("passou uma conversa");
+  });
+
   it("orçamento estourado: não chama o modelo e fica indisponível", async () => {
     const { d, chamadas, registros } = deps({ podeGastar: async () => false });
     const r = await avaliarPassagem(d, ENTRADA);
