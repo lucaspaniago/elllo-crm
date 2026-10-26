@@ -3,12 +3,17 @@
  *
  * ## O que este arquivo é
  *
- * Uma chamada curta ao modelo, feita UMA vez por aviso de passagem ao dono
- * (`./aviso-de-passagem-ao-suporte.ts`, na primeira parte), que lê as últimas
- * mensagens da conversa e devolve uma hipótese — brincadeira, irritação real,
- * engano ou outro — com a confiança, até três indícios, uma recomendação e uma
- * linha de contexto. É o que deixa o dono decidir do celular se precisa largar
- * o que está fazendo.
+ * Uma chamada curta ao modelo que lê as últimas mensagens da conversa e
+ * devolve uma hipótese — brincadeira, irritação real, engano ou outro — com a
+ * confiança, até três indícios, uma recomendação e uma linha de contexto. Dois
+ * chamadores, cada um com a sua SITUAÇÃO:
+ *
+ *   - `passagem` — o aviso de passagem ao dono (`./aviso-de-passagem-ao-suporte.ts`,
+ *     na primeira parte): a conversa JÁ passou, e a avaliação é o que deixa o
+ *     dono decidir do celular se precisa largar o que está fazendo;
+ *   - `tom_aspero` — a tolerância ao sentimento (`./tolerancia-ao-sentimento.ts`):
+ *     a conversa AINDA NÃO passou, e a hipótese decide se passa. Não precisa de
+ *     linha em `passagens_de_atendimento` — só das mensagens.
  *
  * ## As decisões, cada uma com o motivo
  *
@@ -68,6 +73,9 @@ export const TIMEOUT_DA_AVALIACAO_MS = 8_000;
 export const TETO_DE_SAIDA_DA_AVALIACAO = 300;
 /** Teto de cada fala na transcrição enviada ao modelo. */
 const TETO_DA_FALA = 400;
+
+/** Em que momento a conversa é avaliada (ver o cabeçalho). */
+export type SituacaoDaAvaliacao = "passagem" | "tom_aspero";
 
 /** O contrato da avaliação, já limpa — o que o aviso recebe. */
 export const avaliacaoDaPassagemSchema = z.object({
@@ -137,18 +145,32 @@ export function montarTranscricao(mensagens: readonly MensagemParaAvaliar[]): st
 }
 
 /** O prompt de sistema. Exportado para o teste prender o que ele exige. */
-export function promptDaAvaliacao(idioma: Idioma): string {
+export function promptDaAvaliacao(idioma: Idioma, situacao: SituacaoDaAvaliacao = "passagem"): string {
   const lingua = idiomaVisivelPorCodigo(idioma).nomeNativo;
-  return `Você ajuda o dono de uma pequena empresa a entender por que o atendimento automático passou uma conversa de WhatsApp para uma pessoa.
+  const abertura =
+    situacao === "tom_aspero"
+      ? `Você ajuda o dono de uma pequena empresa a entender uma conversa de WhatsApp em que o tom do cliente ficou áspero. O atendimento automático continua conversando com ele; a pergunta é se alguém da equipe precisa entrar.
+
+Leia a transcrição (as falas estão marcadas como cliente, IA, equipe e [aviso]) e a situação, e responda com:
+- "hipotese": "brincadeira" (o cliente brincou, ironizou ou exagerou sem irritação de verdade), "irritacao_real" (há insatisfação real e alguém precisa agir), "engano" (a aspereza foi um equívoco: mensagem mal lida, dirigida a outra pessoa, contexto que a IA não tinha) ou "outro";`
+      : `Você ajuda o dono de uma pequena empresa a entender por que o atendimento automático passou uma conversa de WhatsApp para uma pessoa.
 
 Leia a transcrição (as falas estão marcadas como cliente, IA, equipe e [aviso]) e o motivo da passagem, e responda com:
-- "hipotese": "brincadeira" (o cliente brincou, ironizou ou exagerou sem irritação de verdade), "irritacao_real" (há insatisfação real e alguém precisa agir), "engano" (a passagem foi um equívoco: mensagem mal lida, contexto que a IA não tinha) ou "outro";
+- "hipotese": "brincadeira" (o cliente brincou, ironizou ou exagerou sem irritação de verdade), "irritacao_real" (há insatisfação real e alguém precisa agir), "engano" (a passagem foi um equívoco: mensagem mal lida, contexto que a IA não tinha) ou "outro";`;
+  return `${abertura}
 - "confianca": de 0 a 1;
 - "indicios": até 3 indícios curtos que sustentam a hipótese;
 - "recomendacao": o que o dono deveria fazer agora, numa frase;
 - "contexto": o assunto da conversa, numa linha.
 
 Regras: não copie dados pessoais (telefone, documento, e-mail, endereço, links); não cite palavrões; seja neutro e breve. Escreva indícios, recomendação e contexto em ${lingua}.`;
+}
+
+/** A primeira linha do prompt do usuário: o motivo da passagem, ou a situação. */
+function linhaDaSituacao(situacao: SituacaoDaAvaliacao, motivo: MotivoDaPassagem): string {
+  return situacao === "tom_aspero"
+    ? "Situação: o tom do cliente ficou áspero; o atendimento automático segue conversando, nada passou para uma pessoa ainda"
+    : `Motivo da passagem: ${FRASE_DO_MOTIVO[motivo]}`;
 }
 
 export interface DepsDaAvaliacao {
@@ -209,6 +231,8 @@ export async function avaliarPassagem(
     idioma: Idioma;
     motivoCodigo: MotivoDaPassagem;
     mensagens: readonly MensagemParaAvaliar[];
+    /** Ausente = `passagem`, o chamador original. */
+    situacao?: SituacaoDaAvaliacao;
   },
 ): Promise<ResultadoDaAvaliacao> {
   try {
@@ -221,7 +245,8 @@ export async function avaliarPassagem(
       return { disponivel: false, porque: "orcamento_de_ia" };
     }
 
-    const prompt = `Motivo da passagem: ${FRASE_DO_MOTIVO[entrada.motivoCodigo]}\n\nTranscrição:\n${transcricao}`;
+    const situacao = entrada.situacao ?? "passagem";
+    const prompt = `${linhaDaSituacao(situacao, entrada.motivoCodigo)}\n\nTranscrição:\n${transcricao}`;
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), TIMEOUT_DA_AVALIACAO_MS);
     const inicio = deps.agora();
@@ -233,7 +258,7 @@ export async function avaliarPassagem(
     try {
       const gerado = await deps.gerar({
         model: resolvido.model,
-        system: promptDaAvaliacao(entrada.idioma),
+        system: promptDaAvaliacao(entrada.idioma, situacao),
         prompt,
         abortSignal: abort.signal,
       });

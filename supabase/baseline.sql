@@ -56974,6 +56974,17 @@ create trigger trg_passagem_registrada
   for each row
   execute function public.fn_emit_passagem_registrada();
 
+-- ---- fork elllo: tolerância ao sentimento (migration 9003) ----
+-- `sondagem_minutos` deixa de ser a espera da sondagem (removida) e vira a
+-- JANELA da tolerância ao sentimento (lib/escalacao/tolerancia-ao-sentimento.ts):
+-- só uma segunda irritação dentro dela, confirmada como irritação real, passa
+-- a conversa. Sem renomear; só o default muda (10 → 30). 0 = desligada.
+alter table public.config_aviso_de_caso
+  alter column sondagem_minutos set default 30;
+
+comment on column public.config_aviso_de_caso.sondagem_minutos is
+  'Fork elllo (9003): janela da tolerância ao sentimento, em minutos (0..60; 0 = desligada, passagem na hora como no upstream). Uma segunda irritação dentro da janela, confirmada como irritação real (confiança >= 0,8), passa a conversa para uma pessoa; a primeira só é registrada. O nome vem da sondagem da 9002, removida.';
+
 -- ---- #3042: desmarcar o exemplo tira do RAG os trechos já aprendidos da conversa (migration 0688) ----
 -- Desmarcar `usable_for_rag` só impedia ingestões futuras; os `ai_chunks` já gravados da conversa
 -- seguiam alcançáveis por `retrieve_top_k_chunks`. A função remove os trechos cujo
