@@ -51,19 +51,7 @@ interface ConversaEmbed {
  */
 export async function decidirElegibilidadeDaConversaViaSupabase(
   admin: Pick<SupabaseClient, "from">,
-  input: {
-    organizationId: string;
-    conversationId: string;
-    agora: Date;
-    ttlMs: number;
-    /**
-     * Fork elllo: o silêncio que a SONDAGEM gravou (`lib/escalacao/sondagem-de-
-     * sentimento.ts`). Quando `bot_silenced_until` é exatamente este instante, o
-     * silêncio é da própria sondagem que agora conclui a passagem — e é lido
-     * como ausente. Qualquer outro silêncio (humano, `infinity`) segue valendo.
-     */
-    ignorarSilencioAte?: string | null;
-  },
+  input: { organizationId: string; conversationId: string; agora: Date; ttlMs: number },
 ): Promise<DecisaoDeElegibilidade | null> {
   const { data, error } = await admin
     .from("conversations")
@@ -80,10 +68,6 @@ export async function decidirElegibilidadeDaConversaViaSupabase(
   if (data == null) return null;
 
   const row = data as unknown as ConversaEmbed;
-  const silencioDaSondagem =
-    input.ignorarSilencioAte != null &&
-    row.bot_silenced_until != null &&
-    Date.parse(row.bot_silenced_until) === Date.parse(input.ignorarSilencioAte);
   return decidirElegibilidade(
     montarEstadoDeElegibilidade({
       orgStatus: row.organizations?.status ?? null,
@@ -97,7 +81,7 @@ export async function decidirElegibilidadeDaConversaViaSupabase(
       orgSettings: row.organizations?.settings,
       aiOptOut: row.contacts?.ai_opt_out ?? false,
       assigneeKind: row.assignee_kind,
-      botSilencedUntil: silencioDaSondagem ? null : row.bot_silenced_until,
+      botSilencedUntil: row.bot_silenced_until,
       aiAuthorizedAt: row.contacts?.ai_authorized_at ?? null,
       agora: input.agora,
       ttlMs: input.ttlMs,

@@ -99,14 +99,6 @@ export interface TriggerHandoffInput {
   motivoTexto?: string | null;
   leadId?: string | null;
   metadata?: Record<string, unknown>;
-  /**
-   * Fork elllo: a passagem conclui uma SONDAGEM (`lib/escalacao/sondagem-de-
-   * sentimento.ts`). `silencioAte` é o silêncio que ela gravou — o gate o lê
-   * como ausente; sem `avisarLead`, o cliente não recebe o aviso de passagem
-   * (ele não respondeu à pergunta, e um "já acionei o time" para quem foi
-   * embora é ruído).
-   */
-  sondagem?: { silencioAte: string; avisarLead: boolean };
 }
 
 export interface TriggerHandoffResult {
@@ -148,8 +140,7 @@ function motivoDaPassagem(reason: HandoffReason): MotivoDaPassagem {
  * O desfecho do aviso reduzido ao que a LINHA guarda: `porque` (o código técnico
  * do erro de envio) fica no log, porque a coluna é lida por uma tela que traduz.
  */
-function desfechoDaPassagem(aviso: DesfechoDoAvisoDoCrm | null): DesfechoDoAvisoDaPassagem | null {
-  if (aviso === null) return null;
+function desfechoDaPassagem(aviso: DesfechoDoAvisoDoCrm): DesfechoDoAvisoDaPassagem {
   if (aviso.avisado) return { avisado: true };
   return {
     avisado: false,
@@ -239,7 +230,6 @@ export async function triggerHandoff(
         conversationId: input.conversationId,
         agora: new Date(),
         ttlMs: ttlDaAutorizacaoMs(process.env),
-        ...(input.sondagem ? { ignorarSilencioAte: input.sondagem.silencioAte } : {}),
       });
       if (elegib !== null && !elegib.permite) {
         return { triggered: false, reason: `nao_elegivel:${elegib.motivo}` };
@@ -265,10 +255,8 @@ export async function triggerHandoff(
     // (conversa órfã, que a UI não mostra) seguimos sem avisar: o handoff é mais
     // importante que o aviso, e a falta vira linha no item da Central abaixo.
     const contactId = (convNow as unknown as { contact_id?: string | null }).contact_id ?? null;
-    const aviso: DesfechoDoAvisoDoCrm | null =
-      input.sondagem && !input.sondagem.avisarLead
-        ? null
-        : contactId === null
+    const aviso =
+      contactId === null
         ? { avisado: false, porque: "conversa_sem_contato" }
         : await avisarLeadDoCrm(admin, {
             organizationId: input.organizationId,

@@ -182,33 +182,4 @@ describe("decidirElegibilidadeDaConversaViaSupabase", () => {
       ),
     ).rejects.toThrow(/ai_authorized_at/);
   });
-
-  // Fork elllo — o silêncio da sondagem não barra a passagem que a conclui.
-  describe("ignorarSilencioAte (sondagem)", () => {
-    const PRAZO = new Date(AGORA.getTime() + 5 * 60_000);
-
-    it("silêncio IGUAL ao da sondagem (outra grafia do mesmo instante) é lido como ausente", async () => {
-      const d = await decidirElegibilidadeDaConversaViaSupabase(
-        adminStub({ data: linha({ bot_silenced_until: PRAZO.toISOString().replace("Z", "+00:00") }), error: null }),
-        { organizationId: ORG, conversationId: CONV, agora: AGORA, ttlMs: TTL, ignorarSilencioAte: PRAZO.toISOString() },
-      );
-      expect(d).toMatchObject({ permite: true });
-    });
-
-    it("silêncio DIFERENTE (ex.: infinity de um humano) continua barrando", async () => {
-      const d = await decidirElegibilidadeDaConversaViaSupabase(
-        adminStub({ data: linha({ bot_silenced_until: "infinity" }), error: null }),
-        { organizationId: ORG, conversationId: CONV, agora: AGORA, ttlMs: TTL, ignorarSilencioAte: PRAZO.toISOString() },
-      );
-      expect(d).toMatchObject({ permite: false });
-    });
-
-    it("sem ignorarSilencioAte, o silêncio da sondagem barra como qualquer outro", async () => {
-      const d = await decidirElegibilidadeDaConversaViaSupabase(
-        adminStub({ data: linha({ bot_silenced_until: PRAZO.toISOString() }), error: null }),
-        { organizationId: ORG, conversationId: CONV, agora: AGORA, ttlMs: TTL },
-      );
-      expect(d).toMatchObject({ permite: false });
-    });
-  });
 });

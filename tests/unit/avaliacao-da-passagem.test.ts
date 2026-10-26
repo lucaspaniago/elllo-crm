@@ -1,7 +1,7 @@
 /**
  * A AVALIAÇÃO DA PASSAGEM (fork elllo) — uma chamada curta que nunca segura o aviso.
  *
- * O que se mede: a transcrição marcada (cliente/IA/equipe/[sondagem]) sem a
+ * O que se mede: a transcrição marcada (cliente/IA/equipe/[aviso]) sem a
  * mensagem redigida e com o texto da mídia; o orçamento ANTES da chamada; a
  * linha em `llm_calls` no sucesso e na falha, com o ponto `sentiment_classify`;
  * tudo o que o modelo escreve limpo e cortado; e todo desvio vira
@@ -83,8 +83,8 @@ describe("montarTranscricao", () => {
         created_at: "2026-10-25T10:01:30Z",
         direction: "outbound",
         sent_via: "ai",
-        body: "Posso te ajudar com algo?",
-        metadata: { sondagem_de_passagem: { evento_id: "e" } },
+        body: "Já acionei o time.",
+        metadata: { aviso_de_escalacao: true },
       }),
       ...MENSAGENS,
     ]);
@@ -92,7 +92,7 @@ describe("montarTranscricao", () => {
       "cliente: quero a segunda via",
       "IA: claro!",
       "cliente: isso é um absurdo kkk",
-      "[sondagem]: Posso te ajudar com algo?",
+      "[aviso]: Já acionei o time.",
       "equipe: sou da equipe",
     ]);
   });

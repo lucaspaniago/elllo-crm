@@ -23,11 +23,10 @@ const BASE: AvisoDePassagem = {
   motivoCodigo: "low_sentiment",
   nomeDoCliente: "Maria Aparecida de Souza",
   mensagemQueDisparou: "isso é um absurdo, ninguém resolve nada",
-  sondagem: { respondeu: true, resposta: "não, tá tudo bem, era brincadeira" },
   avaliacao: {
     hipotese: "brincadeira",
     confianca: 0.78,
-    indicios: ["tom de piada", "respondeu logo à sondagem"],
+    indicios: ["tom de piada", "riu na mensagem seguinte"],
     recomendacao: "confirmar o boleto e seguir",
     contexto: "pediu a segunda via do boleto",
   },
@@ -46,25 +45,16 @@ describe("montarPartesDoAvisoDePassagem", () => {
         "Cliente: Maria",
         'Mensagem que disparou: "isso é um absurdo, ninguém resolve nada"',
         "Contexto: pediu a segunda via do boleto",
-        'Sondagem: enviada · respondeu "não, tá tudo bem, era brincadeira"',
         "Avaliação da IA: provável brincadeira (78%)",
-        "Indícios: tom de piada; respondeu logo à sondagem",
+        "Indícios: tom de piada; riu na mensagem seguinte",
         "Recomendação: confirmar o boleto e seguir",
       ].join("\n"),
     );
     expect(partes[1]).toBe(`Abrir: https://crm.exemplo.com.br/app/inbox?id=${CONVERSA}`);
   });
 
-  it("sondagem sem resposta diz em quantos minutos", () => {
-    const [conteudo] = montarPartesDoAvisoDePassagem({
-      ...BASE,
-      sondagem: { respondeu: false, minutos: 10 },
-    });
-    expect(conteudo).toContain("Sondagem: enviada · sem resposta em 10 min");
-  });
-
-  it("sem sondagem, sem linha de sondagem", () => {
-    const [conteudo] = montarPartesDoAvisoDePassagem({ ...BASE, sondagem: null, motivoCodigo: "requested_human" });
+  it("não há linha de sondagem: a IA não faz mais pergunta separada", () => {
+    const [conteudo] = montarPartesDoAvisoDePassagem({ ...BASE, motivoCodigo: "requested_human" });
     expect(conteudo).not.toContain("Sondagem");
     expect(conteudo).toContain("Motivo: O cliente pediu para falar com uma pessoa");
   });
@@ -83,7 +73,6 @@ describe("montarPartesDoAvisoDePassagem", () => {
       mensagemQueDisparou:
         "*meu cpf* 529.982.247-25, liga no +55 31 99896-6398 ou veja https://mal.example/x " +
         "a".repeat(300),
-      sondagem: { respondeu: true, resposta: 'olha "isso" www.mal.example' },
     });
     expect(conteudo).not.toMatch(/\d{3}\.\d{3}\.\d{3}-\d{2}/);
     expect(conteudo).not.toContain("998966398");
@@ -93,8 +82,11 @@ describe("montarPartesDoAvisoDePassagem", () => {
     const citado = linha.slice(linha.indexOf('"') + 1, linha.lastIndexOf('"'));
     expect([...citado].length).toBeLessThanOrEqual(TETO_DO_TRECHO_DO_CLIENTE);
     expect(citado.endsWith("…")).toBe(true);
-    // A aspa do cliente não fecha a nossa citação.
-    expect(conteudo).toContain(`respondeu "olha 'isso'"`);
+  });
+
+  it("a aspa do cliente não fecha a nossa citação", () => {
+    const [conteudo] = montarPartesDoAvisoDePassagem({ ...BASE, mensagemQueDisparou: 'olha "isso" www.mal.example' });
+    expect(conteudo).toContain(`Mensagem que disparou: "olha 'isso'"`);
   });
 
   it("o que o modelo escreveu também é limpo", () => {
@@ -133,12 +125,10 @@ describe("montarPartesDoAvisoDePassagem", () => {
     const partes = montarPartesDoAvisoDePassagem({
       ...BASE,
       idioma: "es",
-      sondagem: { respondeu: false, minutos: 10 },
     });
     expect(partes[0]).toContain("la atención pasó a ti");
     expect(partes[0]).toContain("Mensaje que lo activó");
     expect(partes[0]).toContain("Evaluación de la IA: probable broma (78%)");
-    expect(partes[0]).toContain("sin respuesta en 10 min");
     expect(partes[0]).not.toContain("Avaliação");
     expect(partes[1]).toContain("Abrir: ");
   });

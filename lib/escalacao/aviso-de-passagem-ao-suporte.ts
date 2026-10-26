@@ -77,11 +77,7 @@ import {
 } from "./aviso-ao-suporte";
 import { enviarParte, proximoInstante } from "./envio-em-partes";
 import type { MotivoDaPassagem } from "./passagem";
-import {
-  linkDaConversa,
-  montarPartesDoAvisoDePassagem,
-  type SondagemParaOAviso,
-} from "./texto-do-aviso-de-passagem";
+import { linkDaConversa, montarPartesDoAvisoDePassagem } from "./texto-do-aviso-de-passagem";
 import { urlPublicaUsavel } from "./url-publica";
 import type { ErroDaEntregaDeAviso, StatusDaEntregaDeAviso } from "./vocabulario-do-aviso";
 import {
@@ -91,10 +87,8 @@ import {
 
 /** Outra passagem da mesma conversa avisada dentro desta janela segura o aviso. */
 export const JANELA_ENTRE_AVISOS_DA_CONVERSA_MS = 30 * 60 * 1000;
-/** Quantas mensagens o adapter lê para o trecho, a sondagem e a avaliação. */
+/** Quantas mensagens o adapter lê para o trecho e a avaliação. */
 export const MENSAGENS_LIDAS = 20;
-/** Uma sondagem mais velha que isto, antes da passagem, não é desta passagem. */
-export const ALCANCE_DA_SONDAGEM_MS = 2 * 60 * 60 * 1000;
 /**
  * Folga depois do `criado_em` da passagem: o aviso ao lead do orquestrador sai
  * ANTES do insert, mas os relógios do app e do banco não são o mesmo relógio.
@@ -233,46 +227,22 @@ function passouDoTeto(row: EventRow, agora: Date): boolean {
 }
 
 /**
- * O trecho que disparou e a sondagem, lidos das mensagens.
- *
- * Considera só o que veio ATÉ a passagem. Com sondagem (a mensagem marcada com
- * `metadata.sondagem_de_passagem`, no alcance de 2 h), a mensagem que disparou é
- * a última fala do cliente ANTES dela, e a resposta é a primeira DEPOIS; sem
- * sondagem, é a última fala do cliente antes da passagem.
+ * O trecho que disparou: a última fala do cliente ATÉ a passagem (com a folga
+ * dos relógios), lida das mensagens em qualquer ordem.
  */
-export function lerGatilhoESondagem(
+export function lerMensagemQueDisparou(
   mensagens: readonly MensagemParaAvaliar[],
   passagemEm: Date,
-): { mensagemQueDisparou: string | null; sondagem: SondagemParaOAviso | null } {
+): string | null {
   const limite = passagemEm.getTime() + FOLGA_DO_INSTANTE_DA_PASSAGEM_MS;
-  const ordenadas = [...mensagens]
-    .filter((m) => Date.parse(m.created_at) <= limite)
-    .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
   const texto = (m: MensagemParaAvaliar): string | null =>
     textoOuNulo(m.body) ?? textoOuNulo(m.media_derived_text ?? null);
-  const doCliente = (m: MensagemParaAvaliar) => m.direction === "inbound" && texto(m) !== null;
-
-  const sondagem = [...ordenadas]
+  const ultima = [...mensagens]
+    .filter((m) => Date.parse(m.created_at) <= limite)
+    .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
     .reverse()
-    .find(
-      (m) =>
-        m.direction === "outbound" &&
-        Boolean(m.metadata?.sondagem_de_passagem) &&
-        passagemEm.getTime() - Date.parse(m.created_at) <= ALCANCE_DA_SONDAGEM_MS,
-    );
-  if (!sondagem) {
-    const ultima = [...ordenadas].reverse().find(doCliente);
-    return { mensagemQueDisparou: ultima ? texto(ultima) : null, sondagem: null };
-  }
-  const em = Date.parse(sondagem.created_at);
-  const antes = ordenadas.filter((m) => Date.parse(m.created_at) < em && doCliente(m)).at(-1);
-  const resposta = ordenadas.find((m) => Date.parse(m.created_at) > em && doCliente(m));
-  return {
-    mensagemQueDisparou: antes ? texto(antes) : null,
-    sondagem: resposta
-      ? { respondeu: true, resposta: texto(resposta) }
-      : { respondeu: false, minutos: Math.max(0, Math.round((passagemEm.getTime() - em) / 60_000)) },
-  };
+    .find((m) => m.direction === "inbound" && texto(m) !== null);
+  return ultima ? texto(ultima) : null;
 }
 
 /**
@@ -424,7 +394,7 @@ export async function aplicaAvisoDePassagem(
       new Date(passagemEm.getTime() + FOLGA_DO_INSTANTE_DA_PASSAGEM_MS),
       MENSAGENS_LIDAS,
     );
-    const { mensagemQueDisparou, sondagem } = lerGatilhoESondagem(mensagens, passagemEm);
+    const mensagemQueDisparou = lerMensagemQueDisparou(mensagens, passagemEm);
     const avaliacao = await deps.avaliar({
       organizationId: orgId,
       conversationId: passagem.conversation_id,
@@ -439,7 +409,6 @@ export async function aplicaAvisoDePassagem(
       motivoCodigo: passagem.motivo_codigo,
       nomeDoCliente: contato.nome,
       mensagemQueDisparou,
-      sondagem,
       avaliacao: avaliacao.disponivel ? avaliacao : null,
       link,
     });
@@ -450,7 +419,6 @@ export async function aplicaAvisoDePassagem(
       motivoCodigo: passagem.motivo_codigo,
       nomeDoCliente: null,
       mensagemQueDisparou: null,
-      sondagem: null,
       avaliacao: null,
       link,
     });
