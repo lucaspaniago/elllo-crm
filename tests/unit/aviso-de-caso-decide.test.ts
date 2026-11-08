@@ -444,6 +444,19 @@ describe("aviso ao suporte — o que impede o envio", () => {
       // Quatro argumentos, como sempre: o texto livre não recebe opção nenhuma.
       expect(opcoes).toEqual([0]);
     });
+
+    it("fork elllo: com a resposta por WhatsApp ligada, o modelo leva o aviso INTEIRO numa mensagem", async () => {
+      // Em texto livre o aviso sairia em partes; pelo modelo aprovado sai como
+      // no upstream — uma mensagem só, com o comando dentro.
+      const montado = comModelo(MODELO);
+      montado.deps.db.carregaConfig = async () => ({ ...CFG, resposta_whatsapp_habilitada: true });
+      const r = await aplicaAvisoDeCaso(montado.deps, evento());
+      expect(r.status).toBe("ok");
+      expect(montado.estado.enviados).toHaveLength(1);
+      expect(montado.estado.enviados[0]!.body).toContain(`RESPONDER ${CASO}`);
+      expect(montado.opcoes).toEqual([{ modelo: MODELO }]);
+      expect(montado.estado.patches.at(-1)).toMatchObject({ status: "enviado", external_id: "modelo.ABC" });
+    });
   });
 
   it("canal PAUSADO pelo operador não envia: falha com o código próprio e avisa na Central (#2318)", async () => {
