@@ -126,6 +126,11 @@ export const LEITORES_DA_DESCRICAO: Record<string, string> = {
   "lib/agent-engine/edge/crm/send-message.ts": "agente que vê imagens (só cita a coluna)",
   "lib/ai/voz/texto-falavel.ts": "agente que vê imagens (só cita a coluna)",
   "workers/ai-sentiment-worker.pedidos.ts": "agente que vê imagens",
+  // Fork elllo: o trecho do aviso de passagem e a avaliação da IA (tolerância
+  // ao sentimento) usam a descrição só quando a mensagem não tem texto.
+  "lib/escalacao/avaliacao-da-passagem.ts": "agente que vê imagens",
+  "lib/escalacao/aviso-de-passagem-ao-suporte.ts": "agente que vê imagens",
+  "lib/escalacao/tolerancia-ao-sentimento.ts": "agente que vê imagens",
   "lib/followup/atendimento.ts": "agente que vê imagens | inscrição sem agente",
   "lib/mcp/conferencia-de-campos.ts": "agente que vê imagens | token vivo",
   "lib/mcp/media-derived-read.ts": "token vivo (só com o escopo messages:derived:read)",
