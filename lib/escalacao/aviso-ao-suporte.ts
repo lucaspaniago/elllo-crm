@@ -60,9 +60,10 @@ import type { Idioma } from "@/lib/i18n/idiomas";
 import { logger } from "@/lib/logger";
 
 import type { DestinoDoAviso } from "./destino-do-aviso";
+import { enviarParte, proximoInstante } from "./envio-em-partes";
 import { resolveDestinoDoEnvio, type MundoDoAviso } from "./membros-do-aviso";
 import type { AvaliacaoDoModelo, ModeloDoAviso } from "./modelo-do-aviso";
-import { montarAvisoDeCaso } from "./texto-do-aviso";
+import { montarAvisoDeCaso, montarPartesDoAvisoDeCaso } from "./texto-do-aviso";
 import { linkDoCaso, urlPublicaUsavel } from "./url-publica";
 import {
   FRASE_DO_ERRO_DO_AVISO,
@@ -168,6 +169,11 @@ export interface EntregaDoAviso {
   destino: string;
   status: StatusDaEntregaDeAviso | string;
   tentativas: number;
+  /**
+   * Quantas partes do aviso já saíram (fork elllo, migration 9001). Ausente =
+   * 0: o aviso inteiro numa parte só, o comportamento de antes do fork.
+   */
+  partes_enviadas?: number;
   created_at: string;
   updated_at: string;
 }
@@ -190,6 +196,8 @@ export interface PatchDaEntrega {
   external_id?: string | null;
   corpo_hash?: string | null;
   enviado_em?: string | null;
+  /** Fork elllo (migration 9001): o progresso do aviso em partes. */
+  partes_enviadas?: number;
 }
 
 export interface AvisoDb {
@@ -469,6 +477,9 @@ export async function aplicaAvisoDeCaso(
   // mandar para `""` faria o transporte recusar com um erro que ninguém lê).
   if (!destino.telefone) return skipped("sem_destino");
   const numeroDoAviso = destino.telefone;
+  // Fork elllo: o JID é a memória do corte da INGESTÃO do número da empresa;
+  // o celular de um vendedor não entra nele (#3803) — nem na parte 1 (14b).
+  const registraJid = destino.origem === "numero_da_empresa";
 
   // ── 5. REIVINDICA antes de tocar a rede ──────────────────────────────────
   const { criada, entrega } = await deps.db.reivindicaEntrega({
@@ -485,8 +496,17 @@ export async function aplicaAvisoDeCaso(
     if (entrega.tentativas >= TETO_ABSOLUTO_DE_TENTATIVAS) {
       return await condena(deps, orgId, caso, entrega, "indeterminado", null, agora);
     }
+    // A janela só protege a PRIMEIRA parte (fork elllo). Com partes já
+    // enviadas, a reentrada é o próprio aviso pedindo a parte seguinte — o
+    // `updated_at` é recente porque esta rotina acabou de gravar o progresso, e
+    // esperar 2 min entre as partes faria o comando chegar minutos depois do
+    // corpo. O que impede repetir parte é `partes_enviadas`, não a janela.
     const desdeOToque = agora.getTime() - Date.parse(entrega.updated_at);
-    if (desdeOToque >= 0 && desdeOToque < JANELA_DE_REIVINDICACAO_MS) {
+    if (
+      (entrega.partes_enviadas ?? 0) === 0 &&
+      desdeOToque >= 0 &&
+      desdeOToque < JANELA_DE_REIVINDICACAO_MS
+    ) {
       return retry(
         new Date(agora.getTime() + JANELA_DE_REIVINDICACAO_MS),
         "outra rodada está enviando este aviso",
@@ -615,10 +635,14 @@ export async function aplicaAvisoDeCaso(
     return await condena(deps, orgId, caso, entrega, "destino_invalido", null, agora);
   }
 
-  // ── 13. O texto ──────────────────────────────────────────────────────────
+  // ── 13. O texto — em partes quando a resposta por WhatsApp está ligada ──
+  //
+  // Desligado, `partes` é `[montarAvisoDeCaso(...)]`: uma mensagem só, o texto
+  // de sempre. Ligado, são sete (ver `montarPartesDoAvisoDeCaso`), e cada
+  // rodada do dreno manda UMA (`./envio-em-partes.ts`).
   const marca = await deps.db.marcaDaOrganizacao(orgId);
   const nome = contactId ? await deps.db.nomeDoContato(orgId, contactId) : null;
-  const body = montarAvisoDeCaso({
+  const textoDoAviso = {
     marca: marca.nome,
     idioma: marca.idioma,
     kind: caso.kind,
@@ -634,19 +658,80 @@ export async function aplicaAvisoDeCaso(
     // esse número: ensinar o comando a ele faria a resposta entrar no CRM como
     // mensagem comum. Para ele, o aviso diz para abrir o link (#3803).
     respostaWhatsappHabilitada: cfg.resposta_whatsapp_habilitada && destino.origem === "numero_da_empresa",
-  });
+  };
+  // Fork elllo: pelo modelo aprovado (conexão que só manda modelo, 9094) o
+  // aviso sai inteiro numa mensagem, como no upstream — sete modelos pagos e
+  // fatiados não ajudariam a copiar o comando.
+  const partes = modelo ? [montarAvisoDeCaso(textoDoAviso)] : montarPartesDoAvisoDeCaso(textoDoAviso);
+  const n = partes.length;
+  const ja = entrega.partes_enviadas ?? 0;
+  const corpoHash = createHash("sha256").update(partes.join("\n")).digest("hex");
 
-  // ── 14. O transporte ─────────────────────────────────────────────────────
+  // A opção foi DESLIGADA no meio da sequência: o aviso agora tem menos partes
+  // do que as que já saíram. O corpo e o link já estão no celular da equipe —
+  // reenviar o texto inteiro seria o aviso em dobro. Encerra como enviado.
+  if (ja >= n) {
+    return await concluiEnvio(deps, {
+      orgId,
+      channelSessionId,
+      caso,
+      entrega,
+      to,
+      agora,
+      tentativas,
+      n: ja,
+      enviadas: ja,
+      corpoHash,
+      externalId: undefined,
+      causaDoIncompleto: null,
+      registraJid,
+    });
+  }
+
+  // ── 14. O transporte — a parte `ja` e só ela ─────────────────────────────
+  //
+  // Uma falha vale para a parte da vez: as anteriores NUNCA são reenviadas.
   let externalId: string | null = null;
   try {
-    const resposta = modelo
-      ? await deps.transporte.envia(orgId, canal, to, body, { modelo })
-      : await deps.transporte.envia(orgId, canal, to, body);
+    const resposta = await enviarParte({
+      transporte: deps.transporte,
+      pacing: deps.pacing,
+      organizationId: orgId,
+      canal,
+      channelSessionId,
+      to,
+      partes,
+      jaEnviadas: ja,
+      agora,
+      ...(modelo ? { opcoes: { modelo } } : {}),
+    });
     externalId = resposta.externalId;
   } catch (err) {
     const causa = err instanceof Error ? err.message : String(err);
     if (tentativas >= TETO_DE_TENTATIVAS_DE_ENVIO) {
-      return await condena(deps, orgId, caso, entrega, "falha_no_envio", causa, agora);
+      if (ja === 0) {
+        return await condena(deps, orgId, caso, entrega, "falha_no_envio", causa, agora);
+      }
+      // Falha DEFINITIVA com partes já no celular da equipe: o aviso CHEGOU,
+      // incompleto. Condenar abriria um item na Central dizendo que o aviso
+      // não saiu — falso, e o `falhou` ainda tiraria do suporte o direito de
+      // responder (`fn_responder_caso_por_whatsapp` exige `enviado`). Fica
+      // `enviado`, com o código e o detalhe dizendo onde parou.
+      return await concluiEnvio(deps, {
+        orgId,
+        channelSessionId,
+        caso,
+        entrega,
+        to,
+        agora,
+        tentativas,
+        n,
+        enviadas: ja,
+        corpoHash,
+        externalId: undefined,
+        causaDoIncompleto: causa,
+        registraJid,
+      });
     }
     await deps.db.atualizaEntrega(orgId, entrega.id, {
       tentativas,
@@ -656,37 +741,130 @@ export async function aplicaAvisoDeCaso(
     return retry(new Date(agora.getTime() + ADIAMENTO_DO_CANAL_MS), "envio recusado");
   }
 
-  // ── 15. Saiu ─────────────────────────────────────────────────────────────
-  //
-  // Daqui para baixo TUDO falha ABERTO: a mensagem já está no celular de
-  // alguém, e derrubar o handler depois do envio produziria aviso em dobro na
-  // rodada seguinte. Cada passo que falhar vira log, nunca exceção.
+  // ── 14b. Parte que NÃO é a última: grava o progresso e volta depois ──────
+  if (ja + 1 < n) {
+    // `tentativas: 0` — o teto de tentativas vale POR PARTE: a falha da parte
+    // 2, já superada, não pode encurtar a paciência com a parte 5.
+    await deps.db.atualizaEntrega(orgId, entrega.id, {
+      partes_enviadas: ja + 1,
+      tentativas: 0,
+      erro_codigo: null,
+      erro_detalhe: null,
+      ...(ja === 0 ? { external_id: externalId } : {}),
+    });
+    if (ja === 0 && registraJid) {
+      // O JID na PRIMEIRA parte: é ele que faz o corte da ingestão reconhecer o
+      // número da equipe em modo privacidade — se ela responder antes da
+      // última parte, a resposta não pode virar conversa de cliente.
+      try {
+        await deps.db.registraJidDoAviso(orgId, to);
+      } catch (err) {
+        logger.warn("[aviso-de-caso] JID do destino não registrado", {
+          organizationId: orgId,
+          causa: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    const proxima = await proximoInstante(deps.pacing, orgId, channelSessionId, agora);
+    return retry(proxima, `parte ${ja + 1}/${n}`);
+  }
+
+  // ── 15. Saiu (a última parte, ou a única) ────────────────────────────────
+  return await concluiEnvio(deps, {
+    orgId,
+    channelSessionId,
+    caso,
+    entrega,
+    to,
+    agora,
+    tentativas,
+    n,
+    enviadas: n,
+    corpoHash,
+    // Com n > 1 o id da PARTE 1 já foi gravado em 14b e fica.
+    externalId: n > 1 ? undefined : externalId,
+    causaDoIncompleto: null,
+    registraJid,
+  });
+}
+
+/**
+ * O passo 15: grava `enviado`, roda o que vem depois do envio e audita — UMA
+ * vez por aviso, seja ele de uma parte, de sete, ou interrompido no meio.
+ *
+ * Daqui para baixo TUDO falha ABERTO: a mensagem já está no celular de
+ * alguém, e derrubar o handler depois do envio produziria aviso em dobro na
+ * rodada seguinte. Cada passo que falhar vira log, nunca exceção.
+ */
+async function concluiEnvio(
+  deps: AvisoDeps,
+  e: {
+    orgId: string;
+    channelSessionId: string;
+    caso: CasoDoAviso;
+    entrega: EntregaDoAviso;
+    to: string;
+    agora: Date;
+    tentativas: number;
+    /** Quantas partes o aviso tem. */
+    n: number;
+    /** Quantas saíram — menos que `n` só quando o aviso parou no meio. */
+    enviadas: number;
+    corpoHash: string;
+    /** `undefined` = não mexe: com n > 1 o id da parte 1 já está na linha. */
+    externalId: string | null | undefined;
+    /** Preenchida quando o transporte desistiu no meio da sequência. */
+    causaDoIncompleto: string | null;
+    /** Só o número da empresa entra no corte da ingestão (#3803). */
+    registraJid: boolean;
+  },
+): Promise<DesfechoDoAviso> {
+  const { orgId, channelSessionId, caso, entrega, agora, tentativas, n, enviadas } = e;
+  const incompleto = enviadas < n;
   await deps.db.atualizaEntrega(orgId, entrega.id, {
     status: "enviado",
     tentativas,
-    erro_codigo: null,
-    erro_detalhe: null,
-    external_id: externalId,
-    // O TEXTO NUNCA É GUARDADO — só o resumo criptográfico dele.
-    corpo_hash: createHash("sha256").update(body).digest("hex"),
+    erro_codigo: incompleto ? "falha_no_envio" : null,
+    erro_detalhe: incompleto
+      ? `incompleto ${enviadas}/${n}: ${e.causaDoIncompleto ?? ""}`.slice(0, 300)
+      : null,
+    // Com uma parte só a linha fica como antes do fork (`partes_enviadas` 0).
+    ...(n > 1 ? { partes_enviadas: enviadas } : {}),
+    ...(e.externalId !== undefined ? { external_id: e.externalId } : {}),
+    // O TEXTO NUNCA É GUARDADO — só o resumo criptográfico dele (de TODAS as
+    // partes, unidas por quebra de linha; com uma parte só é o hash de sempre).
+    corpo_hash: e.corpoHash,
     enviado_em: agora.toISOString(),
   });
 
-  await depoisDoEnvio(deps, orgId, channelSessionId, caso, entrega, to, agora, {
+  // O pacing de cada parte já foi registrado por `enviarParte`.
+  await depoisDoEnvio(deps, orgId, channelSessionId, caso, entrega, e.to, agora, {
     // O JID é a memória do corte da INGESTÃO do número da empresa. Registrar o
     // JID de um celular de vendedor faria as mensagens DELE deixarem de virar
     // atendimento — efeito que ninguém pediu ao escolher "avisar o responsável".
-    registraJid: destino.origem === "numero_da_empresa",
+    registraJid: e.registraJid,
+    pacingJaRegistrado: true,
   });
 
   deps.audita({
     action: "ai.case_alert_sent",
     organizationId: orgId,
     caseId: caso.id,
-    metadata: { entrega_id: entrega.id, canal: channelSessionId, tentativas },
+    metadata: {
+      entrega_id: entrega.id,
+      canal: channelSessionId,
+      tentativas,
+      ...(n > 1 ? { partes: n } : {}),
+      ...(incompleto ? { incompleto: `${enviadas}/${n}` } : {}),
+    },
   });
 
-  return { status: "ok", detail: `enviado canal=${channelSessionId} tentativas=${tentativas}` };
+  return {
+    status: "ok",
+    detail: incompleto
+      ? `enviado incompleto ${enviadas}/${n} canal=${channelSessionId}`
+      : `enviado canal=${channelSessionId} tentativas=${tentativas}`,
+  };
 }
 
 /**
@@ -706,16 +884,18 @@ async function depoisDoEnvio(
   entrega: EntregaDoAviso,
   to: string,
   agora: Date,
-  opcoes: { registraJid: boolean },
+  opcoes: { registraJid: boolean; pacingJaRegistrado?: boolean },
 ): Promise<void> {
-  try {
-    await deps.pacing.registraEnvio(orgId, channelSessionId, agora);
-  } catch (err) {
-    logger.warn("[aviso-de-caso] envio não contabilizado no pacing", {
-      organizationId: orgId,
-      channelSessionId,
-      causa: err instanceof Error ? err.message : String(err),
-    });
+  if (!opcoes.pacingJaRegistrado) {
+    try {
+      await deps.pacing.registraEnvio(orgId, channelSessionId, agora);
+    } catch (err) {
+      logger.warn("[aviso-de-caso] envio não contabilizado no pacing", {
+        organizationId: orgId,
+        channelSessionId,
+        causa: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
   if (opcoes.registraJid) {
     try {
@@ -881,7 +1061,7 @@ export function createSupabaseAvisoDb(admin: SupabaseClient): AvisoDb {
           channel_session_id: channelSessionId,
           status: "pendente",
         })
-        .select("id, organization_id, case_id, destino, status, tentativas, created_at, updated_at")
+        .select("id, organization_id, case_id, destino, status, tentativas, partes_enviadas, created_at, updated_at")
         .maybeSingle();
 
       if (!error) return { criada: true, entrega: (data as EntregaDoAviso | null) ?? null };
@@ -891,7 +1071,7 @@ export function createSupabaseAvisoDb(admin: SupabaseClient): AvisoDb {
 
       const relida = await admin
         .from("entregas_de_aviso_de_caso")
-        .select("id, organization_id, case_id, destino, status, tentativas, created_at, updated_at")
+        .select("id, organization_id, case_id, destino, status, tentativas, partes_enviadas, created_at, updated_at")
         .eq("organization_id", organizationId)
         .eq("case_id", caseId)
         .eq("destino", destino)

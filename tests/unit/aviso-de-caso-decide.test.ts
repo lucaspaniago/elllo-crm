@@ -444,6 +444,19 @@ describe("aviso ao suporte — o que impede o envio", () => {
       // Quatro argumentos, como sempre: o texto livre não recebe opção nenhuma.
       expect(opcoes).toEqual([0]);
     });
+
+    it("fork elllo: com a resposta por WhatsApp ligada, o modelo leva o aviso INTEIRO numa mensagem", async () => {
+      // Em texto livre o aviso sairia em partes; pelo modelo aprovado sai como
+      // no upstream — uma mensagem só, com o comando dentro.
+      const montado = comModelo(MODELO);
+      montado.deps.db.carregaConfig = async () => ({ ...CFG, resposta_whatsapp_habilitada: true });
+      const r = await aplicaAvisoDeCaso(montado.deps, evento());
+      expect(r.status).toBe("ok");
+      expect(montado.estado.enviados).toHaveLength(1);
+      expect(montado.estado.enviados[0]!.body).toContain(`RESPONDER ${CASO}`);
+      expect(montado.opcoes).toEqual([{ modelo: MODELO }]);
+      expect(montado.estado.patches.at(-1)).toMatchObject({ status: "enviado", external_id: "modelo.ABC" });
+    });
   });
 
   it("canal PAUSADO pelo operador não envia: falha com o código próprio e avisa na Central (#2318)", async () => {
@@ -651,9 +664,27 @@ describe("aviso ao suporte — RESPONDER/PERGUNTAR só para o número da empresa
 
   it("aviso para o número da empresa continua ensinando o comando", async () => {
     const { deps, estado } = comResposta("fixo");
-    const r = await aplicaAvisoDeCaso(deps, evento());
+    // Fork elllo: com a resposta por WhatsApp ligada o aviso sai em partes, uma
+    // por rodada do dreno (`envio-em-partes.ts`), e o comando vem numa delas.
+    // O dublê não grava o progresso na linha; aqui ele grava, para as rodadas
+    // seguirem da parte certa.
+    let linha: Record<string, unknown> | null = null;
+    const reivindica = deps.db.reivindicaEntrega.bind(deps.db);
+    deps.db.reivindicaEntrega = async (entrada) => {
+      const res = await reivindica(entrada);
+      linha = res.entrega as unknown as Record<string, unknown>;
+      return res;
+    };
+    const atualiza = deps.db.atualizaEntrega.bind(deps.db);
+    deps.db.atualizaEntrega = async (org, id, patch) => {
+      await atualiza(org, id, patch);
+      if (linha) Object.assign(linha, patch);
+    };
+    let r = await aplicaAvisoDeCaso(deps, evento());
+    for (let i = 0; i < 10 && r.status === "retry"; i++) r = await aplicaAvisoDeCaso(deps, evento());
     expect(r.status).toBe("ok");
-    expect(estado.enviados[0]?.to).toBe("5531998966398@c.us");
-    expect(estado.enviados[0]?.body).toContain(`RESPONDER ${CASO}`);
+    expect(estado.enviados.length).toBeGreaterThan(1);
+    for (const m of estado.enviados) expect(m.to).toBe("5531998966398@c.us");
+    expect(estado.enviados.map((m) => m.body).join("\n")).toContain(`RESPONDER ${CASO}`);
   });
 });
