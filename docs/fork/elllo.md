@@ -117,6 +117,42 @@ Arquivos do upstream tocados por A (pequenos): `workers/ai-handoff-from-sentimen
 (chama a tolerância antes do `triggerHandoff`), `lib/event-log/register-handlers.ts`,
 `lib/i18n/dicionario.ts` (um spread de `lib/i18n/aviso-de-passagem.ts`).
 
+### C — silêncio de propaganda (disparo automático de empresa)
+
+No ar desde 09/11/2026 (21:04 UTC) como `elllo-v1.102.0-silencio1` (app e worker; scheduler segue
+`elllo-v1.102.0`), autorizado pelo Lucas fora da rotina semanal. PR #4 no fork.
+
+Caso real (07/11/2026): uma empresa mandou um **modelo de marketing** do WhatsApp
+Business ao número do dono. O CRM gravou uma imagem sem texto, abriu contato,
+conversa e card, e a IA respondeu a um robô.
+
+- Detecção (pura): `lib/waha/disparo-automatico.ts`. É disparo quando o
+  `_data.message` (desembrulhado de `ephemeralMessage`, `viewOnceMessage*`,
+  `editedMessage`…) tem `templateMessage`, `interactiveMessage`,
+  `buttonsMessage` ou `listMessage`. As respostas (`buttonsResponseMessage`,
+  `templateButtonReplyMessage`, `listResponseMessage`,
+  `interactiveResponseMessage`) são uma pessoa tocando num botão e **não**
+  contam. WEBJS é tolerado por `type`/`_data.isFromTemplate`, sem medição real.
+- Sempre: o corpo vazio vira o texto legível do modelo (conteúdo, rodapé e
+  botões numa linha `[SIM, CUPOM] [ARQUIVAR]`) e a mensagem ganha
+  `metadata.disparo_automatico = { tipo, empresa }` (`empresa` =
+  `verifiedBizName`; `texto` só quando o `body` do WAHA não é o texto inteiro).
+  Os efeitos (opt-out, campanha, origem) continuam recebendo o `texto` de sempre.
+- Silêncio (`lib/waha/silencio-de-disparo.ts`), quando o botão
+  `settings.crm.silenciar_disparos_automaticos` não é `false` (padrão LIGADO,
+  sem tela) **e** nunca houve mensagem de saída nossa (não falhada) ao contato
+  **e** o contato não é pessoal: `aplicarEfeitosPosEntrada` não roda (sem card,
+  sem `ai_agent.dispatch_requested`); o contato ganha a etiqueta `propaganda`
+  (`fn_contato_adicionar_etiquetas` + `contact.tag_added`); a conversa é
+  encerrada (`fn_service_status` → `closed`, soltando antes o atendente); a
+  demanda do Radar do episódio fecha como `nao_procede`; card aberto anterior vai
+  para a etapa de perdido por `encerraDemanda` (motivo `other`) — funil sem etapa
+  de perdido deixa o card onde está, com log. Nenhum aviso.
+- Upstream tocado: `lib/waha/ingest.ts` (`handleInbound`, linhas marcadas
+  "Fork elllo"). Testes: `lib/waha/disparo-automatico.test.ts`,
+  `silencio-de-disparo.test.ts`, `ingest-disparo-automatico.test.ts` (fixture
+  anonimizada em `lib/waha/__fixtures__/disparo-template-noweb-2026.7.2.json`).
+
 ## Migrations do fork (faixa 9xxx)
 
 | Arquivo | O quê |
@@ -143,14 +179,18 @@ Os três blocos estão no `supabase/baseline.sql` **logo depois do bloco da 0687
      acrescentar um passo de prontidão do canal (8–12), espelhe-o em
      `aplicaAvisoDePassagem` (comentário "espelho dos passos 8–12; conferir ao
      rebasear").
+   - `lib/waha/ingest.ts`: em `handleInbound`, as linhas "Fork elllo" (o `corpo`
+     com o texto do disparo e o `silenciarDisparoAutomatico` antes de
+     `aplicarEfeitosPosEntrada`).
 3. Se o upstream mudar `ERROS_DA_ENTREGA_DE_AVISO`, o CHECK de
    `entregas_de_aviso_de_passagem.erro_codigo` precisa de uma migration 9xxx nova —
    `tests/invariants/aviso-de-passagem-ao-suporte.test.ts` reprova a divergência.
 4. Rode os testes do fork: `tests/unit/aviso-de-caso-em-partes.test.ts`,
    `aviso-de-caso-envio-em-partes.test.ts`, `texto-do-aviso-de-passagem.test.ts`,
    `avaliacao-da-passagem.test.ts`, `aviso-de-passagem-ao-suporte.test.ts`,
-   `tolerancia-ao-sentimento.test.ts`, `handoff-do-clima-com-tolerancia.test.ts`
-   e `pnpm test:db`.
+   `tolerancia-ao-sentimento.test.ts`, `handoff-do-clima-com-tolerancia.test.ts`,
+   `lib/waha/disparo-automatico.test.ts`, `lib/waha/silencio-de-disparo.test.ts`,
+   `lib/waha/ingest-disparo-automatico.test.ts` e `pnpm test:db`.
 
 ## Pendências conhecidas
 
@@ -160,4 +200,9 @@ Os três blocos estão no `supabase/baseline.sql` **logo depois do bloco da 0687
 - `entregas_de_aviso_de_passagem` não tem política de retenção (a de
   `entregas_de_aviso_de_caso` tem, em `lib/retencao/politica.ts`).
 - Não há tela para `aviso_de_passagem_ligado` e `sondagem_minutos` (a janela da
-  tolerância): mudam por SQL.
+  tolerância): mudam por SQL. Idem `settings.crm.silenciar_disparos_automaticos`.
+- Silêncio de propaganda: o worker legado (`workers/ai-response-worker.ts`, só
+  para `rag_bot` sem versão publicada) lê `message.received` e não passa por ele.
+  O push de mensagem nova (`message.received`, emitido pelo banco) segue como em
+  toda entrada. A importação de histórico (`lib/channels/historico/`) não lê o
+  texto do modelo.

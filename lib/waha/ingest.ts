@@ -56,6 +56,8 @@ import {
   type ChatIdentidade,
 } from "@/lib/escalacao/numero-interno-de-aviso";
 import { consumirRespostaDoSuporteNoWhatsApp } from "@/lib/escalacao/resposta-whatsapp-ao-caso";
+import { corpoComDisparo, detectarDisparoAutomatico, metadataDoDisparo } from "@/lib/waha/disparo-automatico";
+import { silenciarDisparoAutomatico } from "@/lib/waha/silencio-de-disparo";
 
 export type Admin = ReturnType<typeof createAdminClient>;
 
@@ -1166,7 +1168,12 @@ async function handleInbound(
   if (!p.id) return;
   // WAHA emite eventos vazios p/ status/read-receipt/presence — não viram mensagem.
   const texto = bodyOf(p);
-  if (!texto && !mediaUrlOf(p) && !p.hasMedia) return;
+  // Fork elllo — disparo automático de empresa: o texto do modelo vira o corpo
+  // legível da mensagem (`lib/waha/disparo-automatico.ts`). `texto` segue o de
+  // sempre para os efeitos (opt-out, campanha, origem).
+  const disparo = detectarDisparoAutomatico(p);
+  const corpo = corpoComDisparo(texto, disparo);
+  if (!corpo && !mediaUrlOf(p) && !p.hasMedia) return;
   // Daqui para baixo era para ser uma mensagem de verdade: se o chat não é
   // endereçável, PERDEMOS uma — e isso precisa ser contável. O aviso fica depois
   // das guardas acima de propósito; antes delas, todo evento de presença viraria
@@ -1243,7 +1250,7 @@ async function handleInbound(
       direction: "inbound",
       status: "delivered",
       ack: p.ack ?? null,
-      body: texto,
+      body: corpo,
       media_url: mediaUrlOf(p),
       media_mime: mediaMimeOf(p),
       sent_via: "external_device",
@@ -1268,6 +1275,7 @@ async function handleInbound(
         // gravada vazia, e gravação é de linha NOVA (o INSERT é o único caminho
         // que escreve `metadata` aqui), então nada do que já está é sobrescrito.
         ...(nomeDoArquivo ? { media_filename: nomeDoArquivo } : {}),
+        ...metadataDoDisparo(disparo, corpo),
       },
     })
     .select("id")
@@ -1318,7 +1326,7 @@ async function handleInbound(
     return;
   }
 
-  await markConversation(admin, session.organization_id, conversationId, "inbound", previewFromMessage(p), dataDoTimestamp(p.timestamp, now));
+  await markConversation(admin, session.organization_id, conversationId, "inbound", previaDaMensagem(corpo, resolveMessageType(p)), dataDoTimestamp(p.timestamp, now));
 
   await audit({
     action: "message.received",
@@ -1339,7 +1347,18 @@ async function handleInbound(
   // `lib/channels/pos-entrada.ts`, junto com o motivo de cada posição. O
   // comportamento aqui é o MESMO de antes, campo a campo — o que mudou é quem o
   // executa.
-  await aplicarEfeitosPosEntrada(admin, {
+  //
+  // Fork elllo — propaganda de empresa a quem nunca escrevemos não chega aos
+  // efeitos (sem card, sem turno da IA): `lib/waha/silencio-de-disparo.ts`.
+  const silenciado = await silenciarDisparoAutomatico(admin, {
+    organizationId: session.organization_id,
+    contactId,
+    conversationId,
+    messageId: insertedMessage?.id ?? null,
+    disparo,
+    requestId,
+  });
+  if (!silenciado) await aplicarEfeitosPosEntrada(admin, {
     organizationId: session.organization_id,
     contactId,
     conversationId,

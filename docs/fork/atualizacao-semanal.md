@@ -154,6 +154,14 @@ Se ele pedir mudança, volte à fase 3/4 com o ajuste e reenvie o relatório.
 - WAHA entregando ao app: `docker logs deskcomm-waha-1` com `POST request was sent with status code: 200`.
 - Uma mensagem recebida depois da troca foi processada (última `messages` inbound com turno/registro).
 - `systemctl is-active familia-broker`, `docker ps` com o `hermes` de pé.
+- **Agenda da Helô do Hermes** (mensageiro `/opt/mensageiro-broker`, desde 09/11/2026). Ele lê do CRM o token Google
+  do Lucas (`calendar_connections.oauth_access_token_encrypted`, `token_expires_at`), decifra com
+  `fn_decrypt_oauth(ciphertext)` e chama o MCP (`crm_find_free_slots`, `crm_confirm_appointment`,
+  `crm_cancel_appointment`, `crm_reschedule_appointment`). Confira que continuam iguais:
+  `sudo python3 -B /opt/mensageiro-broker/mensageiro_broker.py --cli agenda_ver '{}'` lista a agenda de hoje com
+  títulos (sem `Recusa`), e `... --cli agenda_livre '{"dias":3}'` devolve horários. Se o autor mudou a coluna, a
+  função ou as ferramentas, a agenda falha fechada; ajuste o mensageiro (`GoogleDoLucas`/`AgendaCRM`) antes de
+  fechar a semana.
 - Se algo estiver errado e não for trivial: volte.
 
 ## Voltar atrás

@@ -1,0 +1,35 @@
+{
+  "id": "false_100000000000001@lid_5EEE00000000000001",
+  "from": "100000000000001@lid",
+  "fromMe": false,
+  "body": null,
+  "hasMedia": true,
+  "timestamp": 1762520000,
+  "_data": {
+    "key": {
+      "remoteJid": "100000000000001@lid",
+      "remoteJidAlt": "5511900000001@s.whatsapp.net",
+      "fromMe": false,
+      "id": "5EEE00000000000001"
+    },
+    "broadcast": false,
+    "verifiedBizName": "Rádio Exemplo Indoor",
+    "message": {
+      "templateMessage": {
+        "templateId": "1000000000000001",
+        "contextInfo": { "dataSharingContext": { "dataSharingFlags": 2 } },
+        "hydratedTemplate": {
+          "imageMessage": { "mimetype": "image/jpeg", "fileLength": 155030, "height": 1600, "width": 900 },
+          "hydratedContentText": "*ESQUENTA BLACK FRIDAY – RÁDIO ACADEMIA*\n\nVocê foi selecionado para receber um dos *10 cupons exclusivos de 50% de desconto*...",
+          "hydratedFooterText": "Responda SIM, CUPOM abaixo!",
+          "hydratedButtons": [
+            { "index": 0, "quickReplyButton": { "displayText": "SIM, CUPOM", "id": "SIM, CUPOM" } },
+            { "index": 1, "quickReplyButton": { "displayText": "ARQUIVAR", "id": "ARQUIVAR" } }
+          ],
+          "templateId": "1000000000000001"
+        }
+      },
+      "messageContextInfo": { "deviceListMetadataVersion": 2 }
+    }
+  }
+}
