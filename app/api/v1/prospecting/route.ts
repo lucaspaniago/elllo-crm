@@ -12,11 +12,17 @@ import type { ChannelProvider } from "@/lib/channels/types";
 import { ProspectingError } from "@/lib/prospecting/provider";
 import { campaignConfigSchema, prospectingInputSchema, type Prospect } from "@/lib/prospecting/schema";
 import { configPadraoDaOrganizacao } from "@/lib/prospecting/config-padrao";
+import { provedorExigeCredencialDaOrganizacao } from "@/lib/prospecting/provedor";
 import { auditarSite } from "@/lib/prospecting/site-fetch";
 import { gravarPrevia } from "@/lib/prospecting/previa";
 import { gerarPreviaDoCandidato } from "@/lib/prospecting/previa-gerar";
 import { enriquecerSitesPendentes } from "@/lib/prospecting/site-enrich";
 import { lerPersonalizacao } from "@/lib/prospecting/personalizar";
+import {
+  completarLinksDoContato,
+  contatoPrecisaDeLinks,
+  linksDoCandidato,
+} from "@/lib/prospecting/links-do-candidato";
 import {
   activateCampaign,
   adjustPace,
@@ -42,6 +48,7 @@ const ORDENACAO_POR_SCORE = `(least(greatest(coalesce((p.data->>'rating')::float
     * case when coalesce(c.config->'ofertas'->>0, 'site') like '%automacao%' then 0.4 else 0.3 end
   + case when coalesce((p.data->'site'->>'provisorio')::boolean, false) then 18
     else case coalesce(p.data->'site'->>'classe', '')
+      when 'nao-medido' then 18
       when 'sem-site' then case when coalesce(c.config->'ofertas'->>0, 'site') like '%automacao%' then 20 else 30 end
       when 'agregador' then case when coalesce(c.config->'ofertas'->>0, 'site') like '%automacao%' then 20 else 30 end
       when 'site-ruim' then case when coalesce(c.config->'ofertas'->>0, 'site') like '%automacao%' then 14 else 22 end
@@ -114,12 +121,19 @@ export async function GET(req: NextRequest) {
     const previaPadrao = await configPadraoDaOrganizacao(db, org)
       .then((p) => p !== null)
       .catch(() => false);
+    // `configured` libera a busca na tela. O `local-http` (#2942) não grava chave
+    // por organização (a URL é da instalação), então a linha em
+    // prospecting_settings nunca existe para ele. Escolha desconhecida cai na
+    // régua antiga: a busca falha fechado no POST, a lista não cai aqui.
+    const configured =
+      !!settings.rows.length ||
+      !(await provedorExigeCredencialDaOrganizacao(db, org).catch(() => true));
     const personalizacao = lerPersonalizacao(
       (organizacao.rows[0] as { settings?: unknown } | undefined)?.settings,
     );
     return ok(
       {
-        configured: !!settings.rows.length,
+        configured,
         campaigns: campaigns.rows,
         candidates: candidates.rows,
         previa_padrao: previaPadrao,
@@ -368,6 +382,49 @@ export async function POST(req: NextRequest) {
         enriquecidos: enriquecido.enriquecidos,
         classes: enriquecido.classes,
       };
+    } else if (body.action === "completar_fichas") {
+      // "Completar fichas" (spec 26 §3.3): para cada candidato da campanha que já tem
+      // contato, acrescenta à ficha os links que faltam (o que a pessoa digitou fica).
+      // Teto de 100 GRAVAÇÕES por clique: quem já está completo não escreve e não conta
+      // no teto, então clicar de novo avança. `faltam` = quem ainda precisa depois do
+      // teto, medido só por leitura (mesmo predicado da escrita). Ordem por id: a mesma
+      // em todo clique. Toda leitura e escrita filtra `organization_id` (fonte: a sessão).
+      const TETO_DE_GRAVACOES = 100;
+      const resumo = await withProspectingLock(pool, org, async (db) => {
+        const candidatos = (
+          await db.query<{ contact_id: string; data: Prospect }>(
+            "select contact_id, data from prospecting_candidates where organization_id=$1 and campaign_id=$2 and contact_id is not null order by id",
+            [org, body.id],
+          )
+        ).rows;
+        let completadas = 0;
+        let jaCompletas = 0;
+        let semLinks = 0;
+        let faltam = 0;
+        for (const candidato of candidatos) {
+          const links = linksDoCandidato(candidato.data);
+          if (Object.keys(links).length === 0) {
+            semLinks++;
+            continue;
+          }
+          if (completadas >= TETO_DE_GRAVACOES) {
+            if (await contatoPrecisaDeLinks(db, org, candidato.contact_id, links)) faltam++;
+            else jaCompletas++;
+            continue;
+          }
+          if (await completarLinksDoContato(db, org, candidato.contact_id, links)) completadas++;
+          else jaCompletas++;
+        }
+        return { completadas, ja_completas: jaCompletas, sem_links: semLinks, faltam };
+      });
+      result = resumo;
+      // Sem endereços na trilha: só contagens (o log não carrega dado de contato).
+      auditMetadata = {
+        operation: body.action,
+        completadas: resumo.completadas,
+        ja_completas: resumo.ja_completas,
+        sem_links: resumo.sem_links,
+      };
     } else {
       result = await withProspectingLock(pool, org, async (db) => {
         const c = (
@@ -388,7 +445,7 @@ export async function POST(req: NextRequest) {
         )
           throw new ProspectingError("Pause a outra campanha antes de retomar.", 409);
         await db.query(
-          "update prospecting_campaigns set status='running',error=null,next_send_at=greatest(next_send_at,now()+interval '1 minute'),updated_at=now() where organization_id=$1 and id=$2",
+          "update prospecting_campaigns set status='running',error=null,channel_down_since=null,next_send_at=greatest(next_send_at,now()+interval '1 minute'),updated_at=now() where organization_id=$1 and id=$2",
           [org, body.id],
         );
         return { resumed: true };
