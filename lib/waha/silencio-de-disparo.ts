@@ -206,10 +206,10 @@ export function portaDoSupabase(admin: Admin, requestId?: string): PortaDoSilenc
       return pessoal;
     },
 
-    async etiquetarContato(org, contato, etiqueta) {
+    async etiquetarContato(org, contatoId, etiqueta) {
       const { data, error } = await admin.rpc("fn_contato_adicionar_etiquetas", {
         p_org: org,
-        p_contato: contato,
+        p_contato: contatoId,
         p_etiquetas: [etiqueta],
       });
       if (error) throw new Error(error.message);
@@ -217,12 +217,12 @@ export function portaDoSupabase(admin: Admin, requestId?: string): PortaDoSilenc
       const adicionadas = Array.isArray(retorno?.adicionadas) ? retorno.adicionadas.map(String) : [];
       if (!adicionadas.length) return;
       const tags = Array.isArray(retorno?.tags) ? retorno.tags.map(String) : adicionadas;
-      // O mesmo evento da ação `add_tag` e da edição do contato: a regra de
+      // O mesmo evento da ação `add_tag` e da edição do contatoId: a regra de
       // automação do cliente que olha a etiqueta enxerga esta também.
       await admin.rpc("emit_event", {
         p_event_type: "contact.tag_added",
         p_entity_kind: "contact",
-        p_entity_id: contato,
+        p_entity_id: contatoId,
         p_payload: { added_tags: adicionadas, tags, service_origin: null },
         p_metadata: { source: "disparo_automatico", request_id: pedido },
         p_organization_id: org,
@@ -231,18 +231,18 @@ export function portaDoSupabase(admin: Admin, requestId?: string): PortaDoSilenc
         action: "contact.tags_changed",
         organizationId: org,
         resourceType: "contact",
-        resourceId: contato,
+        resourceId: contatoId,
         requestId: pedido,
         metadata: { added: adicionadas, via: "disparo_automatico", actor_type: ATOR.type, actor_id: ATOR.id },
       });
     },
 
-    async encerrarConversa(org, conversa) {
+    async encerrarConversa(org, conversaId) {
       const { data, error } = await admin
         .from("conversations")
         .select("id, status, assigned_to_user_id, current_demanda_id")
         .eq("organization_id", org)
-        .eq("id", conversa)
+        .eq("id", conversaId)
         .maybeSingle();
       if (error) throw new Error(error.message);
       const conv = data as {
@@ -254,12 +254,12 @@ export function portaDoSupabase(admin: Admin, requestId?: string): PortaDoSilenc
 
       if (!ESTADOS_ENCERRADOS.has(conv.status)) {
         // Soltar ANTES de fechar: o release de `fn_conversation_assign` grava
-        // `open`, e gravar `open` numa conversa já fechada é reabertura (a mesma
+        // `open`, e gravar `open` numa conversaId já fechada é reabertura (a mesma
         // ordem de `app/api/v1/contacts/[id]/personal/route.ts`).
         if (conv.assigned_to_user_id) {
           const { error: soltaErro } = await admin.rpc("fn_conversation_assign", {
             p_organization_id: org,
-            p_conversation_id: conversa,
+            p_conversation_id: conversaId,
             p_to_user_id: null as unknown as string,
             p_reason: "release",
             p_enforce_expected: false,
@@ -268,7 +268,7 @@ export function portaDoSupabase(admin: Admin, requestId?: string): PortaDoSilenc
         }
         const { error: fechaErro } = await admin.rpc("fn_service_status", {
           p_org: org,
-          p_conversation: conversa,
+          p_conversation: conversaId,
           p_status: "closed",
         });
         if (fechaErro) throw new Error(fechaErro.message);
@@ -276,14 +276,14 @@ export function portaDoSupabase(admin: Admin, requestId?: string): PortaDoSilenc
           action: "conversation.closed",
           organizationId: org,
           resourceType: "conversation",
-          resourceId: conversa,
+          resourceId: conversaId,
           requestId: pedido,
           metadata: { via: "disparo_automatico", actor_type: ATOR.type, actor_id: ATOR.id },
         });
       }
 
       // A demanda do Radar que a mensagem abriu (o gatilho da `messages` abre
-      // uma por episódio). Fechar a conversa só lhe dá um próximo passo; sem
+      // uma por episódio). Fechar a conversaId só lhe dá um próximo passo; sem
       // isto ela fica viva pedindo "registrar o desfecho" de uma propaganda.
       if (!conv.current_demanda_id) return;
       const { data: demanda, error: dErro } = await admin
