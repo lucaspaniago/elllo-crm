@@ -119,6 +119,9 @@ Arquivos do upstream tocados por A (pequenos): `workers/ai-handoff-from-sentimen
 
 ### C — silêncio de propaganda (disparo automático de empresa)
 
+No ar desde 09/11/2026 (21:04 UTC) como `elllo-v1.102.0-silencio1` (app e worker; scheduler segue
+`elllo-v1.102.0`), autorizado pelo Lucas fora da rotina semanal. PR #4 no fork.
+
 Caso real (07/11/2026): uma empresa mandou um **modelo de marketing** do WhatsApp
 Business ao número do dono. O CRM gravou uma imagem sem texto, abriu contato,
 conversa e card, e a IA respondeu a um robô.
