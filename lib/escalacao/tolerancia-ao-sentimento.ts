@@ -153,6 +153,13 @@ export const HIPOTESES_COM_NOTA: ReadonlySet<HipoteseDaPassagem> = new Set<Hipot
 export const ADIAMENTO_DA_DISPUTA_MS = 5_000;
 /** Quantos eventos contados a chave lembra (a repetição é sempre recente). */
 export const TETO_DE_EVENTOS_CONTADOS = 10;
+/**
+ * A etiqueta que o silêncio de propaganda põe no contato (`ETIQUETA_DE_PROPAGANDA`
+ * de `silenciarDisparoAutomatico`). Copiada, e não importada: o módulo do
+ * silêncio mora na pasta do provedor, e a cerca de canais não deixa esta pasta
+ * importá-la. Um teste do silêncio confere que as duas são a mesma.
+ */
+export const ETIQUETA_DO_SILENCIO = "propaganda";
 /** O motivo da passagem que esta regra segura. */
 const MOTIVO: MotivoDaPassagem = "low_sentiment";
 /** Quanto a nota espera pela resposta da IA antes de dizer que ela não respondeu. */
@@ -777,7 +784,6 @@ async function lerPropagandaSilenciada(
   messageId: string,
   contactId: string,
 ): Promise<boolean> {
-  const { ETIQUETA_DE_PROPAGANDA } = await import("@/lib/waha/silencio-de-disparo");
   const [mensagem, contato] = await Promise.all([
     admin
       .from("messages")
@@ -796,7 +802,7 @@ async function lerPropagandaSilenciada(
   if (contato.error) throw new Error(contato.error.message);
   const metadata = (mensagem.data as { metadata: Record<string, unknown> | null } | null)?.metadata ?? null;
   const tags = (contato.data as { tags: string[] | null } | null)?.tags ?? null;
-  return silenciadaComoPropaganda(metadata, tags, ETIQUETA_DE_PROPAGANDA);
+  return silenciadaComoPropaganda(metadata, tags, ETIQUETA_DO_SILENCIO);
 }
 
 /**

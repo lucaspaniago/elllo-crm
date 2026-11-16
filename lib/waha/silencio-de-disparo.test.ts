@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 // silencio-de-disparo.ts importa @/lib/audit (→ supabase/server → validação de env).
 vi.mock("@/lib/audit", () => ({ audit: vi.fn() }));
 
+import { ETIQUETA_DO_SILENCIO } from "@/lib/escalacao/tolerancia-ao-sentimento";
 import type { DisparoAutomatico } from "@/lib/waha/disparo-automatico";
 import {
   ETIQUETA_DE_PROPAGANDA,
@@ -62,6 +63,8 @@ describe("silenciarDisparoAutomatico", () => {
     await expect(silenciarDisparoAutomatico({} as never, ENTRADA, p)).resolves.toBe(true);
     expect(chamadas).toEqual([`etiqueta:${ETIQUETA_DE_PROPAGANDA}`, "conversa", "negocios"]);
     expect(ETIQUETA_DE_PROPAGANDA).toBe("propaganda");
+    // A tolerância ao sentimento reconhece o silêncio por esta etiqueta (cópia).
+    expect(ETIQUETA_DO_SILENCIO).toBe(ETIQUETA_DE_PROPAGANDA);
   });
 
   it("mensagem de gente: nem consulta o banco", async () => {
