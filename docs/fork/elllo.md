@@ -153,6 +153,29 @@ conversa e card, e a IA respondeu a um robô.
   `silencio-de-disparo.test.ts`, `ingest-disparo-automatico.test.ts` (fixture
   anonimizada em `lib/waha/__fixtures__/disparo-template-noweb-2026.7.2.json`).
 
+### D — a nota de tom áspero só diz "segui atendendo" quando a IA respondeu
+
+Ramo `elllo-nota-honesta` (16/11/2026), separável do resto: só
+`lib/escalacao/tolerancia-ao-sentimento.ts`, `texto-do-aviso-de-passagem.ts` e
+`lib/i18n/aviso-de-passagem.ts`. Sem migration.
+
+Caso real (16/11/2026, conversa `2ed3b92e`): um disparo de propaganda (modelo
+da "Vymber Rádio Indoor") foi silenciado no ingest — a IA não respondeu e a
+conversa foi encerrada —, mas o clima mediu a mensagem (Haiku 0,15 < 0,3), o
+alerta chegou à tolerância e o dono recebeu "🔔 …: tom áspero, segui
+atendendo" com "provável brincadeira (75%)".
+
+- Propaganda silenciada (`metadata.disparo_automatico` na mensagem **e** a
+  etiqueta `propaganda` no contato) sai da tolerância antes de qualquer guarda:
+  sem avaliação, sem nota e sem a passagem do upstream
+  (`tolerancia:propaganda_silenciada`).
+- A nota espera até 2 min por uma mensagem de saída da IA (`sent_via = 'ai'`)
+  depois da mensagem do alerta, voltando a cada 20 s pelo `retry` do dreno (que
+  não conta tentativa). Conversa encerrada não espera. Sem resposta, o cabeçalho
+  vira "tom áspero, a IA não respondeu" e uma linha `Situação:` diz por quê.
+- Testes: `tests/unit/tolerancia-ao-sentimento.test.ts` (o dublê agora traz a
+  resposta da IA por padrão) e `texto-do-aviso-de-passagem.test.ts`.
+
 ## Migrations do fork (faixa 9xxx)
 
 | Arquivo | O quê |
