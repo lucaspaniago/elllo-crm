@@ -1384,6 +1384,8 @@ async function handleInbound(
     messageId: insertedMessage?.id ?? null,
     disparo,
     requestId,
+    // Fork elllo (16/11) — o texto vai ao Jev quando a forma não é de disparo.
+    texto: corpo,
   });
   if (!silenciado) await aplicarEfeitosPosEntrada(admin, {
     organizationId: session.organization_id,

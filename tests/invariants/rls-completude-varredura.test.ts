@@ -110,6 +110,7 @@ const PROVA_PROPRIA: readonly Excecao[] = [
   { tabela: "config_aviso_de_agendamento", razao: "tests/invariants/aviso-de-agendamento-escrita.test.ts — dois tenants reais por JWT: admin lê só a própria organização, agent e viewer não leem nada, e a escrita direta por authenticated é negada nos três verbos (a única porta é fn_definir_aviso_de_agendamento, que revalida papel, suporte e MFA)" },
   { tabela: "entregas_de_aviso_de_agendamento", razao: "tests/invariants/aviso-de-agendamento-escrita.test.ts — manager lê o histórico da própria organização e zero do vizinho; viewer lê zero; escrita direta por authenticated negada nos três verbos" },
   { tabela: "entregas_de_aviso_de_passagem", razao: "tests/invariants/aviso-de-passagem-ao-suporte.test.ts — fork elllo: manager lê só a própria organização e zero do vizinho; viewer lê zero; escrita direta por authenticated negada (só o servidor grava)" },
+  { tabela: "itens_do_apanhado", razao: "tests/invariants/apanhado-do-dono.test.ts — fork elllo (9004): manager lê só a própria organização e zero do vizinho; viewer lê zero; escrita direta por authenticated negada nos três verbos (só o servidor grava)" },
   { tabela: "organization_extensions", razao: "tests/invariants/extensoes-declarativas.test.ts — dois tenants com vínculos reais: leitura positiva local/negativa cruzada por JWT, revogação de membership e escrita direta negada" },
   {
     tabela: "organization_modules",

@@ -40,7 +40,17 @@
  *     card ABERTO que o contato já tivesse vai para a etapa de perdido do funil
  *     por `encerraDemanda` (a regra do botão "perdido"), motivo `other`. Funil
  *     sem etapa de perdido recusa, e o card fica onde está, com log;
- *   - nenhum aviso a ninguém. Fica o log `waha.disparo_automatico: silenciado`.
+ *   - nenhum aviso a ninguém. Fica o log `waha.disparo_automatico: silenciado`;
+ *   - (16/11/2026) a mensagem entra em `itens_do_apanhado` (migration 9004), e
+ *     o dono a vê no apanhado da manhã seguinte.
+ *
+ * ─── O Jev, quando a forma não denuncia (decisão do dono, 16/11/2026) ──────
+ *
+ * Mensagem que NÃO é disparo pela forma, mas tem texto, passa pelas MESMAS
+ * condições 2 e 3 (e a do contato pessoal) e então pelo Jev
+ * (`lib/escalacao/propaganda-pelo-jev.ts`): ele cala só a propaganda clara,
+ * com os mesmos efeitos acima. Jev fora do ar, teto do dia, dúvida, ou
+ * `settings.crm.jev_do_fork.propaganda = false`: segue como hoje (a IA atende).
  *
  * ─── Nada aqui derruba a ingestão ──────────────────────────────────────────
  *
@@ -58,6 +68,8 @@ import type { CanonicalLostReason } from "@/lib/schemas/leads";
 import { logger } from "@/lib/logger";
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { decidirSilencio, type DisparoAutomatico } from "@/lib/waha/disparo-automatico";
+import type { ItemNovoDoApanhado } from "@/lib/escalacao/itens-do-apanhado";
+import { textoParaPerguntar } from "@/lib/escalacao/propaganda-pelo-jev";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -96,6 +108,17 @@ export interface EntradaDoSilencio {
   messageId: string | null;
   disparo: DisparoAutomatico | null;
   requestId?: string;
+  /**
+   * Fork elllo (16/11/2026): o texto legível da mensagem (corpo ou legenda),
+   * para o Jev quando a forma não é de disparo. Ausente = só a forma decide.
+   */
+  texto?: string | null;
+}
+
+/** O que o Jev disse da mensagem que a forma não denunciou. `null` = não decidiu. */
+export interface PropagandaPeloJev {
+  propaganda: boolean;
+  probabilidade: number;
 }
 
 /**
@@ -109,6 +132,14 @@ export interface PortaDoSilencio {
   etiquetarContato(org: string, contato: string, etiqueta: string): Promise<void>;
   encerrarConversa(org: string, conversa: string): Promise<void>;
   encerrarNegociosAbertos(org: string, contato: string, conversa: string): Promise<void>;
+  /**
+   * Fork elllo (16/11/2026). Pergunta ao Jev se o texto é propaganda. Nunca
+   * lança; `null` = o Jev não decidiu (desligado no fork, fora do ar, teto,
+   * texto curto). Ausente = a forma decide sozinha.
+   */
+  propagandaPeloJev?(org: string, contato: string, texto: string, settings: unknown): Promise<PropagandaPeloJev | null>;
+  /** Fork elllo (9004): a mensagem silenciada entra no apanhado. Ausente = não entra. */
+  registrarNoApanhado?(item: ItemNovoDoApanhado): Promise<void>;
 }
 
 /**
@@ -120,23 +151,37 @@ export async function silenciarDisparoAutomatico(
   entrada: EntradaDoSilencio,
   porta: PortaDoSilencio = portaDoSupabase(admin, entrada.requestId),
 ): Promise<boolean> {
-  if (!entrada.disparo) return false;
+  // Sem forma de disparo, só texto que valha a pergunta chega ao banco e ao Jev:
+  // a mensagem comum curta ("oi") sai daqui sem leitura nenhuma, como antes.
+  const texto = entrada.disparo ? "" : (textoParaPerguntar(entrada.texto) ?? "");
+  if (!entrada.disparo && (texto === "" || !porta.propagandaPeloJev)) return false;
   const base = {
     organization_id: entrada.organizationId,
     conversation_id: entrada.conversationId,
     message_id: entrada.messageId,
-    tipo: entrada.disparo.tipo,
+    tipo: entrada.disparo?.tipo ?? "jev",
   };
 
   let decisao: ReturnType<typeof decidirSilencio>;
+  let peloJev: PropagandaPeloJev | null = null;
   try {
-    const ligado = silencioDeDisparosLigado(await porta.settingsDaOrganizacao(entrada.organizationId));
+    const settings = await porta.settingsDaOrganizacao(entrada.organizationId);
+    const ligado = silencioDeDisparosLigado(settings);
     const jaEscrevemos = ligado
       ? await porta.jaEscrevemosAoContato(entrada.organizationId, entrada.contactId)
       : false;
     const contatoPessoal =
       ligado && !jaEscrevemos ? await porta.contatoPessoal(entrada.organizationId, entrada.contactId) : false;
-    decisao = decidirSilencio({ disparo: entrada.disparo, ligado, jaEscrevemos, contatoPessoal });
+    if (entrada.disparo) {
+      decisao = decidirSilencio({ disparo: entrada.disparo, ligado, jaEscrevemos, contatoPessoal });
+    } else {
+      // Sem a forma de disparo: as MESMAS condições, e então o Jev. Fora delas,
+      // nada sai para a rede.
+      if (!ligado || jaEscrevemos || contatoPessoal || !porta.propagandaPeloJev) return false;
+      peloJev = await porta.propagandaPeloJev(entrada.organizationId, entrada.contactId, texto, settings);
+      if (!peloJev?.propaganda) return false;
+      decisao = { silenciar: true, motivo: "silenciar" };
+    }
   } catch (err) {
     logger.warn("waha.disparo_automatico: decisão indeterminada — segue como hoje", {
       ...base,
@@ -157,8 +202,26 @@ export async function silenciarDisparoAutomatico(
   await efeito("negocios", base, () =>
     porta.encerrarNegociosAbertos(entrada.organizationId, entrada.contactId, entrada.conversationId),
   );
+  const messageId = entrada.messageId;
+  const registrar = porta.registrarNoApanhado;
+  if (messageId && registrar) {
+    await efeito("apanhado", base, () =>
+      registrar({
+        organizationId: entrada.organizationId,
+        tipo: "propaganda",
+        origem: entrada.disparo ? "disparo_automatico" : "jev",
+        messageId,
+        conversationId: entrada.conversationId,
+        probabilidade: peloJev?.probabilidade ?? null,
+      }),
+    );
+  }
 
-  logger.info("waha.disparo_automatico: silenciado", { ...base, empresa: entrada.disparo.empresa });
+  logger.info("waha.disparo_automatico: silenciado", {
+    ...base,
+    empresa: entrada.disparo?.empresa ?? null,
+    ...(peloJev ? { pelo_jev: Math.round(peloJev.probabilidade * 100) / 100 } : {}),
+  });
   return true;
 }
 
@@ -344,6 +407,35 @@ export function portaDoSupabase(admin: Admin, requestId?: string): PortaDoSilenc
           });
         }
       }
+    },
+
+    async propagandaPeloJev(org, contato, texto, settings) {
+      try {
+        const [jev, prop] = await Promise.all([
+          import("@/lib/escalacao/jev-do-fork"),
+          import("@/lib/escalacao/propaganda-pelo-jev"),
+        ]);
+        const fork = jev.lerJevDoFork(settings);
+        if (!fork.propaganda) return null;
+        const pergunta = prop.textoParaPerguntar(texto);
+        if (!pergunta) return null; // defesa: quem chama já cortou
+        const r = await jev.perguntarAoJevDoFork(await jev.criarDepsDoJevDoFork(admin), {
+          organizationId: org,
+          contactId: contato,
+          proposito: jev.PROPOSITOS_DO_JEV_DO_FORK.propaganda,
+          estado: prop.estadoDaPropaganda(pergunta),
+          perguntas: prop.PERGUNTAS_DA_PROPAGANDA,
+          tetoDiarioUsd: fork.teto_diario_usd,
+        });
+        return prop.decidirPropaganda(r);
+      } catch {
+        return null;
+      }
+    },
+
+    async registrarNoApanhado(item) {
+      const { registrarItemDoApanhado } = await import("@/lib/escalacao/itens-do-apanhado");
+      await registrarItemDoApanhado(admin, item);
     },
   };
 }

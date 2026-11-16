@@ -157,6 +157,7 @@ CRONS="
 # relatório do dia local. Se a instalação estava parada na hora, sai na primeira
 # rodada depois. A linha única por organização e dia segura a repetição.
 */15 * * * *|90|api/v1/cron/relatorio-operacao-diario
+*/10 * * * *|90|api/v1/cron/apanhado-do-dono
 # A DATA DO FUNIL (#989). Mesma cadência e mesmo motivo do aniversário: de hora
 # em hora, e quem decide o momento é o relógio de parede de CADA organização —
 # a rodada só age naquela que marca a hora da varredura. Minuto diferente do

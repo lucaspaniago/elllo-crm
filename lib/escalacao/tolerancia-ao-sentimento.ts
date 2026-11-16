@@ -260,6 +260,16 @@ export interface ToleranciaDeps {
   }): Promise<ResultadoDaAvaliacao>;
   /** O `triggerHandoff` do upstream. */
   passar(input: TriggerHandoffInput): Promise<TriggerHandoffResult>;
+  /**
+   * Fork elllo (16/11/2026): o Jev viu propaganda na mensagem áspera — ela vai
+   * para o apanhado das 7h. Ausente = não registra (os dublês antigos).
+   */
+  registrarPropaganda?(entrada: {
+    organizationId: string;
+    conversationId: string;
+    messageId: string;
+    probabilidade: number;
+  }): Promise<void>;
   envio(): Promise<EnvioDaNota>;
   clock: () => Date;
   origemDoDreno: () => "worker" | "request";
@@ -468,6 +478,26 @@ async function tolerar(
     mensagens,
     situacao: "tom_aspero",
   });
+  // Fork elllo (16/11): o Jev viu propaganda. Cala antes de registrar a
+  // irritação: sem nota, sem passagem, e a mensagem vai para o apanhado.
+  if (avaliacao.disponivel && avaliacao.propaganda) {
+    if (ctx.messageId && deps.registrarPropaganda) {
+      try {
+        await deps.registrarPropaganda({
+          organizationId: orgId,
+          conversationId: ctx.conversationId,
+          messageId: ctx.messageId,
+          probabilidade: avaliacao.confianca,
+        });
+      } catch (err) {
+        logger.warn("[tolerancia] propaganda não entrou no apanhado", {
+          conversation_id: ctx.conversationId,
+          causa: err instanceof Error ? err.message.slice(0, 200) : String(err),
+        });
+      }
+    }
+    return { status: "skipped", detail: "tolerancia:propaganda_pelo_jev" };
+  }
   const hipotese = avaliacao.disponivel ? avaliacao.hipotese : null;
   const confianca = avaliacao.disponivel ? avaliacao.confianca : null;
   const agoraIso = agora.toISOString();
@@ -784,6 +814,16 @@ async function lerPropagandaSilenciada(
   messageId: string,
   contactId: string,
 ): Promise<boolean> {
+  // Silenciada pelo Jev no ingest (9004): o item do apanhado é a marca.
+  const { data: item, error: erroDoItem } = await admin
+    .from("itens_do_apanhado")
+    .select("id")
+    .eq("organization_id", orgId)
+    .eq("message_id", messageId)
+    .eq("tipo", "propaganda")
+    .limit(1);
+  if (erroDoItem) throw new Error(erroDoItem.message);
+  if ((item ?? []).length > 0) return true;
   const [mensagem, contato] = await Promise.all([
     admin
       .from("messages")
@@ -803,6 +843,45 @@ async function lerPropagandaSilenciada(
   const metadata = (mensagem.data as { metadata: Record<string, unknown> | null } | null)?.metadata ?? null;
   const tags = (contato.data as { tags: string[] | null } | null)?.tags ?? null;
   return silenciadaComoPropaganda(metadata, tags, ETIQUETA_DO_SILENCIO);
+}
+
+/**
+ * O Jev no tom áspero (fork elllo, 16/11): `null` = ele não decide (desligado
+ * no fork, fora do ar, teto do dia, dúvida) e a reserva assume. Nunca lança.
+ */
+async function avaliarTomPeloJev(
+  admin: SupabaseClient,
+  entrada: Parameters<ToleranciaDeps["avaliar"]>[0],
+): Promise<ResultadoDaAvaliacao | null> {
+  if (entrada.situacao !== "tom_aspero") return null;
+  try {
+    const [jev, tom, { lerConfigDoJev }] = await Promise.all([
+      import("./jev-do-fork"),
+      import("./avaliacao-pelo-jev"),
+      import("@/lib/ai/decisao/config"),
+    ]);
+    const settings = await jev.settingsDaOrganizacao(admin, entrada.organizationId);
+    const fork = jev.lerJevDoFork(settings);
+    if (!fork.avaliacao) return null;
+    const alcance = lerConfigDoJev(settings).aceite?.alcance ?? null;
+    const estado = tom.estadoDoTom(entrada.mensagens, alcance);
+    if (!estado) return null;
+    const r = await jev.perguntarAoJevDoFork(await jev.criarDepsDoJevDoFork(admin), {
+      organizationId: entrada.organizationId,
+      contactId: null,
+      proposito: jev.PROPOSITOS_DO_JEV_DO_FORK.tom,
+      estado,
+      perguntas: tom.PERGUNTAS_DO_TOM,
+      tetoDiarioUsd: fork.teto_diario_usd,
+    });
+    return tom.decidirPeloJev(r);
+  } catch (err) {
+    logger.warn("[tolerancia] Jev do tom não montou — a reserva avalia", {
+      conversation_id: entrada.conversationId,
+      causa: err instanceof Error ? err.message.slice(0, 200) : String(err),
+    });
+    return null;
+  }
 }
 
 /**
@@ -846,8 +925,24 @@ export async function aplicaToleranciaDeProducao(
         });
         return d !== null && d.permite;
       },
-      // A avaliação monta gateway, orçamento e log só se for chamada.
-      avaliar: async (entrada) => avaliarPassagem(await criarDepsDaAvaliacao(), entrada),
+      // Fork elllo (16/11): no tom áspero, o Jev primeiro; o modelo de hoje é a
+      // reserva (`./avaliacao-pelo-jev.ts`). A avaliação monta gateway,
+      // orçamento e log só se for chamada.
+      avaliar: async (entrada) => {
+        const peloJev = await avaliarTomPeloJev(admin, entrada);
+        return peloJev ?? avaliarPassagem(await criarDepsDaAvaliacao(), entrada);
+      },
+      async registrarPropaganda({ organizationId, conversationId, messageId, probabilidade }) {
+        const { registrarItemDoApanhado } = await import("./itens-do-apanhado");
+        await registrarItemDoApanhado(admin, {
+          organizationId,
+          tipo: "propaganda",
+          origem: "jev",
+          messageId,
+          conversationId,
+          probabilidade,
+        });
+      },
       passar: (input) => triggerHandoff(input),
       async envio() {
         const [{ criarTransporteDoAviso }, { criarPacingDoCanal }, { env }] = await Promise.all([
