@@ -42,7 +42,10 @@
  * O núcleo é PURO (dependências injetadas); o adapter de produção mora no fim,
  * com imports TARDIOS.
  */
+import type { SupabaseClient } from "@supabase/supabase-js";
+
 import { diaLocalISO, instanteDe, partesNoFuso } from "@/lib/agenda/fuso";
+import { nomeDoContato } from "@/lib/contacts/rotulo-do-contato";
 import { MENSAGEM_REDIGIDA } from "@/lib/lgpd/cascata";
 import { logger } from "@/lib/logger";
 
@@ -215,7 +218,7 @@ export async function aplicaApanhado(deps: DepsDoApanhado, orgId: string): Promi
 // service role, que passa por cima da RLS.
 // ---------------------------------------------------------------------------
 
-type Admin = import("@supabase/supabase-js").SupabaseClient;
+type Admin = SupabaseClient;
 
 export async function criarDepsDoApanhado(admin: Admin): Promise<DepsDoApanhado> {
   const [
@@ -286,21 +289,24 @@ export async function criarDepsDoApanhado(admin: Admin): Promise<DepsDoApanhado>
           linhas.map((l) => l.message_id),
         );
       if (erroMsgs) throw new Error(erroMsgs.message);
+      // O embutido `contacts:contact_id(...)` chega como objeto (muitos-para-um),
+      // mas o tipo inferido pelo supabase-js é lista: aceita os dois.
+      type Contato = { display_name: string | null; name: string | null };
       const porId = new Map(
-        ((msgs ?? []) as Array<{
+        ((msgs ?? []) as unknown as Array<{
           id: string;
           body: string | null;
           media_derived_text: string | null;
           metadata: Record<string, unknown> | null;
-          contacts: { display_name: string | null; name: string | null } | null;
-        }>).map((m) => [m.id, m]),
+          contacts: Contato | Contato[] | null;
+        }>).map((m) => [m.id, { ...m, contacts: Array.isArray(m.contacts) ? (m.contacts[0] ?? null) : m.contacts }]),
       );
       return linhas.map((l) => {
         const m = porId.get(l.message_id);
         const md = m?.metadata ?? {};
         const empresa = (md.disparo_automatico as { empresa?: unknown } | undefined)?.empresa;
         const autor = (md.group_sender as { name?: unknown } | undefined)?.name;
-        const contato = m?.contacts?.display_name ?? m?.contacts?.name ?? null;
+        const contato = nomeDoContato(m?.contacts);
         const corpo = (m?.body ?? "").trim() || (m?.media_derived_text ?? "").trim() || null;
         return {
           id: l.id,
