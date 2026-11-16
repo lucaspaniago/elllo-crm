@@ -176,6 +176,60 @@ atendendo" com "provável brincadeira (75%)".
 - Testes: `tests/unit/tolerancia-ao-sentimento.test.ts` (o dublê agora traz a
   resposta da IA por padrão) e `texto-do-aviso-de-passagem.test.ts`.
 
+### E — o Jev avalia, cala a propaganda e monta o apanhado das 7h
+
+Ramo `elllo-jev` (16/11/2026), por cima do D. Migration 9004. Pedido do dono:
+usar o Jev na avaliação, calar propaganda, avaliar grupos sem responder e
+mandar um apanhado só, na manhã seguinte.
+
+- **A porta** (`lib/escalacao/jev-do-fork.ts`): toda pergunta sai por
+  `decidirNoPonto` no ponto do clima (`sentiment_classify`) — a chave da
+  organização, o consentimento (`settings.jev`: ligado, aceite, clima não
+  desligado), a allowlist e o teto de 1,5 s do autor. Disjuntor do autor por
+  propósito; linha em `llm_calls` (`elllo_jev_tom`, `elllo_jev_propaganda`,
+  `elllo_jev_grupo`); teto de US$ 0,50 nas últimas 24 h
+  (`settings.crm.jev_do_fork.teto_diario_usd`). Interruptores em
+  `settings.crm.jev_do_fork.{avaliacao, propaganda, grupos, apanhado}`, todos
+  ligados por padrão; só `false` desliga. Não é tarefa em `lib/ai/decisao/`:
+  aquelas nunca calam, e estas calam por decisão do dono.
+- **Tom áspero** (`avaliacao-pelo-jev.ts`, ligado na produção da tolerância):
+  Choice brincadeira/irritação real/engano/propaganda/outro + Nouls `cliente` e
+  `alguma_cabe`. Vale com `alguma_cabe` ≥ 0,5 e a opção ≥ 0,6; propaganda exige
+  ≥ 0,85 e `cliente` ≤ 0,3, e então cala (`tolerancia:propaganda_pelo_jev`,
+  sem nota, sem passagem, item no apanhado). Fora disso, o modelo de sempre.
+  Com o aceite "mensagem", vai só a mensagem áspera; com "conversa", também a
+  transcrição. O aviso de PASSAGEM segue com o modelo (precisa de indícios e
+  recomendação, que o Jev não escreve).
+- **Propaganda sem forma de disparo** (`propaganda-pelo-jev.ts`, no
+  `silenciarDisparoAutomatico`): nas mesmas condições do silêncio (ligado, nunca
+  escrevemos, não pessoal) e com texto ≥ 30 caracteres, Nouls `propaganda` e
+  `cliente`; cala com ≥ 0,9 e ≤ 0,2, com os mesmos efeitos do disparo. Todo
+  silêncio (forma ou Jev) entra em `itens_do_apanhado`. Upstream tocado:
+  `lib/waha/ingest.ts` passa `texto: corpo` (linha "Fork elllo").
+- **Grupos** (`grupos-pelo-jev.ts`, `grupo-pelo-jev.handler.ts`): o cron liga,
+  uma vez por hora, todos os grupos do número que NUNCA teve linha na fila
+  (`alternarGrupo` do autor, ator = o admin mais antigo; ⚠️ o primeiro reinicia
+  a sessão do WAHA por segundos). Com o filtro aberto, grupo novo entra sozinho
+  (`lib/grupos/ingest.ts`, linha "Fork elllo"); grupo com linha desligada
+  continua fora. `ia_responde` nasce `false`: a IA nunca responde. O handler
+  `elllo-grupo-pelo-jev.v1` (`message.group_received`) pergunta "vale o dono
+  responder?" (≥ 0,7 → item no apanhado). Em 16/11 o número não estava em
+  nenhum grupo (o WAHA devolveu 0).
+- **Apanhado** (`apanhado-do-dono.ts`, cron `apanhado-do-dono` de 10 em 10 min
+  no scheduler): entre 7h e 10h do fuso, reivindica os itens de antes da
+  meia-noite (até 3 dias) com `incluido_em` e manda UMA mensagem pelo número da
+  nota de tom áspero; sem itens, nada sai; envio que falha devolve os itens.
+  Itens com mais de 30 dias são apagados (o texto nunca é guardado: só o
+  ponteiro para a mensagem).
+- Migration `9004` + bloco no `baseline.sql` depois do da 9003; prova de RLS em
+  `tests/invariants/apanhado-do-dono.test.ts` (entrada em `PROVA_PROPRIA`).
+- Desfazer sem imagem: `settings.crm.jev_do_fork = {"avaliacao": false,
+  "propaganda": false, "grupos": false, "apanhado": false}`. Os grupos já
+  ligados se desligam pela tela (Canais › Grupos).
+- Testes: `tests/unit/jev-do-fork.test.ts`, os blocos novos de
+  `lib/waha/silencio-de-disparo.test.ts` e de `tolerancia-ao-sentimento.test.ts`,
+  `tests/unit/dispatcher-org-parada.test.ts` (o handler novo é "pula").
+
 ## Migrations do fork (faixa 9xxx)
 
 | Arquivo | O quê |
@@ -183,11 +237,12 @@ atendendo" com "provável brincadeira (75%)".
 | `supabase/migrations/20261025120000_9001_aviso_de_caso_em_partes.sql` | `entregas_de_aviso_de_caso.partes_enviadas` (0..20) |
 | `supabase/migrations/20261025130000_9002_aviso_de_passagem_ao_suporte.sql` | `aviso_de_passagem_ligado`, `sondagem_minutos` (0..60), `entregas_de_aviso_de_passagem`, gatilho `trg_passagem_registrada` |
 | `supabase/migrations/20261026120000_9003_tolerancia_de_sentimento.sql` | `sondagem_minutos` vira a janela da tolerância: default 10 → 30 e comentário da coluna (sem renomear; linhas existentes mantêm o valor) |
+| `supabase/migrations/20261116120000_9004_apanhado_do_dono.sql` | `itens_do_apanhado` (propaganda silenciada e grupo que vale resposta, só o ponteiro para a mensagem; `unique (organization_id, message_id, tipo)`; RLS leitura manager, escrita só servidor) |
 
-Os três blocos estão no `supabase/baseline.sql` **logo depois do bloco da 0687**
+Os quatro blocos estão no `supabase/baseline.sql` **logo depois do bloco da 0687**
 (e portanto antes da VARREDURA anon), com os rótulos
 `-- ---- fork elllo: … (migration 9001) ----`, `… (migration 9002) ----` e
-`… (migration 9003) ----`.
+`… (migration 9003) ----` e `… (migration 9004) ----`.
 
 ## Como rebasear
 
@@ -205,6 +260,10 @@ Os três blocos estão no `supabase/baseline.sql` **logo depois do bloco da 0687
    - `lib/waha/ingest.ts`: em `handleInbound`, as linhas "Fork elllo" (o `corpo`
      com o texto do disparo e o `silenciarDisparoAutomatico` antes de
      `aplicarEfeitosPosEntrada`).
+   - `lib/grupos/ingest.ts`: em `grupoLigado`, o bloco "Fork elllo" que liga o
+     grupo novo (`ligarGrupoNovoNaEntrada`).
+   - `lib/event-log/register-handlers.ts` e `docker/scheduler/entrypoint.sh`:
+     uma linha cada (o handler do grupo e o cron `apanhado-do-dono`).
 3. Se o upstream mudar `ERROS_DA_ENTREGA_DE_AVISO`, o CHECK de
    `entregas_de_aviso_de_passagem.erro_codigo` precisa de uma migration 9xxx nova —
    `tests/invariants/aviso-de-passagem-ao-suporte.test.ts` reprova a divergência.
@@ -213,7 +272,9 @@ Os três blocos estão no `supabase/baseline.sql` **logo depois do bloco da 0687
    `avaliacao-da-passagem.test.ts`, `aviso-de-passagem-ao-suporte.test.ts`,
    `tolerancia-ao-sentimento.test.ts`, `handoff-do-clima-com-tolerancia.test.ts`,
    `lib/waha/disparo-automatico.test.ts`, `lib/waha/silencio-de-disparo.test.ts`,
-   `lib/waha/ingest-disparo-automatico.test.ts` e `pnpm test:db`.
+   `lib/waha/ingest-disparo-automatico.test.ts`, `tests/unit/jev-do-fork.test.ts`,
+   `tests/unit/dispatcher-org-parada.test.ts` e `pnpm test:db` (com
+   `tests/invariants/apanhado-do-dono.test.ts`).
 
 ## Pendências conhecidas
 
