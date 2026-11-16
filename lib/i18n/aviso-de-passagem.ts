@@ -22,4 +22,8 @@ export const TEXTOS_AVISO_DE_PASSAGEM = {
   "outro motivo": { es: "otro motivo" },
   // A nota de tom áspero (lib/escalacao/tolerancia-ao-sentimento.ts).
   "tom áspero, segui atendendo": { es: "tono áspero, seguí atendiendo" },
+  // A nota quando a IA NÃO respondeu (fork elllo, 16/11/2026).
+  "tom áspero, a IA não respondeu": { es: "tono áspero, la IA no respondió" },
+  "a conversa está encerrada": { es: "la conversación está cerrada" },
+  "nenhuma resposta da IA em 2 minutos": { es: "ninguna respuesta de la IA en 2 minutos" },
 };

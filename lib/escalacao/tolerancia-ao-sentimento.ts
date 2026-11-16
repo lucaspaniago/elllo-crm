@@ -85,6 +85,23 @@
  *     tem a própria deduplicação e o gate recusa a conversa que já passou).
  *     Depois da passagem a chave é APAGADA.
  *
+ * ## Propaganda e nota honesta (fork elllo, 16/11/2026)
+ *
+ * Caso real: um disparo de propaganda foi silenciado no ingest (a IA não
+ * respondeu, a conversa foi encerrada), mas o clima mediu a mensagem mesmo
+ * assim, o alerta chegou aqui e o dono recebeu "tom áspero, segui atendendo".
+ * Duas regras:
+ *
+ *   - **Propaganda silenciada não passa por aqui.** Antes de qualquer guarda:
+ *     sem avaliação, sem nota e SEM a passagem do upstream (propaganda nunca
+ *     vai para uma pessoa). Desfecho `tolerancia:propaganda_silenciada`.
+ *   - **"Segui atendendo" só quando a IA respondeu.** A nota espera até
+ *     `ESPERA_PELA_RESPOSTA_DA_IA_MS` por uma mensagem de saída da IA
+ *     (`sent_via = 'ai'`) depois da mensagem do alerta, voltando a cada
+ *     `PASSO_DA_ESPERA_MS` (o `retry` do dreno não conta tentativa). Conversa
+ *     encerrada não espera. Sem resposta, a nota diz "a IA não respondeu" e
+ *     por quê.
+ *
  * O núcleo é PURO (dependências injetadas); o adapter de produção mora no fim,
  * com imports TARDIOS — o topo deste arquivo carrega sem ambiente.
  */
@@ -112,7 +129,11 @@ import {
 import type { ConfigDoAvisoDePassagem } from "./aviso-de-passagem-ao-suporte";
 import { enviarParte } from "./envio-em-partes";
 import type { MotivoDaPassagem } from "./passagem";
-import { linkDaConversa, montarNotaDeTomAspero } from "./texto-do-aviso-de-passagem";
+import {
+  linkDaConversa,
+  montarNotaDeTomAspero,
+  type MotivoSemResposta,
+} from "./texto-do-aviso-de-passagem";
 import { urlPublicaUsavel } from "./url-publica";
 import { HIPOTESES_DA_PASSAGEM, type HipoteseDaPassagem } from "./vocabulario-do-aviso-de-passagem";
 
@@ -134,6 +155,12 @@ export const ADIAMENTO_DA_DISPUTA_MS = 5_000;
 export const TETO_DE_EVENTOS_CONTADOS = 10;
 /** O motivo da passagem que esta regra segura. */
 const MOTIVO: MotivoDaPassagem = "low_sentiment";
+/** Quanto a nota espera pela resposta da IA antes de dizer que ela não respondeu. */
+export const ESPERA_PELA_RESPOSTA_DA_IA_MS = 2 * 60_000;
+/** De quanto em quanto tempo a nota volta para olhar se a IA respondeu. */
+export const PASSO_DA_ESPERA_MS = 20_000;
+/** Estados em que a conversa não está mais em atendimento (os do silêncio de propaganda). */
+const ESTADOS_ENCERRADOS: ReadonlySet<string> = new Set(["closed", "resolved", "archived"]);
 
 export interface ChaveDaTolerancia {
   /** O token do CAS: sobe a cada escrita. */
@@ -162,6 +189,8 @@ export interface ConversaDaTolerancia {
   assignee_kind: string | null;
   assigned_to_user_id: string | null;
   contato: { is_personal: boolean; is_blocked: boolean; is_anonymized: boolean } | null;
+  /** `conversations.status` — encerrada, a nota não espera a IA responder. */
+  status?: string | null;
 }
 
 /** Uma mensagem lida para a avaliação — com o id, para achar a do alerta. */
@@ -189,6 +218,11 @@ export interface ToleranciaDb {
     conversationId: string,
     limite: number,
   ): Promise<MensagemDaTolerancia[]>;
+  /**
+   * A mensagem do alerta foi silenciada como propaganda? (fork elllo,
+   * 16/11/2026). Ausente = não (os dublês antigos seguem valendo).
+   */
+  propagandaSilenciada?(orgId: string, messageId: string, contactId: string): Promise<boolean>;
 }
 
 /** O que só a NOTA precisa — montado só quando uma nota vai sair. */
@@ -319,6 +353,30 @@ function trechoDoAlerta(
 }
 
 /**
+ * A IA respondeu à mensagem do alerta? Há mensagem de SAÍDA da IA
+ * (`sent_via = 'ai'`) depois do instante `desde` (o da mensagem do alerta).
+ */
+export function iaRespondeuDepois(
+  mensagens: readonly MensagemDaTolerancia[],
+  desde: string,
+): boolean {
+  const t0 = Date.parse(desde);
+  if (!Number.isFinite(t0)) return false;
+  return mensagens.some(
+    (m) => m.direction === "outbound" && m.sent_via === "ai" && Date.parse(m.created_at) > t0,
+  );
+}
+
+/** O instante da mensagem do alerta; sem ela, o do evento. */
+function instanteDoAlerta(
+  mensagens: readonly MensagemDaTolerancia[],
+  ctx: ContextoDaTolerancia,
+): string | null {
+  const doAlerta = ctx.messageId ? mensagens.find((m) => m.id === ctx.messageId) : undefined;
+  return doAlerta?.created_at ?? ctx.row.created_at ?? null;
+}
+
+/**
  * Aplica a tolerância a UMA linha de `ai.sentiment_alert`.
  *
  * `null` = a passagem de sempre: o handler segue com o `triggerHandoff` do
@@ -346,6 +404,16 @@ async function tolerar(
   const agora = deps.clock();
   const orgId = ctx.row.organization_id;
   const eventoId = ctx.row.id;
+
+  // ── Propaganda silenciada: nem avaliação, nem nota, nem passagem ─────────
+  if (
+    ctx.messageId &&
+    ctx.contactId &&
+    deps.db.propagandaSilenciada &&
+    (await deps.db.propagandaSilenciada(orgId, ctx.messageId, ctx.contactId))
+  ) {
+    return { status: "skipped", detail: "tolerancia:propaganda_silenciada" };
+  }
 
   // ── As guardas: fora delas, a passagem de sempre ─────────────────────────
   const cfg = await deps.db.carregaConfig(orgId);
@@ -375,7 +443,7 @@ async function tolerar(
   // ── A repetição do MESMO evento: nada conta de novo ──────────────────────
   if (chave && chave.eventos.includes(eventoId)) {
     if (chave.passagem_evento_id === eventoId) return await passar(deps, ctx, chave);
-    return await talvezNota(deps, ctx, cfg, chave, agora, janelaMs, null);
+    return await talvezNota(deps, ctx, cfg, chave, agora, janelaMs, conversa.status ?? null);
   }
 
   // ── A avaliação, ANTES de qualquer decisão ───────────────────────────────
@@ -414,7 +482,7 @@ async function tolerar(
     if (!(await deps.db.gravaChave(orgId, ctx.conversationId, chave?.versao ?? null, nova))) {
       return disputa(agora);
     }
-    return await talvezNota(deps, ctx, cfg, nova, agora, janelaMs, mensagens);
+    return await talvezNota(deps, ctx, cfg, nova, agora, janelaMs, conversa.status ?? null);
   }
 
   // ── Segunda irritação na janela ──────────────────────────────────────────
@@ -437,7 +505,7 @@ async function tolerar(
   if (!(await deps.db.gravaChave(orgId, ctx.conversationId, chave.versao, renovada))) {
     return disputa(agora);
   }
-  return await talvezNota(deps, ctx, cfg, renovada, agora, janelaMs, mensagens);
+  return await talvezNota(deps, ctx, cfg, renovada, agora, janelaMs, conversa.status ?? null);
 }
 
 function disputa(agora: Date): DesfechoDaTolerancia {
@@ -478,7 +546,7 @@ async function talvezNota(
   chave: ChaveDaTolerancia,
   agora: Date,
   janelaMs: number,
-  lidas: readonly MensagemDaTolerancia[] | null,
+  statusDaConversa: string | null,
 ): Promise<DesfechoDaTolerancia> {
   const orgId = ctx.row.organization_id;
   try {
@@ -490,6 +558,26 @@ async function talvezNota(
     }
     if (passouDoTeto(ctx.row, agora)) return seguiu("evento_velho");
     const channelSessionId = cfg.channel_session_id;
+
+    // A IA respondeu? Lido AGORA (o turno dela corre em paralelo a esta regra).
+    // Sem resposta, a nota espera um pouco; encerrada, não há o que esperar.
+    const mensagens = await deps.db.ultimasMensagens(orgId, ctx.conversationId, MENSAGENS_DA_AVALIACAO);
+    const desde = instanteDoAlerta(mensagens, ctx);
+    let semResposta: MotivoSemResposta | null = null;
+    if (!desde || !iaRespondeuDepois(mensagens, desde)) {
+      if (statusDaConversa && ESTADOS_ENCERRADOS.has(statusDaConversa)) {
+        semResposta = "conversa_encerrada";
+      } else {
+        const t0 = desde ? Date.parse(desde) : Number.NaN;
+        if (Number.isFinite(t0) && agora.getTime() - t0 < ESPERA_PELA_RESPOSTA_DA_IA_MS) {
+          return retry(
+            new Date(agora.getTime() + PASSO_DA_ESPERA_MS),
+            "tolerancia: nota aguardando a resposta da IA",
+          );
+        }
+        semResposta = "sem_resposta_da_ia";
+      }
+    }
 
     // A prontidão do canal, como no aviso de passagem — mas aqui sem linha de
     // entrega nem tentativa: a nota que não pode sair agora simplesmente não sai.
@@ -514,8 +602,6 @@ async function talvezNota(
     const to = await envio.transporte.resolveDestino(orgId, canal, cfg.telefone_destino);
     if (!to) return seguiu("destino_invalido");
 
-    const mensagens =
-      lidas ?? (await deps.db.ultimasMensagens(orgId, ctx.conversationId, MENSAGENS_DA_AVALIACAO));
     const [marca, nome] = await Promise.all([
       deps.marca(orgId),
       ctx.contactId ? envio.canais.nomeDoContato(orgId, ctx.contactId) : Promise.resolve(null),
@@ -527,6 +613,7 @@ async function talvezNota(
       mensagem: trechoDoAlerta(mensagens, ctx.messageId),
       avaliacao: { hipotese: chave.hipotese, confianca: chave.confianca ?? 0 },
       link: linkDaConversa(envio.urlPublica, ctx.conversationId),
+      semResposta,
     });
 
     // REIVINDICA antes de enviar: a repetição deste evento não manda de novo.
@@ -588,7 +675,7 @@ export function createSupabaseToleranciaDb(
       const { data, error } = await admin
         .from("conversations")
         .select(
-          "metadata, is_group, assignee_kind, assigned_to_user_id, contacts:contact_id(is_personal, is_blocked, is_anonymized)",
+          "metadata, status, is_group, assignee_kind, assigned_to_user_id, contacts:contact_id(is_personal, is_blocked, is_anonymized)",
         )
         .eq("organization_id", orgId)
         .eq("id", conversationId)
@@ -597,6 +684,7 @@ export function createSupabaseToleranciaDb(
       if (!data) return null;
       const c = data as unknown as {
         metadata: Record<string, unknown> | null;
+        status: string | null;
         is_group: boolean | null;
         assignee_kind: string | null;
         assigned_to_user_id: string | null;
@@ -608,6 +696,7 @@ export function createSupabaseToleranciaDb(
       };
       return {
         metadata: c.metadata,
+        status: c.status,
         is_group: Boolean(c.is_group),
         assignee_kind: c.assignee_kind,
         assigned_to_user_id: c.assigned_to_user_id,
@@ -659,7 +748,55 @@ export function createSupabaseToleranciaDb(
       if (error) throw new Error(error.message);
       return (data ?? []) as MensagemDaTolerancia[];
     },
+
+    async propagandaSilenciada(orgId, messageId, contactId) {
+      return lerPropagandaSilenciada(admin, orgId, messageId, contactId);
+    },
   };
+}
+
+/**
+ * A mensagem foi silenciada como propaganda: ela traz a marca da detecção
+ * (`metadata.disparo_automatico`) E o contato ganhou a etiqueta do silêncio.
+ * Só a marca não basta — o disparo de quem já recebeu mensagem nossa (prospect
+ * respondendo por robô) é detectado mas NÃO é silenciado, e segue atendido.
+ */
+export function silenciadaComoPropaganda(
+  metadata: Record<string, unknown> | null,
+  etiquetasDoContato: readonly string[] | null,
+  etiqueta: string,
+): boolean {
+  const marca = metadata?.disparo_automatico;
+  if (!marca || typeof marca !== "object") return false;
+  return (etiquetasDoContato ?? []).includes(etiqueta);
+}
+
+async function lerPropagandaSilenciada(
+  admin: SupabaseClient,
+  orgId: string,
+  messageId: string,
+  contactId: string,
+): Promise<boolean> {
+  const { ETIQUETA_DE_PROPAGANDA } = await import("@/lib/waha/silencio-de-disparo");
+  const [mensagem, contato] = await Promise.all([
+    admin
+      .from("messages")
+      .select("metadata")
+      .eq("organization_id", orgId)
+      .eq("id", messageId)
+      .maybeSingle(),
+    admin
+      .from("contacts")
+      .select("tags")
+      .eq("organization_id", orgId)
+      .eq("id", contactId)
+      .maybeSingle(),
+  ]);
+  if (mensagem.error) throw new Error(mensagem.error.message);
+  if (contato.error) throw new Error(contato.error.message);
+  const metadata = (mensagem.data as { metadata: Record<string, unknown> | null } | null)?.metadata ?? null;
+  const tags = (contato.data as { tags: string[] | null } | null)?.tags ?? null;
+  return silenciadaComoPropaganda(metadata, tags, ETIQUETA_DE_PROPAGANDA);
 }
 
 /**

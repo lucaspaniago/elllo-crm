@@ -21,8 +21,12 @@ import { describe, expect, it } from "vitest";
 import type { ResultadoDaAvaliacao } from "@/lib/escalacao/avaliacao-da-passagem";
 import {
   CHAVE_DA_TOLERANCIA,
+  ESPERA_PELA_RESPOSTA_DA_IA_MS,
+  PASSO_DA_ESPERA_MS,
   aplicaToleranciaAoSentimento,
+  iaRespondeuDepois,
   lerChave,
+  silenciadaComoPropaganda,
   type ContextoDaTolerancia,
   type ConversaDaTolerancia,
   type MensagemDaTolerancia,
@@ -68,7 +72,17 @@ function ctx(row: EventRow): ContextoDaTolerancia {
   return { row, conversationId: CONVERSA, contactId: CONTATO, messageId: MSG, passagem: PASSAGEM };
 }
 
-const MENSAGENS: MensagemDaTolerancia[] = [
+/** A resposta da IA à mensagem áspera — sem ela, a nota espera (fork elllo, 16/11). */
+const RESPOSTA_DA_IA: MensagemDaTolerancia = {
+  id: "m-ia",
+  direction: "outbound",
+  sent_via: "ai",
+  body: "Haha, oi! Em que posso ajudar?",
+  metadata: null,
+  created_at: new Date(T0.getTime() + 3_000).toISOString(),
+};
+
+const MENSAGENS_SEM_RESPOSTA: MensagemDaTolerancia[] = [
   {
     id: MSG,
     direction: "inbound",
@@ -86,6 +100,8 @@ const MENSAGENS: MensagemDaTolerancia[] = [
     created_at: min(-60).toISOString(),
   },
 ];
+
+const MENSAGENS: MensagemDaTolerancia[] = [RESPOSTA_DA_IA, ...MENSAGENS_SEM_RESPOSTA];
 
 const BRINCADEIRA: ResultadoDaAvaliacao = {
   disponivel: true,
@@ -114,6 +130,10 @@ interface Opcoes {
   falhaNoEnvio?: boolean;
   /** O CAS perde a próxima escrita (outro processo escreveu antes). */
   perdeCas?: boolean;
+  /** As mensagens que a conversa devolve (padrão: a IA já respondeu). */
+  mensagens?: MensagemDaTolerancia[];
+  /** A mensagem do alerta foi silenciada como propaganda. */
+  propaganda?: boolean;
 }
 
 function monta(op: Opcoes = {}) {
@@ -125,6 +145,7 @@ function monta(op: Opcoes = {}) {
   let proximaAvaliacao: ResultadoDaAvaliacao | (() => never) = BRINCADEIRA;
   let perdeCas = op.perdeCas ?? false;
   let pacingLivreEm = op.pacingLivreEm ?? null;
+  let mensagens = op.mensagens ?? MENSAGENS;
 
   const deps: ToleranciaDeps = {
     clock: () => agora,
@@ -178,7 +199,10 @@ function monta(op: Opcoes = {}) {
         return true;
       },
       async ultimasMensagens() {
-        return MENSAGENS;
+        return mensagens;
+      },
+      async propagandaSilenciada() {
+        return op.propaganda ?? false;
       },
     },
     async envio() {
@@ -237,6 +261,9 @@ function monta(op: Opcoes = {}) {
     },
     liberaPacing() {
       pacingLivreEm = null;
+    },
+    trocaMensagens(novas: MensagemDaTolerancia[]) {
+      mensagens = novas;
     },
   };
 }
@@ -519,5 +546,82 @@ describe("tolerância — a passagem de sempre (null)", () => {
     expect(r).toBeNull();
     expect(m.chave()).toBeNull();
     expect(m.passagens).toHaveLength(0);
+  });
+});
+
+describe("tolerância — propaganda e nota honesta (fork elllo, 16/11/2026)", () => {
+  it("propaganda silenciada: nem avaliação, nem nota, nem passagem — e não volta ao upstream", async () => {
+    const m = monta({ propaganda: true });
+    const r = await aplicaToleranciaAoSentimento(m.deps, ctx(evento("e1")));
+    expect(r).toEqual({ status: "skipped", detail: "tolerancia:propaganda_silenciada" });
+    expect(m.avaliacoes).toHaveLength(0);
+    expect(m.corpos).toHaveLength(0);
+    expect(m.passagens).toHaveLength(0);
+    expect(m.chave()).toBeNull();
+  });
+
+  it("a IA ainda não respondeu: a nota espera e volta em 20 s, sem reivindicar", async () => {
+    const m = monta({ mensagens: MENSAGENS_SEM_RESPOSTA });
+    const r = await aplicaToleranciaAoSentimento(m.deps, ctx(evento("e1")));
+    expect(r?.status).toBe("retry");
+    expect(r?.retry_at).toBe(new Date(T0.getTime() + PASSO_DA_ESPERA_MS).toISOString());
+    expect(m.corpos).toHaveLength(0);
+    expect(m.chave()).toMatchObject({ eventos: ["e1"], nota_evento_id: null });
+  });
+
+  it("a IA responde durante a espera: a nota sai com 'segui atendendo', uma vez", async () => {
+    const m = monta({ mensagens: MENSAGENS_SEM_RESPOSTA });
+    await aplicaToleranciaAoSentimento(m.deps, ctx(evento("e1")));
+    m.em(new Date(T0.getTime() + PASSO_DA_ESPERA_MS));
+    m.trocaMensagens(MENSAGENS);
+    const r = await aplicaToleranciaAoSentimento(m.deps, ctx(evento("e1")));
+    expect(r).toEqual({ status: "skipped", detail: "tolerancia:seguiu_atendendo:nota_enviada" });
+    expect(m.corpos).toHaveLength(1);
+    expect(m.corpos[0]).toContain("🔔 Acme: tom áspero, segui atendendo");
+    expect(m.avaliacoes).toHaveLength(1);
+  });
+
+  it("2 minutos sem resposta: a nota diz que a IA não respondeu", async () => {
+    const m = monta({ mensagens: MENSAGENS_SEM_RESPOSTA });
+    await aplicaToleranciaAoSentimento(m.deps, ctx(evento("e1")));
+    m.em(new Date(T0.getTime() + ESPERA_PELA_RESPOSTA_DA_IA_MS));
+    const r = await aplicaToleranciaAoSentimento(m.deps, ctx(evento("e1")));
+    expect(r).toEqual({ status: "skipped", detail: "tolerancia:seguiu_atendendo:nota_enviada" });
+    expect(m.corpos).toEqual([
+      [
+        "🔔 Acme: tom áspero, a IA não respondeu",
+        "Situação: nenhuma resposta da IA em 2 minutos",
+        "Cliente: Ana",
+        'Mensagem: "Oi, idiota"',
+        "Avaliação da IA: provável brincadeira (85%)",
+        `Abrir: https://crm.exemplo.com.br/app/inbox?id=${CONVERSA}`,
+      ].join("\n"),
+    ]);
+  });
+
+  it("conversa encerrada e sem resposta: a nota sai na hora, dizendo por quê", async () => {
+    const m = monta({ mensagens: MENSAGENS_SEM_RESPOSTA, conversa: { status: "closed" } });
+    const r = await aplicaToleranciaAoSentimento(m.deps, ctx(evento("e1")));
+    expect(r?.status).toBe("skipped");
+    expect(m.corpos).toHaveLength(1);
+    expect(m.corpos[0]).toContain("🔔 Acme: tom áspero, a IA não respondeu");
+    expect(m.corpos[0]).toContain("Situação: a conversa está encerrada");
+    expect(m.corpos[0]).not.toContain("segui atendendo");
+  });
+
+  it("resposta de PESSOA (não da IA) não conta como a IA ter respondido", async () => {
+    const humana: MensagemDaTolerancia = { ...RESPOSTA_DA_IA, id: "m-humana", sent_via: "external_device" };
+    expect(iaRespondeuDepois([humana, ...MENSAGENS_SEM_RESPOSTA], T0.toISOString())).toBe(false);
+    const antes: MensagemDaTolerancia = { ...RESPOSTA_DA_IA, created_at: min(-1).toISOString() };
+    expect(iaRespondeuDepois([antes, ...MENSAGENS_SEM_RESPOSTA], T0.toISOString())).toBe(false);
+    expect(iaRespondeuDepois(MENSAGENS, T0.toISOString())).toBe(true);
+  });
+
+  it("silenciada = marca da detecção E etiqueta do silêncio (só uma das duas não basta)", () => {
+    const marca = { disparo_automatico: { tipo: "template", empresa: "Rádio" } };
+    expect(silenciadaComoPropaganda(marca, ["propaganda"], "propaganda")).toBe(true);
+    expect(silenciadaComoPropaganda(marca, ["cliente"], "propaganda")).toBe(false);
+    expect(silenciadaComoPropaganda({}, ["propaganda"], "propaganda")).toBe(false);
+    expect(silenciadaComoPropaganda(null, null, "propaganda")).toBe(false);
   });
 });
