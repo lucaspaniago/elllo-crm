@@ -5,7 +5,7 @@
  *   - o tom áspero (`./avaliacao-pelo-jev.ts`): brincadeira, irritação real,
  *     engano, propaganda ou outro;
  *   - a propaganda que a forma do disparo não denuncia
- *     (`lib/waha/silencio-de-disparo.ts`);
+ *     (`silenciarDisparoAutomatico`, o silêncio de propaganda);
  *   - a mensagem de grupo que vale a resposta do dono
  *     (`./grupo-pelo-jev.handler.ts`).
  *
@@ -255,7 +255,8 @@ export async function criarDepsDoJevDoFork(admin: SupabaseClient): Promise<DepsD
     },
     perguntar: ({ organizationId, estado, perguntas, tetoMs }) =>
       decidirNoPonto({
-        ponto: PONTO_DO_JEV_DO_FORK,
+        // Literal de propósito: a cerca dos pontos de IA lê o ponto na chamada.
+        ponto: "sentiment_classify",
         organizationId,
         estado,
         perguntas,

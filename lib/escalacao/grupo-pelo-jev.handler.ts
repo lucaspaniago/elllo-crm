@@ -14,6 +14,7 @@
  *
  * `naOrgParada: "pula"`: custa dinheiro e manda dado para fora.
  */
+import { nomeDoContato } from "@/lib/contacts/rotulo-do-contato";
 import type { EventHandler, EventRow, HandlerResult } from "@/lib/event-log/dispatcher";
 import { MENSAGEM_REDIGIDA } from "@/lib/lgpd/cascata";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -61,10 +62,11 @@ export async function avaliarMensagemDeGrupo(row: EventRow): Promise<HandlerResu
   if (erroMsg) throw new Error(erroMsg.message);
   if (erroConversa) throw new Error(erroConversa.message);
   const m = msg as { body: string | null; metadata: Record<string, unknown> | null; direction: string } | null;
-  const c = conversa as {
-    is_group: boolean | null;
-    contacts: { display_name: string | null; name: string | null } | null;
-  } | null;
+  type Contato = { display_name: string | null; name: string | null };
+  const lida = conversa as unknown as { is_group: boolean | null; contacts: Contato | Contato[] | null } | null;
+  const c = lida
+    ? { is_group: lida.is_group, contacts: Array.isArray(lida.contacts) ? (lida.contacts[0] ?? null) : lida.contacts }
+    : null;
   if (!m || !c?.is_group || m.direction !== "inbound") return ok("skipped", "grupo:mensagem_ausente");
   if ((m.body ?? "").trim() === MENSAGEM_REDIGIDA) return ok("skipped", "grupo:redigida");
   const mensagem = grupos.textoDoGrupo(m.body);
@@ -77,7 +79,7 @@ export async function avaliarMensagemDeGrupo(row: EventRow): Promise<HandlerResu
     proposito: jev.PROPOSITOS_DO_JEV_DO_FORK.grupo,
     estado: grupos.estadoDoGrupo({
       empresa: texto((orgRow as { display_name?: unknown } | null)?.display_name),
-      grupo: texto(c.contacts?.display_name) ?? texto(c.contacts?.name),
+      grupo: nomeDoContato(c.contacts),
       remetente: texto(remetente),
       mensagem,
     }),

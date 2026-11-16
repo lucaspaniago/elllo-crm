@@ -121,13 +121,16 @@ beforeAll(() => {
       ('${CONVERSA_B}', '${ORG_B}', '${CONTATO_B}', '${SESSAO_B}', 'closed')
       on conflict do nothing;
 
+    -- Sem "on conflict": a unique de messages é DEFERRABLE, e o Postgres não a
+    -- aceita como árbitro. O "where not exists" faz a mesma idempotência.
     insert into public.messages
-        (id, organization_id, conversation_id, channel_session_id, contact_id, external_id, type, direction, status, body)
-      values
-        ('${MENSAGEM_A}', '${ORG_A}', '${CONVERSA_A}', '${SESSAO_A}', '${CONTATO_A}', 'apanhado-9004-a', 'text', 'inbound', 'delivered', 'propaganda A'),
-        ('${MENSAGEM_B}', '${ORG_B}', '${CONVERSA_B}', '${SESSAO_B}', '${CONTATO_B}', 'apanhado-9004-b', 'text', 'inbound', 'delivered', 'propaganda B'),
-        ('${MENSAGEM_APAGADA}', '${ORG_A}', '${CONVERSA_A}', '${SESSAO_A}', '${CONTATO_A}', 'apanhado-9004-c', 'text', 'inbound', 'delivered', 'vai sumir')
-      on conflict do nothing;
+        (id, organization_id, conversation_id, channel_session_id, contact_id, external_id, type, direction, status, sent_via, body)
+      select * from (values
+        ('${MENSAGEM_A}'::uuid, '${ORG_A}'::uuid, '${CONVERSA_A}'::uuid, '${SESSAO_A}'::uuid, '${CONTATO_A}'::uuid, 'apanhado-9004-a', 'text', 'inbound', 'delivered', 'external_device', 'propaganda A'),
+        ('${MENSAGEM_B}'::uuid, '${ORG_B}'::uuid, '${CONVERSA_B}'::uuid, '${SESSAO_B}'::uuid, '${CONTATO_B}'::uuid, 'apanhado-9004-b', 'text', 'inbound', 'delivered', 'external_device', 'propaganda B'),
+        ('${MENSAGEM_APAGADA}'::uuid, '${ORG_A}'::uuid, '${CONVERSA_A}'::uuid, '${SESSAO_A}'::uuid, '${CONTATO_A}'::uuid, 'apanhado-9004-c', 'text', 'inbound', 'delivered', 'external_device', 'vai sumir')
+      ) as s(id, organization_id, conversation_id, channel_session_id, contact_id, external_id, type, direction, status, sent_via, body)
+       where not exists (select 1 from public.messages where id = s.id);
 
     -- Um item em CADA organização: sem o do vizinho, "o vizinho lê zero de A"
     -- seria satisfeito por tabela vazia.

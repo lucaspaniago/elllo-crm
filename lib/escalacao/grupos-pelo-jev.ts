@@ -13,7 +13,7 @@
  *      `alternarGrupo` da tela (que confirma o filtro do WhatsApp antes de
  *      gravar). Basta UMA linha na fila — ligada ou desligada pelo operador —
  *      para isto nunca mais mexer naquele número: a escolha da tela vence.
- *      ⚠️ Ligar o primeiro grupo troca o filtro do WAHA, e o WAHA reinicia a
+ *      ⚠️ Ligar o primeiro grupo troca o filtro do canal, e o provedor reinicia a
  *      sessão por alguns segundos (`definirRecebimentoDeGrupos`).
  *   2. **Grupo novo entra sozinho** (`ligarGrupoNovoNaEntrada`, chamado por
  *      `lib/grupos/ingest.ts`): com o filtro já aberto (há outro grupo LIGADO
@@ -129,7 +129,7 @@ export async function ligarGruposSeNenhum(admin: SupabaseClient, org: string): P
       try {
         grupos = await listarGruposDoNumero(deps, { organizationId: org, channelSessionId });
       } catch {
-        continue; // canal sem grupos, desconectado, WAHA fora — tenta na próxima hora
+        continue; // canal sem grupos, desconectado, provedor fora — tenta na próxima hora
       }
       for (const g of grupos.filter((x) => x.presente && !x.enabled)) {
         try {

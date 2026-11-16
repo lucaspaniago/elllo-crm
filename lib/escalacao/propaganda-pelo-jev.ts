@@ -1,7 +1,7 @@
 /**
  * A PROPAGANDA QUE A FORMA NÃO DENUNCIA, VISTA PELO JEV (fork elllo, 16/11/2026).
  *
- * O silêncio de propaganda (`lib/waha/silencio-de-disparo.ts`) só reconhecia o
+ * O silêncio de propaganda (`silenciarDisparoAutomatico`) só reconhecia o
  * disparo pela FORMA: modelo do WhatsApp Business, botões, lista. Propaganda em
  * texto comum, ou foto com legenda mandada por uma pessoa, passava, e a IA
  * respondia a um vendedor. Pedido do dono: "Ela diagnosticou que é uma
