@@ -163,6 +163,23 @@ describe("montarNotaDeTomAspero", () => {
     );
   });
 
+  it("a IA não respondeu: o cabeçalho diz isso e a Situação diz por quê (fork elllo, 16/11)", () => {
+    expect(montarNotaDeTomAspero({ ...NOTA, semResposta: "conversa_encerrada" })).toBe(
+      [
+        "🔔 Acme: tom áspero, a IA não respondeu",
+        "Situação: a conversa está encerrada",
+        "Cliente: Ana",
+        'Mensagem: "Oi, idiota"',
+        "Avaliação da IA: provável brincadeira (85%)",
+        `Abrir: https://crm.exemplo.com.br/app/inbox?id=${CONVERSA}`,
+      ].join("\n"),
+    );
+    const es = montarNotaDeTomAspero({ ...NOTA, idioma: "es", semResposta: "sem_resposta_da_ia" });
+    expect(es).toContain("tono áspero, la IA no respondió");
+    expect(es).toContain("Estado: ninguna respuesta de la IA en 2 minutos");
+    expect(montarNotaDeTomAspero({ ...NOTA, semResposta: null })).toContain("segui atendendo");
+  });
+
   it("o trecho é limpo e curto; linha sem conteúdo não aparece", () => {
     const nota = montarNotaDeTomAspero({
       ...NOTA,

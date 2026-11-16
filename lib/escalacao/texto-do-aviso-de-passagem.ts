@@ -174,12 +174,30 @@ export interface NotaDeTomAspero {
   avaliacao: { hipotese: HipoteseDaPassagem; confianca: number };
   /** O link já montado pelo servidor (`linkDaConversa`). É o ÚNICO link do texto. */
   link: string;
+  /**
+   * Fork elllo (16/11/2026): por que a IA NÃO respondeu à mensagem áspera.
+   * Ausente ou `null` = ela respondeu, e só então a nota diz "segui atendendo"
+   * — antes disso a nota afirmava um atendimento que às vezes não houve.
+   */
+  semResposta?: MotivoSemResposta | null;
 }
+
+/** Por que a IA não respondeu (`./tolerancia-ao-sentimento.ts` decide). */
+export type MotivoSemResposta = "conversa_encerrada" | "sem_resposta_da_ia";
+
+const FRASE_SEM_RESPOSTA: Record<MotivoSemResposta, string> = {
+  conversa_encerrada: "a conversa está encerrada",
+  sem_resposta_da_ia: "nenhuma resposta da IA em 2 minutos",
+};
 
 /** A nota numa mensagem só. Função total: nunca lança. */
 export function montarNotaDeTomAspero(nota: NotaDeTomAspero): string {
   const t = (texto: string): string => traduzir(texto, nota.idioma);
-  const linhas: string[] = [`🔔 ${nota.marca}: ${t("tom áspero, segui atendendo")}`];
+  const semResposta = nota.semResposta ?? null;
+  const linhas: string[] = [
+    `🔔 ${nota.marca}: ${t(semResposta ? "tom áspero, a IA não respondeu" : "tom áspero, segui atendendo")}`,
+  ];
+  if (semResposta) linhas.push(`${t("Situação")}: ${t(FRASE_SEM_RESPOSTA[semResposta])}`);
   const cliente = primeiroNome(nota.nomeDoCliente);
   if (cliente) linhas.push(`${t("Cliente")}: ${cliente}`);
   const trecho = citacao(nota.mensagem);
