@@ -57032,6 +57032,76 @@ alter table public.config_aviso_de_caso
 comment on column public.config_aviso_de_caso.sondagem_minutos is
   'Fork elllo (9003): janela da tolerância ao sentimento, em minutos (0..60; 0 = desligada, passagem na hora como no upstream). Uma segunda irritação dentro da janela, confirmada como irritação real (confiança >= 0,8), passa a conversa para uma pessoa; a primeira só é registrada. O nome vem da sondagem da 9002, removida.';
 
+-- ---- fork elllo: o apanhado das 7h ao dono (migration 9004) ----
+-- `itens_do_apanhado`: a propaganda silenciada e a mensagem de grupo que vale
+-- resposta, só por referência à mensagem (o texto é lido na hora do apanhado).
+-- Cabeçalho da 9004 para o racional inteiro.
+create table if not exists public.itens_do_apanhado (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null references public.organizations(id) on delete cascade,
+  tipo             text not null,
+  origem           text not null,
+  message_id       uuid not null references public.messages(id) on delete cascade,
+  conversation_id  uuid not null references public.conversations(id) on delete cascade,
+  -- A probabilidade que o Jev deu (propaganda ou "vale responder"); nula
+  -- quando quem decidiu foi a forma do disparo, sem modelo.
+  probabilidade    real,
+  -- O dia LOCAL do apanhado que levou o item; nulo = ainda não foi.
+  incluido_em      date,
+  created_at       timestamptz not null default now()
+);
+
+-- Vocabulário fechado, conferido contra o TypeScript por
+-- tests/invariants/apanhado-do-dono.test.ts (`TIPOS_DO_ITEM`, `ORIGENS_DO_ITEM`
+-- em lib/escalacao/vocabulario-do-apanhado.ts).
+alter table public.itens_do_apanhado
+  drop constraint if exists itens_do_apanhado_tipo_check;
+alter table public.itens_do_apanhado
+  add constraint itens_do_apanhado_tipo_check
+  check (tipo in ('propaganda', 'grupo'));
+
+alter table public.itens_do_apanhado
+  drop constraint if exists itens_do_apanhado_origem_check;
+alter table public.itens_do_apanhado
+  add constraint itens_do_apanhado_origem_check
+  check (origem in ('disparo_automatico', 'jev'));
+
+alter table public.itens_do_apanhado
+  drop constraint if exists itens_do_apanhado_probabilidade_check;
+alter table public.itens_do_apanhado
+  add constraint itens_do_apanhado_probabilidade_check
+  check (probabilidade is null or (probabilidade >= 0 and probabilidade <= 1));
+
+-- A mesma mensagem entra uma vez por tipo: o webhook do provedor chega em
+-- dobro (`message` e `message.any`) e o dreno repete evento.
+create unique index if not exists itens_do_apanhado_unico
+  on public.itens_do_apanhado (organization_id, message_id, tipo);
+
+-- Leitor declarado: "os itens de ontem desta organização que ainda não foram".
+create index if not exists itens_do_apanhado_pendentes_idx
+  on public.itens_do_apanhado (organization_id, created_at)
+  where incluido_em is null;
+
+-- RLS e grants: os da 9002. `revoke all` PRIMEIRO (o default ACL do baseline
+-- daria escrita a `authenticated`); leitura só `manager`; escrita só pelo
+-- service role.
+alter table public.itens_do_apanhado enable row level security;
+revoke all    on public.itens_do_apanhado from anon, authenticated;
+grant  select on public.itens_do_apanhado to authenticated;
+grant  all    on public.itens_do_apanhado to service_role;
+
+drop policy if exists leitura_itens_do_apanhado on public.itens_do_apanhado;
+create policy leitura_itens_do_apanhado
+  on public.itens_do_apanhado
+  for select to authenticated
+  using (
+    organization_id in (select public.fn_user_org_ids())
+    and public.fn_role_at_least(organization_id, 'manager')
+  );
+
+comment on table public.itens_do_apanhado is
+  'Fork elllo (9004): propaganda silenciada e mensagem de grupo que vale resposta, para o apanhado das 7h ao dono. Só o ponteiro para a mensagem (o texto é lido na hora, e a redação da LGPD vale). incluido_em = o dia local do apanhado que levou o item.';
+
 -- ---- #3042: desmarcar o exemplo tira do RAG os trechos já aprendidos da conversa (migration 0688) ----
 -- Desmarcar `usable_for_rag` só impedia ingestões futuras; os `ai_chunks` já gravados da conversa
 -- seguiam alcançáveis por `retrieve_top_k_chunks`. A função remove os trechos cujo

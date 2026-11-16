@@ -37,6 +37,7 @@ import { avisoDeAgendamentoNoWhatsAppHandler } from "@/lib/agenda/aviso-de-agend
 import { avisoDeCasoAoSuporteHandler } from "@/lib/escalacao/aviso-ao-suporte.handler";
 import { avisoDeHandoffHandler } from "@/lib/escalacao/aviso-de-handoff.handler";
 import { avisoDePassagemAoSuporteHandler } from "@/lib/escalacao/aviso-de-passagem-ao-suporte.handler";
+import { grupoPeloJevHandler } from "@/lib/escalacao/grupo-pelo-jev.handler";
 import { casoNaCentralHandler } from "@/lib/escalacao/caso-na-central.handler";
 import { followupGatilhoCasoHandler } from "@/lib/followup/gatilho-caso.handler";
 import { followupGatilhoEtapaHandler } from "@/lib/followup/gatilho-etapa.handler";
@@ -94,6 +95,7 @@ const PULA: EventHandler[] = [
   avisoDeCasoAoSuporteHandler,
   avisoDeHandoffHandler,
   avisoDePassagemAoSuporteHandler,
+  grupoPeloJevHandler,
   avisoDePropostaNoWhatsAppHandler,
   avisoDeAgendamentoNoWhatsAppHandler,
   conversaoDeVendaHandler,

@@ -102,7 +102,14 @@ export const respostaDoModeloSchema = z.object({
 });
 
 export type ResultadoDaAvaliacao =
-  | ({ disponivel: true } & AvaliacaoParaOAviso)
+  | ({
+      disponivel: true;
+      /**
+       * Fork elllo (16/11/2026): o Jev viu propaganda na mensagem áspera
+       * (`./avaliacao-pelo-jev.ts`). A tolerância cala: sem nota e sem passagem.
+       */
+      propaganda?: boolean;
+    } & AvaliacaoParaOAviso)
   | { disponivel: false; porque: string };
 
 /** Uma mensagem da conversa, do jeito que o adapter a lê. */

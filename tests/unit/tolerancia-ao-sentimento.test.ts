@@ -625,3 +625,31 @@ describe("tolerância — propaganda e nota honesta (fork elllo, 16/11/2026)", (
     expect(silenciadaComoPropaganda(null, null, "propaganda")).toBe(false);
   });
 });
+
+describe("tolerância — o Jev viu propaganda na mensagem áspera (fork elllo, 16/11/2026)", () => {
+  it("cala: sem irritação registrada, sem nota, sem passagem — e a mensagem vai para o apanhado", async () => {
+    const m = monta();
+    const registradas: unknown[] = [];
+    m.deps.registrarPropaganda = async (e) => void registradas.push(e);
+    m.avalia({ ...BRINCADEIRA, hipotese: "outro", confianca: 0.93, propaganda: true });
+    const r = await aplicaToleranciaAoSentimento(m.deps, ctx(evento("e1")));
+    expect(r).toEqual({ status: "skipped", detail: "tolerancia:propaganda_pelo_jev" });
+    expect(m.chave()).toBeNull();
+    expect(m.corpos).toHaveLength(0);
+    expect(m.passagens).toHaveLength(0);
+    expect(registradas).toEqual([
+      { organizationId: ORG, conversationId: CONVERSA, messageId: MSG, probabilidade: 0.93 },
+    ]);
+  });
+
+  it("o apanhado que falha não vira passagem", async () => {
+    const m = monta();
+    m.deps.registrarPropaganda = async () => {
+      throw new Error("tabela fora");
+    };
+    m.avalia({ ...BRINCADEIRA, hipotese: "outro", confianca: 0.9, propaganda: true });
+    const r = await aplicaToleranciaAoSentimento(m.deps, ctx(evento("e1")));
+    expect(r?.detail).toBe("tolerancia:propaganda_pelo_jev");
+    expect(m.passagens).toHaveLength(0);
+  });
+});
