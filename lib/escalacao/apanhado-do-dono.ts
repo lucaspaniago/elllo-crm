@@ -282,7 +282,7 @@ export async function criarDepsDoApanhado(admin: Admin): Promise<DepsDoApanhado>
       if (linhas.length === 0) return [];
       const { data: msgs, error: erroMsgs } = await admin
         .from("messages")
-        .select("id, body, media_derived_text, metadata, contacts:contact_id(display_name, name)")
+        .select("id, body, metadata, contacts:contact_id(display_name, name)")
         .eq("organization_id", orgId)
         .in(
           "id",
@@ -296,7 +296,6 @@ export async function criarDepsDoApanhado(admin: Admin): Promise<DepsDoApanhado>
         ((msgs ?? []) as unknown as Array<{
           id: string;
           body: string | null;
-          media_derived_text: string | null;
           metadata: Record<string, unknown> | null;
           contacts: Contato | Contato[] | null;
         }>).map((m) => [m.id, { ...m, contacts: Array.isArray(m.contacts) ? (m.contacts[0] ?? null) : m.contacts }]),
@@ -307,7 +306,10 @@ export async function criarDepsDoApanhado(admin: Admin): Promise<DepsDoApanhado>
         const empresa = (md.disparo_automatico as { empresa?: unknown } | undefined)?.empresa;
         const autor = (md.group_sender as { name?: unknown } | undefined)?.name;
         const contato = nomeDoContato(m?.contacts);
-        const corpo = (m?.body ?? "").trim() || (m?.media_derived_text ?? "").trim() || null;
+        // Só o texto que a pessoa escreveu. A descrição de foto fica de fora: o
+        // apanhado não é leitor coberto por `haLeitorDaDescricao`, e a foto sem
+        // legenda aparece só com o nome (o link leva à conversa).
+        const corpo = (m?.body ?? "").trim() || null;
         return {
           id: l.id,
           tipo: l.tipo,
