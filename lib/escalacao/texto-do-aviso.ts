@@ -103,9 +103,13 @@ export function primeiroNome(nome: string | null | undefined): string | null {
   return limpo.split(" ")[0] ?? null;
 }
 
-/** Monta a mensagem. Função total: nunca lança, nunca devolve vazio. */
-export function montarAvisoDeCaso(aviso: AvisoDeCaso): string {
-  const t = (texto: string): string => traduzir(texto, aviso.idioma);
+/**
+ * O CORPO do aviso: cabeçalho com a marca e as linhas Tipo/Assunto/Cliente/
+ * O que precisa/Por que travou. Um dono só para as duas formas de entrega
+ * (inteira em `montarAvisoDeCaso`, fatiada em `montarPartesDoAvisoDeCaso`):
+ * se cada uma montasse o seu, a primeira linha nova entraria numa e não na outra.
+ */
+function linhasDoCorpo(aviso: AvisoDeCaso, t: (texto: string) => string): string[] {
   const failSafe = aviso.source === "guardrail_autofallback";
 
   const linhas: string[] = [`🔔 ${aviso.marca}: ${t("novo caso esperando você")}`, ""];
@@ -135,6 +139,14 @@ export function montarAvisoDeCaso(aviso: AvisoDeCaso): string {
   const travou = sanitizarTextoDoLead(aviso.blocker, TETOS_DO_TEXTO_DO_LEAD.blocker);
   if (travou) linhas.push(`${t("Por que a IA travou")}: ${travou}`);
 
+  return linhas;
+}
+
+/** Monta a mensagem. Função total: nunca lança, nunca devolve vazio. */
+export function montarAvisoDeCaso(aviso: AvisoDeCaso): string {
+  const t = (texto: string): string => traduzir(texto, aviso.idioma);
+  const linhas = linhasDoCorpo(aviso, t);
+
   linhas.push("", `${t("Abrir")}: ${aviso.link}`, "");
   if (aviso.respostaWhatsappHabilitada) {
     linhas.push(t("Para orientar a IA sem falar diretamente com o cliente, envie:"));
@@ -147,6 +159,44 @@ export function montarAvisoDeCaso(aviso: AvisoDeCaso): string {
   }
 
   return linhas.join("\n");
+}
+
+/**
+ * O AVISO EM PARTES — uma mensagem do WhatsApp por bloco (fork elllo).
+ *
+ * Com «Responder casos por este WhatsApp» DESLIGADO a resposta é
+ * `[montarAvisoDeCaso(aviso)]`: o mesmo texto de sempre, byte a byte, numa
+ * mensagem só. Ligado, o aviso sai em SETE mensagens, na ordem:
+ *
+ *   1. o corpo (cabeçalho + Tipo/Assunto/Cliente/O que precisa/Por que travou);
+ *   2. `Abrir: <link>`;
+ *   3. a instrução de orientar a IA;
+ *   4. `RESPONDER <id> <resposta ou decisão>`;
+ *   5. a instrução de pedir esclarecimento;
+ *   6. `PERGUNTAR <id> <pergunta ao cliente>`;
+ *   7. a frase de que a IA continua o atendimento.
+ *
+ * **Por que fatiar.** No celular, o comando só é útil se puder ser COPIADO
+ * inteiro com um toque: um balão que contém apenas `RESPONDER <id> …` é
+ * copiado e editado; um bloco de dez linhas obriga a selecionar à mão um UUID
+ * de 36 caracteres. O link sozinho também abre a prévia certa.
+ *
+ * Nenhuma frase nova: todas já moram no dicionário e passam por `traduzir`.
+ * Quem entrega as partes, uma por rodada do dreno e respeitando o espaçamento
+ * do número, é `./envio-em-partes.ts` + `aplicaAvisoDeCaso`.
+ */
+export function montarPartesDoAvisoDeCaso(aviso: AvisoDeCaso): string[] {
+  if (!aviso.respostaWhatsappHabilitada) return [montarAvisoDeCaso(aviso)];
+  const t = (texto: string): string => traduzir(texto, aviso.idioma);
+  return [
+    linhasDoCorpo(aviso, t).join("\n"),
+    `${t("Abrir")}: ${aviso.link}`,
+    t("Para orientar a IA sem falar diretamente com o cliente, envie:"),
+    `RESPONDER ${aviso.caseId} <resposta ou decisão>`,
+    t("Para pedir que a IA esclareça algo com o cliente, envie:"),
+    `PERGUNTAR ${aviso.caseId} <pergunta ao cliente>`,
+    t("A IA usa sua orientação e o histórico para continuar o atendimento."),
+  ];
 }
 
 /**
