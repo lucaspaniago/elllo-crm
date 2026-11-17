@@ -155,6 +155,9 @@ conversa e card, e a IA respondeu a um robô.
 
 ### D — a nota de tom áspero só diz "segui atendendo" quando a IA respondeu
 
+No ar desde 16/11/2026 (23:01 UTC) dentro de `elllo-v1.102.0-jev1`, junto com o E,
+autorizado pelo Lucas. PR #5 no fork, juntado ao `elllo` em avanço direto em 17/11/2026.
+
 Ramo `elllo-nota-honesta` (16/11/2026), separável do resto: só
 `lib/escalacao/tolerancia-ao-sentimento.ts`, `texto-do-aviso-de-passagem.ts` e
 `lib/i18n/aviso-de-passagem.ts`. Sem migration.
@@ -177,6 +180,10 @@ atendendo" com "provável brincadeira (75%)".
   resposta da IA por padrão) e `texto-do-aviso-de-passagem.test.ts`.
 
 ### E — o Jev avalia, cala a propaganda e monta o apanhado das 7h
+
+No ar desde 16/11/2026 (23:01 UTC) como `elllo-v1.102.0-jev1` (app, worker e scheduler; o
+scheduler muda pelo cron do apanhado), com a migration 9004, autorizado pelo Lucas. PR #6 no
+fork, juntado ao `elllo` em avanço direto em 17/11/2026.
 
 Ramo `elllo-jev` (16/11/2026), por cima do D. Migration 9004. Pedido do dono:
 usar o Jev na avaliação, calar propaganda, avaliar grupos sem responder e
