@@ -15,6 +15,7 @@ import { etiquetarProdutoAposEnvio } from './etiqueta-apos-envio';
 import { textosDoClienteNoHistorico } from './pedido-de-audio';
 import { claimOfJob } from '../queue/claim';
 import { currentExecutionBoundary, guardServiceEffect } from '@/lib/atendimento/fronteira-server';
+import { buildAtendimentosAnterioresBlock } from './abertura/atendimentos-anteriores';
 /**
  * Loop do agente v0 — handler do job `inbound_turn` (F2-09; blueprint 8.8).
  *
@@ -4174,13 +4175,21 @@ async function executarTurnoDoAgente(
     knowledgeSourceIds: agentConfig?.knowledgeSourceIds ?? [],
     activeKbVersionId: agentConfig?.activeKbVersionId ?? null,
   });
-  const [notesIndexBlock, compromissosBlock, origemBlock, noteIdRows, indiceDeConhecimentoBlock] =
+  // Fork elllo: a origem e o resumo do atendimento anterior vão na MESMA trilha (o teto de
+  // `tests/unit/turno-le-em-paralelo.test.ts` é 4 em voo).
+  const [notesIndexBlockDoContato, compromissosBlock, [origemBlock, anterioresBlock], noteIdRows, indiceDeConhecimentoBlock] =
     await Promise.all([
       notasDaPrevia
         ? notasDaPrevia.bloco
         : buildNotesIndexBlock(pool, tenantId, leadId, deps.knobs.notesIndexMaxTokens),
       preview?.kind === 'sandbox' ? '' : buildCompromissosBlock(pool, tenantId, leadId, new Date()),
-      preview ? '' : buildOrigemBlock(pool, tenantId, leadId, new Date()),
+      (async () =>
+        [
+          preview ? '' : await buildOrigemBlock(pool, tenantId, leadId, new Date()),
+          // O resumo do atendimento ANTERIOR do contato, rotulado como passado (ver
+          // `abertura/atendimentos-anteriores.ts`). Fora da prévia; sem fronteira, ''.
+          preview ? '' : await buildAtendimentosAnterioresBlock(pool, tenantId, leadId, currentExecutionBoundary()),
+        ] as const)(),
       preview
         ? null
         : pool
@@ -4200,6 +4209,10 @@ async function executarTurnoDoAgente(
           )
         : Promise.resolve(''),
     ]);
+  // Entra junto do índice de notas, sob "Memória do lead": é memória do contato
+  // que atravessa atendimentos. Vazio não muda o prompt.
+  const notesIndexBlock =
+    anterioresBlock !== '' ? `${notesIndexBlockDoContato}\n\n${anterioresBlock}` : notesIndexBlockDoContato;
   // Observabilidade da memória (Fase 2A): SÓ ids/contagens no log — headline/corpo
   // são PII e nunca saem do prompt. Prova auditável de que a memória durável do
   // lead entrou no contexto DESTE turno.
@@ -4208,6 +4221,7 @@ async function executarTurnoDoAgente(
       checkpoint_seq: effectivePrevious?.seq ?? null,
       notes_count: noteIdRows.length,
       note_ids: noteIdRows.map((r) => r.id),
+      resumo_anterior: anterioresBlock !== '',
     });
   }
 
