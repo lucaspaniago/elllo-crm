@@ -14,6 +14,7 @@ import {
 import { etiquetarProdutoAposEnvio } from './etiqueta-apos-envio';
 import { claimOfJob } from '../queue/claim';
 import { currentExecutionBoundary, guardServiceEffect } from '@/lib/atendimento/fronteira-server';
+import { buildAtendimentosAnterioresBlock } from './abertura/atendimentos-anteriores';
 /**
  * Loop do agente v0 — handler do job `inbound_turn` (F2-09; blueprint 8.8).
  *
@@ -3692,7 +3693,7 @@ async function executarTurnoDoAgente(
   const notasDaPrevia = preview
     ? blocoDeNotasDaPrevia(preview.notes ?? [], deps.knobs.notesIndexMaxTokens)
     : null;
-  const [notesIndexBlock, compromissosBlock, origemBlock, noteIdRows] = await Promise.all([
+  const [notesIndexBlockDoContato, compromissosBlock, origemBlock, noteIdRows, anterioresBlock] = await Promise.all([
     notasDaPrevia
       ? notasDaPrevia.bloco
       : buildNotesIndexBlock(pool, tenantId, leadId, deps.knobs.notesIndexMaxTokens),
@@ -3706,7 +3707,14 @@ async function executarTurnoDoAgente(
             [tenantId, leadId],
           )
           .then((r) => r.rows),
+    // O resumo do atendimento ANTERIOR do contato, rotulado como passado (ver
+    // `abertura/atendimentos-anteriores.ts`). Fora da prévia; sem fronteira, ''.
+    preview ? '' : buildAtendimentosAnterioresBlock(pool, tenantId, leadId, currentExecutionBoundary()),
   ]);
+  // Entra junto do índice de notas, sob "Memória do lead": é memória do contato
+  // que atravessa atendimentos. Vazio não muda o prompt.
+  const notesIndexBlock =
+    anterioresBlock !== '' ? `${notesIndexBlockDoContato}\n\n${anterioresBlock}` : notesIndexBlockDoContato;
   // Observabilidade da memória (Fase 2A): SÓ ids/contagens no log — headline/corpo
   // são PII e nunca saem do prompt. Prova auditável de que a memória durável do
   // lead entrou no contexto DESTE turno.
@@ -3715,6 +3723,7 @@ async function executarTurnoDoAgente(
       checkpoint_seq: effectivePrevious?.seq ?? null,
       notes_count: noteIdRows.length,
       note_ids: noteIdRows.map((r) => r.id),
+      resumo_anterior: anterioresBlock !== '',
     });
   }
 
