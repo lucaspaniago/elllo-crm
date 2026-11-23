@@ -15,6 +15,7 @@ import { etiquetarProdutoAposEnvio } from './etiqueta-apos-envio';
 import { claimOfJob } from '../queue/claim';
 import { currentExecutionBoundary, guardServiceEffect } from '@/lib/atendimento/fronteira-server';
 import { buildAtendimentosAnterioresBlock } from './abertura/atendimentos-anteriores';
+import { buildCitacaoBlock } from './abertura/mensagem-citada';
 /**
  * Loop do agente v0 — handler do job `inbound_turn` (F2-09; blueprint 8.8).
  *
@@ -1829,6 +1830,12 @@ export interface AgentTurnInput {
     origemBlock?: string;
     /** Texto exato da mensagem que acordou este turno inbound. */
     currentInboundText?: string;
+    /**
+     * A mensagem que o cliente CITOU ("responder em cima"), em texto — ver
+     * `abertura/mensagem-citada.ts`. Opcional pela mesma razão de `projeta`;
+     * vazio = o cliente não citou nada, e o prompt não muda.
+     */
+    citacaoBlock?: string;
     /**
      * #2729 — quem escreveu a mensagem que acordou este turno, quando ela veio
      * de um GRUPO. Opcional pela mesma razão de `projeta`: quem monta um ritual
@@ -3693,7 +3700,7 @@ async function executarTurnoDoAgente(
   const notasDaPrevia = preview
     ? blocoDeNotasDaPrevia(preview.notes ?? [], deps.knobs.notesIndexMaxTokens)
     : null;
-  const [notesIndexBlockDoContato, compromissosBlock, origemBlock, noteIdRows, anterioresBlock] = await Promise.all([
+  const [notesIndexBlockDoContato, compromissosBlock, origemBlock, noteIdRows, anterioresBlock, citacao] = await Promise.all([
     notasDaPrevia
       ? notasDaPrevia.bloco
       : buildNotesIndexBlock(pool, tenantId, leadId, deps.knobs.notesIndexMaxTokens),
@@ -3710,7 +3717,23 @@ async function executarTurnoDoAgente(
     // O resumo do atendimento ANTERIOR do contato, rotulado como passado (ver
     // `abertura/atendimentos-anteriores.ts`). Fora da prévia; sem fronteira, ''.
     preview ? '' : buildAtendimentosAnterioresBlock(pool, tenantId, leadId, currentExecutionBoundary()),
+    // A mensagem que o cliente citou (ver `abertura/mensagem-citada.ts`). O cenário
+    // do sandbox não tem conversa real; o rascunho assistido lê sem âncora.
+    preview?.kind === 'sandbox'
+      ? { bloco: '', origens: [] as string[] }
+      : buildCitacaoBlock(pool, {
+          organizationId: tenantId,
+          conversationId: input.conversationId,
+          inboundMessageId: input.inboundMessageId ?? null,
+          historico: effectiveContext.messages,
+          fuso: fusoDaOrg,
+          verImagens: agentConfig?.imageVisionEnabled ?? true,
+        }),
   ]);
+  if (citacao.origens.length > 0) {
+    // Só contagem e origem: o texto citado é PII e nunca vai a log.
+    runLog.info('mensagem citada pelo cliente entrou no turno', { citacoes: citacao.origens });
+  }
   // Entra junto do índice de notas, sob "Memória do lead": é memória do contato
   // que atravessa atendimentos. Vazio não muda o prompt.
   const notesIndexBlock =
@@ -5992,6 +6015,7 @@ async function executarTurnoDoAgente(
       compromissosBlock,
       origemBlock,
       formatoDoHistorico: deps.knobs.historyFormat ?? 'json',
+      citacaoBlock: citacao.bloco,
       ...(currentInboundText !== null ? { currentInboundText } : {}),
       // #2729 — o autor da mensagem canônica, quando ela é de grupo. Vai junto
       // do texto: sem ele o modelo ouve a voz e não sabe de quem é.
@@ -7072,6 +7096,7 @@ export async function runAgentPreview(
           entregues,
           compromissosBlock,
           formatoDoHistorico,
+          citacaoBlock,
         }) =>
           buildOpeningMessage(
             previous,
@@ -7085,6 +7110,7 @@ export async function runAgentPreview(
             undefined,
             '',
             formatoDoHistorico,
+            citacaoBlock,
           ),
       },
       preview,
@@ -7258,6 +7284,7 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
         currentInboundText,
         currentInboundSender,
         formatoDoHistorico,
+        citacaoBlock,
       }) =>
         buildOpeningMessage(
           previous,
@@ -7271,6 +7298,7 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
           currentInboundSender,
           origemBlock,
           formatoDoHistorico,
+          citacaoBlock,
         ),
     });
   };
