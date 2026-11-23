@@ -28,6 +28,14 @@ import { z } from 'zod';
 import type { Queryable } from '../queue/queue';
 import { countPayloadTokens } from '../edge/crm/get-lead-context';
 import { findForbiddenKey, zodIssuesSummary } from './lead-state';
+import {
+  CATEGORIAS_DO_DOSSIE,
+  LEGENDA_DO_DOSSIE,
+  fonteDaEscritaDoAgente,
+  rotuloDaLinha,
+  type CategoriaDoDossie,
+  type FonteDoDossie,
+} from './dossie';
 
 /** Whitelist EXATA do que o modelo salva — .strict() rejeita o resto (padrão F2-10). */
 export const saveLeadNoteInputSchema = z.strictObject({
@@ -35,6 +43,12 @@ export const saveLeadNoteInputSchema = z.strictObject({
   body: z.string().min(1).max(4_000),
   /** ids de notas que ESTA nota substitui (consolidação) — o modelo os vê no índice. */
   supersedes: z.array(z.string().min(1).max(64)).max(50).optional(),
+  /**
+   * Fork elllo (9005): do que a nota fala (o dossiê do contato). Ausente = `fato`. A
+   * FONTE (quem contou) não está aqui de propósito: é o código que a põe, pelo caminho
+   * da escrita (`fonteDaEscritaDoAgente`), e um `fonte` no payload é erro de ensino.
+   */
+  categoria: z.enum(CATEGORIAS_DO_DOSSIE).optional(),
 });
 export type SaveLeadNoteInput = z.infer<typeof saveLeadNoteInputSchema>;
 
@@ -42,6 +56,10 @@ export type SaveLeadNoteInput = z.infer<typeof saveLeadNoteInputSchema>;
 export interface LeadNoteIndexEntry {
   id: string;
   headline: string;
+  /** Fork elllo (9005). Ausente (fixture antiga, leitura sem a coluna) = linha sem rótulo. */
+  categoria?: CategoriaDoDossie;
+  fonte?: FonteDoDossie;
+  liberada?: boolean;
 }
 
 export type SaveLeadNoteResult =
@@ -56,7 +74,8 @@ export type SaveLeadNoteResult =
 
 const PAYLOAD_TEACHING =
   'Campos aceitos: headline (linha curta do índice, sempre visível), body (corpo completo, ' +
-  'lido sob demanda por get_lead_note) e supersedes (ids de notas que esta substitui) — nada além. ' +
+  'lido sob demanda por get_lead_note), supersedes (ids de notas que esta substitui) e categoria ' +
+  `(${CATEGORIAS_DO_DOSSIE.join(', ')}) — nada além. Quem contou é o sistema que registra. ` +
   'Lead e organização vêm do runtime, nunca do payload da tool.';
 
 function teachInvalidPayload(issues: string): SaveLeadNoteResult {
@@ -74,7 +93,13 @@ export function renderNotesIndex(entries: LeadNoteIndexEntry[]): string {
   if (entries.length === 0) {
     return '— sem notas registradas para este lead.';
   }
-  return entries.map((e) => `- [${e.id}] ${e.headline}`).join('\n');
+  const linhas = entries.map((e) =>
+    e.categoria !== undefined && e.fonte !== undefined
+      ? `- [${e.id}] ${rotuloDaLinha({ categoria: e.categoria, fonte: e.fonte, liberada: e.liberada === true })} ${e.headline}`
+      : `- [${e.id}] ${e.headline}`,
+  );
+  // A legenda só vai quando há linha rotulada (o índice sem a 9005 sai como antes).
+  return entries.some((e) => e.fonte !== undefined) ? [LEGENDA_DO_DOSSIE, ...linhas].join('\n') : linhas.join('\n');
 }
 
 /** Custo em tokens do índice (heurística determinística chars/3,5 — F2-08/F2-17). */
@@ -89,7 +114,7 @@ export async function getLeadNotesIndex(
   leadId: string,
 ): Promise<LeadNoteIndexEntry[]> {
   const { rows } = await db.query<LeadNoteIndexEntry>(
-    `select id, headline from lead_notes
+    `select id, headline, categoria, fonte, liberada from lead_notes
      where organization_id = $1 and contact_id = $2
      order by created_at, id`,
     [tenantId, leadId],
@@ -174,13 +199,18 @@ export async function applySaveLeadNote(
   // válidos + já escopados por tenant/lead) — id forjado/de outro lead vira no-op, nunca
   // erro de cast nem deleção cruzada.
   const current = await getLeadNotesIndex(db, ids.tenantId, ids.leadId);
-  const toDelete = current.filter((e) => superseded.has(e.id)).map((e) => e.id);
+  // Fork elllo (9005): o agente só consolida o que ELE escreveu. A nota do Lucas (a tela,
+  // o mensageiro do dono) nunca sai por `supersedes`: só quem a escreveu a corrige.
+  const toDelete = current.filter((e) => superseded.has(e.id) && e.fonte !== 'lucas').map((e) => e.id);
+  const intocaveis = new Set(current.filter((e) => e.fonte === 'lucas').map((e) => e.id));
   // Placeholder do MESMO comprimento de um uuid (36) para a nota nova: o custo estimado
   // na escrita bate com o render de leitura (id real), então "cabe no orçamento" no save
   // ⇒ cabe no índice injetado — a invariante do hard cap não vaza por sub-contagem.
+  const categoria: CategoriaDoDossie = input.categoria ?? 'fato';
+  const fonte = fonteDaEscritaDoAgente(categoria);
   const wouldBe: LeadNoteIndexEntry[] = [
-    ...current.filter((e) => !superseded.has(e.id)),
-    { id: '00000000-0000-0000-0000-000000000000', headline: input.headline },
+    ...current.filter((e) => !superseded.has(e.id) || intocaveis.has(e.id)),
+    { id: '00000000-0000-0000-0000-000000000000', headline: input.headline, categoria, fonte, liberada: false },
   ];
   if (estimateIndexTokens(wouldBe) > cfg.budgetTokens) {
     return {
@@ -204,12 +234,12 @@ export async function applySaveLeadNote(
        returning id
      ),
      inserted as (
-       insert into lead_notes (organization_id, contact_id, headline, body)
-       values ($1, $2, $4, $5)
+       insert into lead_notes (organization_id, contact_id, headline, body, categoria, fonte)
+       values ($1, $2, $4, $5, $6, $7)
        returning id
      )
      select inserted.id, (select count(*) from removed)::text as superseded from inserted`,
-    [ids.tenantId, ids.leadId, toDelete, input.headline, input.body],
+    [ids.tenantId, ids.leadId, toDelete, input.headline, input.body, categoria, fonte],
   );
   const row = rows[0]!;
   const supersededCount = Number(row.superseded);

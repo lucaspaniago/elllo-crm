@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Queryable } from '../queue/queue';
+import { ehCategoriaDoDossie, rotuloDaLinha } from './dossie';
 import { resolveActiveLeadForContact, type LeadCandidate } from '@/lib/leads/active-lead';
 import { formatCents } from '@/lib/money';
 import { fusoValido, FUSO_PADRAO } from '@/lib/tempo/fusos';
@@ -149,7 +150,9 @@ export function normalizarFontesDoAtendimento(f: FontesDoAtendimento, tenantId: 
     }
   }
   const notas = f.notas.filter(pertence);
-  for (const n of notas.slice(0,8)) adicionar('perfil', n, 'memoria_do_agente', 'contato_sem_beneficiario_inferido', 'recorded', { titulo: n.headline, texto: n.body, autoridade: 'memoria_auxiliar_nao_verificada' });
+  // Fork elllo (9005): a nota leva do que fala e quem contou; a do Lucas, o aviso de que é só contexto.
+  for (const n of notas.slice(0,8)) adicionar('perfil', n, 'memoria_do_agente', 'contato_sem_beneficiario_inferido', 'recorded', { titulo: n.headline, texto: n.body, autoridade: 'memoria_auxiliar_nao_verificada',
+    ...(typeof n.fonte === 'string' ? { dossie: rotuloDaLinha({ categoria: ehCategoriaDoDossie(n.categoria) ? n.categoria : 'fato', fonte: n.fonte === 'pessoa' || n.fonte === 'helo' ? n.fonte : 'lucas', liberada: n.liberada === true }) } : {}) });
   const auxiliares = (f.auxiliares ?? []).filter(m => m.organization_id === tenantId);
   for (const m of auxiliares.slice(0,8)) adicionar('perfil', m, 'memoria_org', 'organizacao', 'recorded', { texto:m.body,autoridade:'fonte_auxiliar_nao_aprovacao_individual_ou_recibo' });
   encontrados.perfil += Math.max(0,notas.length-8) + Math.max(0,auxiliares.length-8);
@@ -207,7 +210,7 @@ export async function carregarContextoDoAtendimento(db: Queryable, ids: { tenant
   ) select
     (select jsonb_build_object('id',id,'organization_id',organization_id,'birthdate',birthdate,'tags',tags,'updated_at',updated_at) from contacts where organization_id=$1 and id=$2) as contato,
     (select coalesce(jsonb_agg(x),'[]') from (select l.id,l.organization_id,l.contact_id,l.pipeline_id,l.title,l.description,l.status,l.source,l.custom_fields,l.created_at,l.updated_at,l.last_activity_at,p.settings->'fields' as field_definitions from crm_leads l join crm_pipelines p on p.id=l.pipeline_id and p.organization_id=l.organization_id where l.organization_id=$1 and l.contact_id=$2 order by l.updated_at desc,l.id limit 9) x) as negocios,
-    (select coalesce(jsonb_agg(x),'[]') from (select id,organization_id,contact_id,headline,body,created_at,updated_at from lead_notes where organization_id=$1 and contact_id=$2 order by created_at desc,id limit 9) x) as notas,
+    (select coalesce(jsonb_agg(x),'[]') from (select id,organization_id,contact_id,headline,body,categoria,fonte,liberada,created_at,updated_at from lead_notes where organization_id=$1 and contact_id=$2 order by created_at desc,id limit 9) x) as notas,
     (select coalesce(jsonb_agg(x),'[]') from (select a.id,a.organization_id,a.contact_id,a.lead_id,a.type,a.payload,a.reason,a.actor_kind,a.performed_by_user_id,a.performed_at,s.next_action_seq as current_action_seq from crm_lead_activities a join crm_leads l on l.id=a.lead_id and l.organization_id=a.organization_id and l.contact_id=a.contact_id left join lead_state s on s.organization_id=a.organization_id and s.contact_id=a.contact_id where a.organization_id=$1 and a.contact_id=$2 and a.type in ('next_action_approved','next_action_dismissed','note_added') order by a.performed_at desc,a.id limit 9) x) as atividades,
     (select coalesce(jsonb_agg(x),'[]') from (select id,organization_id,contact_id,lead_id,titulo,status,decided_at,decision_reason,created_at,updated_at from crm_proposals where organization_id=$1 and contact_id=$2 and (conversation_id=$3 or conversation_id is null) and status<>'rascunho' order by updated_at desc,id limit 9) x) as propostas,
     (select coalesce(jsonb_agg(x),'[]') from (select a.id,a.organization_id,a.contact_id,a.title,a.status,a.starts_at,a.ends_at,a.time_zone,a.cancelled_at,a.created_at,a.updated_at,

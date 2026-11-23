@@ -314,6 +314,11 @@ const envSchema = z.object({
   // sempre: proposta nunca vira comportamento sem o dono publicar na tela.
   FLYWHEEL_INTERVAL_MS: z.coerce.number().int().min(0).default(21_600_000),
   FLYWHEEL_BATCH_LIMIT: z.coerce.number().int().positive().default(10),
+  // Fork elllo (9005): o dossiê ao fechar o atendimento — de quanto em quanto o worker
+  // resume no dossiê do contato o atendimento que fechou. 0 = OFF (o padrão): liga no
+  // .env da instalação, e voltar a 0 desliga sem trocar imagem.
+  DOSSIE_AO_FECHAR_INTERVAL_MS: z.coerce.number().int().min(0).default(0),
+  DOSSIE_AO_FECHAR_BATCH_LIMIT: z.coerce.number().int().positive().default(10),
   // Contenção de egress — hosts EXTRA além do Supabase/WAHA (CSV). Fail-closed.
   EGRESS_EXTRA_ALLOWED_HOSTS: z.string().optional(),
   // Elegibilidade da IA (gate opt-in `channel_sessions.metadata.ai_gate=allowlist`):

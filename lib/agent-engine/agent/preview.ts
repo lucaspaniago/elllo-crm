@@ -32,6 +32,7 @@ import type { Citation } from '@/lib/ai/citations/types';
 import type { FotosPreparadas, MidiaPreparada } from './fotos-do-produto';
 import { countPayloadTokens } from '@/lib/ai/estimativa-de-tokens';
 import { renderNotesIndexBlock } from './lead-notes';
+import { LEGENDA_DO_DOSSIE, rotuloDaLinha, trechosReservados, type CategoriaDoDossie, type FonteDoDossie } from './dossie';
 
 export interface TurnPreview {
   kind: 'sandbox' | 'assisted';
@@ -41,7 +42,15 @@ export interface TurnPreview {
   context: Extract<LeadContextResult, { ok: true }>;
   previous?: LeadCheckpointRow | null;
   /** `id` endereça a nota no modo índice (`get_lead_note`) — ver `blocoDeNotasDaPrevia`. */
-  notes?: Array<{ id: string; headline: string; body: string }>;
+  notes?: Array<{
+    id: string;
+    headline: string;
+    body: string;
+    /** Fork elllo (9005): o dossiê. Ausentes = nota sem rótulo (cenário, fixture). */
+    categoria?: CategoriaDoDossie;
+    fonte?: FonteDoDossie;
+    liberada?: boolean;
+  }>;
   feedback?: string;
   /** Null means a scenario, never a synthetic identifier passed to SQL. */
   contactId: string | null;
@@ -86,7 +95,12 @@ export function blocoDeNotasDaPrevia(
   notes: NonNullable<TurnPreview['notes']>,
   indexBudget: number,
 ): { bloco: string; inline: boolean } {
-  const inline = notes.map((n) => n.headline + ': ' + n.body).join('\n');
+  const linhas = notes.map((n) =>
+    (n.categoria !== undefined && n.fonte !== undefined
+      ? `${rotuloDaLinha({ categoria: n.categoria, fonte: n.fonte, liberada: n.liberada === true })} `
+      : '') + n.headline + ': ' + n.body,
+  );
+  const inline = (notes.some((n) => n.fonte !== undefined) ? [LEGENDA_DO_DOSSIE, ...linhas] : linhas).join('\n');
   if (countPayloadTokens(inline) <= PREVIEW_NOTES_INLINE_MAX_TOKENS) return { bloco: inline, inline: true };
   return { bloco: renderNotesIndexBlock(notes, indexBudget), inline: false };
 }
@@ -209,6 +223,12 @@ export async function previewGateContext(
       toolCalledThisTurn: false,
     },
     internalVocabularyEnforced: true,
+    // Fork elllo (9005): a MESMA cerca do turno real — o trecho do que o Lucas contou que a
+    // conversa ainda não tem. A prévia é onde o dono vê o que o contato receberia.
+    trechosDoLucas: trechosReservados(
+      (p.notes ?? []).map((n) => ({ headline: n.headline, body: n.body, fonte: n.fonte ?? '', liberada: n.liberada === true })),
+      p.context.context.messages.map((m) => m.body),
+    ),
     // A MESMA decisão do turno real: a camada de afirmação clínica é da organização.
     // Um Testar que arma diferente da produção faz quem afina o prompt testar contra
     // outro sistema — o mesmo motivo do `agenda` logo acima.

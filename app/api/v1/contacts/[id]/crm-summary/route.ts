@@ -221,7 +221,8 @@ export async function GET(
       .is("fechada_em", null)
       .order("aberta_em", { ascending: true })
       .limit(5),
-    supabase.from("lead_notes").select("id, headline, body").eq("contact_id", contactId).eq("organization_id", contactScope.organization_id).order("created_at", { ascending: false }).limit(20),
+    // Fork elllo (9005): o dossiê — com a categoria e quem contou; 60, para caber o dossiê inteiro.
+    supabase.from("lead_notes").select("id, headline, body, categoria, fonte, liberada").eq("contact_id", contactId).eq("organization_id", contactScope.organization_id).order("created_at", { ascending: false }).limit(60),
     supabase.from("demandas").select("id, desfecho, fechada_em").eq("contact_id", contactId).eq("organization_id", contactScope.organization_id).not("fechada_em", "is", null).order("fechada_em", { ascending: false }).limit(5),
   ]);
 

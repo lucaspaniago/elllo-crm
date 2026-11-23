@@ -137,6 +137,7 @@ import { buildOpeningMessage, ritualBlocks, type FormatoDoHistorico } from "./ab
 import { snapshotDoCaso } from "./conversa-do-caso/contexto";
 import { lerRemetenteDeGrupo, type RemetenteDeGrupo } from "@/lib/messaging/remetente-de-grupo";
 import { applySaveLeadNote, buildNotesIndexBlock, getLeadNoteBody } from './lead-notes';
+import { CATEGORIAS_DO_DOSSIE, SIGNIFICADO_DA_CATEGORIA, trechosReservados } from './dossie';
 import { buildCompromissosBlock } from './compromissos-do-contato';
 import { buildOrigemBlock } from './abertura/origem-do-contato';
 import { agendaNoFechamento } from './abertura/agenda-no-fechamento';
@@ -474,7 +475,11 @@ export const AGENT_TOOL_DEFS = {
       'você vai querer lembrar depois: preferências, contexto pessoal, restrições, o que já foi ' +
       'oferecido. A headline (linha curta) entra sempre no índice de memória do lead; o corpo completo ' +
       'fica guardado e você o relê sob demanda com get_lead_note. Para CONSOLIDAR notas antigas, ' +
-      'liste os ids delas em "supersedes" (você os vê no índice) — elas são removidas ao salvar a nova.',
+      'liste os ids delas em "supersedes" (você os vê no índice) — elas são removidas ao salvar a nova ' +
+      '(as que o Lucas contou ficam). Diga a categoria: o dossiê desta pessoa, para o rapport ' +
+      `(${CATEGORIAS_DO_DOSSIE.map((c) => `${c}: ${SIGNIFICADO_DA_CATEGORIA[c]}`).join('; ')}). ` +
+      'Guarde só o que a pessoa contou de si mesma ou o que você notou do jeito e do tom dela; nunca o ' +
+      'que ela contou de outra pessoa.',
     // Schema LARGO para o SDK (o modelo vê os campos); a validação REAL é a whitelist
     // .strict() + guard de prototype pollution dentro de applySaveLeadNote — campo
     // extra/forjado vira erro de ENSINO ao modelo, nunca exceção do SDK nem strip silencioso.
@@ -486,6 +491,10 @@ export const AGENT_TOOL_DEFS = {
           .array(z.string())
           .optional()
           .describe('ids de notas que esta substitui/consolida (vistos no índice de memória)'),
+        categoria: z
+          .enum(CATEGORIAS_DO_DOSSIE)
+          .optional()
+          .describe('do que a nota fala (ausente = fato)'),
       })
       .passthrough(),
   },
@@ -3720,8 +3729,12 @@ async function executarTurnoDoAgente(
           preview
             ? null
             : await pool
-                .query<{ id: string }>(
-                  'select id from lead_notes where organization_id = $1 and contact_id = $2 order by created_at',
+                // Fork elllo (9005): a mesma leitura traz o texto das notas do Lucas, para a
+                // cerca `nota_do_lucas` (o corpo das outras não é lido aqui).
+                .query<{ id: string; headline: string; body: string; fonte: string; liberada: boolean }>(
+                  `select id, headline, case when fonte = 'lucas' and not liberada then body else '' end as body,
+                          fonte, liberada
+                     from lead_notes where organization_id = $1 and contact_id = $2 order by created_at`,
                   [tenantId, leadId],
                 )
                 .then((r) => r.rows),
@@ -3739,6 +3752,10 @@ async function executarTurnoDoAgente(
               }),
         ] as const)(),
     ]);
+  // Fork elllo (9005): o que o Lucas contou deste contato e a conversa ainda não tem —
+  // a cerca `nota_do_lucas` do envio. Na prévia, quem monta é `previewGateContext`.
+  const trechosDoLucas =
+    noteIdRows === null ? undefined : trechosReservados(noteIdRows, effectiveContext.messages.map((m) => m.body));
   if (citacao.origens.length > 0) {
     // Só contagem e origem: o texto citado é PII e nunca vai a log.
     runLog.info('mensagem citada pelo cliente entrou no turno', { citacoes: citacao.origens });
@@ -4742,6 +4759,9 @@ async function executarTurnoDoAgente(
             // não é dele, e a única saída seria o silêncio. O follow-up determinístico
             // idem (ver GateContext.internalVocabularyEnforced).
             enforceInternalVocabulary: true,
+            // Fork elllo (9005): fica armada também no re-run do fail-safe (que só desarma o
+            // vocabulário interno) — ver `notaDoLucasGate`.
+            ...(trechosDoLucas !== undefined ? { trechosDoLucas } : {}),
             // Afirmação clínica: mesma razão do vocabulário (só o corpo do MODELO), e
             // só para a organização que ligou a camada — ver
             // `GateContext.clinicalClaimEnforced`. Sem linha, desligada: não há padrão de

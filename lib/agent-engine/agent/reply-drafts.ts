@@ -8,6 +8,7 @@ import { latestCheckpoint, runAgentPreview, type InboundTurnDeps } from "./inbou
 import { newPreviewResult } from "./preview";
 import { temOfertaAoAtendente } from "./sugestao-de-resposta";
 import type { ServiceBoundary } from "@/lib/atendimento/fronteira";
+import type { CategoriaDoDossie, FonteDoDossie } from "./dossie";
 import { parseServiceBoundary, assertCurrentServiceBoundary } from "@/lib/atendimento/fronteira";
 import {
   readCurrentServiceBoundary,
@@ -87,8 +88,11 @@ export async function generateReplyDraft(
         throw new Error("reply_context_unavailable");
       // Com id e na ordem de `getLeadNotesIndex`: acima do teto inline a prévia
       // usa o índice do turno real, e o get_lead_note busca a nota pelo id.
-      const { rows: notes } = await pool.query<{ id: string; headline: string; body: string }>(
-        "select id::text as id,headline,body from lead_notes where organization_id=$1 and contact_id=$2 order by created_at, id",
+      const { rows: notes } = await pool.query<{
+        id: string; headline: string; body: string;
+        categoria: CategoriaDoDossie; fonte: FonteDoDossie; liberada: boolean;
+      }>(
+        "select id::text as id,headline,body,categoria,fonte,liberada from lead_notes where organization_id=$1 and contact_id=$2 order by created_at, id",
         [input.organizationId, input.contactId],
       );
       const { rows: feedback } = await pool.query<{ feedback: unknown }>(

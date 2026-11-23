@@ -57102,6 +57102,142 @@ create policy leitura_itens_do_apanhado
 comment on table public.itens_do_apanhado is
   'Fork elllo (9004): propaganda silenciada e mensagem de grupo que vale resposta, para o apanhado das 7h ao dono. Só o ponteiro para a mensagem (o texto é lido na hora, e a redação da LGPD vale). incluido_em = o dia local do apanhado que levou o item.';
 
+-- ---- fork elllo: o dossiê do contato (migration 9005) ----
+-- `lead_notes` ganha categoria, fonte (posta pelo código) e liberada; `lead_dossie_flushes`
+-- marca o atendimento fechado já resumido; `fn_rapport_do_contato` é a leitura do mensageiro.
+-- Cabeçalho da 9005 para o racional inteiro.
+do $$
+begin
+  if not exists (
+    select 1 from information_schema.columns
+     where table_schema = 'public' and table_name = 'lead_notes' and column_name = 'fonte'
+  ) then
+    alter table public.lead_notes add column categoria text not null default 'fato';
+    alter table public.lead_notes add column fonte text not null default 'lucas';
+    alter table public.lead_notes add column liberada boolean not null default false;
+    -- As notas de antes: recado do mensageiro é pendência contada pelo dono; o
+    -- resto foi o agente que gravou, do que o contato disse.
+    update public.lead_notes
+       set categoria = 'pendente', fonte = 'lucas'
+     where headline like 'Recado do Lucas%';
+    update public.lead_notes
+       set categoria = 'fato', fonte = 'pessoa'
+     where headline not like 'Recado do Lucas%';
+  end if;
+end $$;
+
+-- Vocabulário fechado, conferido contra o TypeScript por
+-- tests/unit/dossie-do-contato.test.ts (`CATEGORIAS_DO_DOSSIE`,
+-- `FONTES_DO_DOSSIE` em lib/agent-engine/agent/dossie.ts).
+alter table public.lead_notes drop constraint if exists lead_notes_categoria_check;
+alter table public.lead_notes add constraint lead_notes_categoria_check
+  check (categoria in ('conheceu', 'gostos', 'rotina', 'pendente', 'jeito', 'tom', 'fato'));
+
+alter table public.lead_notes drop constraint if exists lead_notes_fonte_check;
+alter table public.lead_notes add constraint lead_notes_fonte_check
+  check (fonte in ('pessoa', 'helo', 'lucas'));
+
+-- "Pode usar com ele" só existe para o que o dono contou: o que o próprio
+-- contato disse já é dele, e a observação da IA não vai ao contato.
+alter table public.lead_notes drop constraint if exists lead_notes_liberada_check;
+alter table public.lead_notes add constraint lead_notes_liberada_check
+  check (not liberada or fonte = 'lucas');
+
+-- A observação da IA é só sobre o jeito e o tom (a fonte `helo` não descreve
+-- fato da vida de ninguém).
+alter table public.lead_notes drop constraint if exists lead_notes_helo_so_jeito_e_tom_check;
+alter table public.lead_notes add constraint lead_notes_helo_so_jeito_e_tom_check
+  check (fonte <> 'helo' or categoria in ('jeito', 'tom'));
+
+comment on column public.lead_notes.categoria is
+  'Fork elllo (9005): conheceu, gostos, rotina, pendente, jeito, tom ou fato.';
+comment on column public.lead_notes.fonte is
+  'Fork elllo (9005): quem contou — pessoa (o contato), helo (observação da IA sobre jeito/tom) ou lucas (a empresa: tela ou mensageiro do dono). Posta pelo código; default lucas, a mais restrita.';
+comment on column public.lead_notes.liberada is
+  'Fork elllo (9005): o dono disse que pode usar com o contato. Só vale para fonte lucas.';
+
+-- ── a marca do atendimento já resumido ─────────────────────────────────────
+create table if not exists public.lead_dossie_flushes (
+  conversation_id  uuid not null references public.conversations(id) on delete cascade,
+  service_revision integer not null,
+  status           text not null,
+  notas_gravadas   integer not null default 0,
+  created_at       timestamptz not null default now(),
+  primary key (conversation_id, service_revision)
+);
+
+alter table public.lead_dossie_flushes drop constraint if exists lead_dossie_flushes_status_check;
+alter table public.lead_dossie_flushes add constraint lead_dossie_flushes_status_check
+  check (status in ('feito', 'sem_notas', 'falhou', 'sem_conversa'));
+
+alter table public.lead_dossie_flushes enable row level security;
+revoke all on public.lead_dossie_flushes from anon, authenticated;
+grant  all on public.lead_dossie_flushes to service_role;
+
+comment on table public.lead_dossie_flushes is
+  'Fork elllo (9005): o atendimento fechado (conversa, revisão) que o worker já resumiu no dossiê (lead_notes). Só a marca, sem texto. Só o servidor lê e grava.';
+
+-- ── a leitura de rapport do mensageiro ─────────────────────────────────────
+create or replace function public.fn_rapport_do_contato(
+  p_organization_id uuid,
+  p_contact_id uuid default null,
+  p_telefone text default null
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+begin
+  -- plpgsql e não sql: o corpo só é conferido na chamada, e o baseline cria esta
+  -- função antes de `contact_phones` (9043) existir.
+  return (
+  with contato as (
+    select c.id, c.display_name
+      from public.contacts c
+     where c.organization_id = p_organization_id
+       and coalesce(c.is_anonymized, false) = false
+       and (
+         (p_contact_id is not null and c.id = p_contact_id)
+         or (p_contact_id is null and p_telefone is not null and exists (
+               select 1 from public.contact_phones cp
+                where cp.organization_id = p_organization_id
+                  and cp.contact_id = c.id
+                  and public.fn_telefone_canonico(cp.phone_number) = public.fn_telefone_canonico(p_telefone)))
+       )
+     order by c.created_at
+     limit 1
+  )
+  select case when not exists (select 1 from contato) then null else jsonb_build_object(
+    'contact_id', (select id from contato),
+    'nome', (select display_name from contato),
+    'linhas', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'categoria', n.categoria,
+               'fonte', n.fonte,
+               'liberada', n.liberada,
+               'titulo', n.headline,
+               'texto', n.body,
+               'quando', n.created_at)
+             order by array_position(array['conheceu','gostos','rotina','pendente','jeito','tom','fato'], n.categoria), n.created_at)
+        from public.lead_notes n
+       where n.organization_id = p_organization_id
+         and n.contact_id = (select id from contato)
+         and n.headline not like 'Recado do Lucas%'
+         and n.headline <> '(anonimizado)'
+    ), '[]'::jsonb)
+  ) end
+  );
+end;
+$$;
+
+revoke all on function public.fn_rapport_do_contato(uuid, uuid, text) from public, anon, authenticated;
+grant execute on function public.fn_rapport_do_contato(uuid, uuid, text) to service_role;
+
+comment on function public.fn_rapport_do_contato(uuid, uuid, text) is
+  'Fork elllo (9005): o rapport do contato (notas por categoria, com a fonte), para o mensageiro do Hermes. Sem mensagem da conversa e sem os recados operacionais. Só service_role.';
+
 -- ---- #3042: desmarcar o exemplo tira do RAG os trechos já aprendidos da conversa (migration 0688) ----
 -- Desmarcar `usable_for_rag` só impedia ingestões futuras; os `ai_chunks` já gravados da conversa
 -- seguiam alcançáveis por `retrieve_top_k_chunks`. A função remove os trechos cujo

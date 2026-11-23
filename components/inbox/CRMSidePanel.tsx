@@ -22,6 +22,7 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { DossieDoContato, type LinhaDoDossieNaTela } from "@/components/inbox/DossieDoContato";
 import { Separator } from "@/components/ui/separator";
 import { Tag, Receipt, Users, ArrowRight, CaretDoubleLeft, CaretDoubleRight } from "@/lib/ui/icons";
 import { apiClient } from "@/lib/api/client";
@@ -832,7 +833,7 @@ export function CRMSidePanel({
   const [orders, setOrders] = useState<OrderRow[] | null>(null);
   const [activities, setActivities] = useState<ActivityRow[] | null>(null);
   const [demandas, setDemandas] = useState<DemandaRow[] | null>(null);
-  const [fatos, setFatos] = useState<Array<{ id: string; headline: string; body: string }>>([]);
+  const [fatos, setFatos] = useState<LinhaDoDossieNaTela[]>([]);
   const [historico, setHistorico] = useState<Array<{ id: string; desfecho: string; fechada_em: string }>>([]);
   const [anuncios, setAnuncios] = useState<{ origem: AnuncioDeOrigem | null; recente: AnuncioMaisRecente | null }>({ origem: null, recente: null });
   const [summaryContactId, setSummaryContactId] = useState<string | null>(null);
@@ -904,7 +905,7 @@ export function CRMSidePanel({
             orders: OrderRow[];
             activities: ActivityRow[];
             demandas: DemandaRow[];
-            fatos?: Array<{ id: string; headline: string; body: string }>;
+            fatos?: LinhaDoDossieNaTela[];
             historico?: Array<{ id: string; desfecho: string; fechada_em: string }>;
             anuncio_de_origem?: AnuncioDeOrigem | null;
             anuncio_mais_recente?: AnuncioMaisRecente | null;
@@ -1303,8 +1304,13 @@ export function CRMSidePanel({
         <section data-testid="inbox-memoria">
           <h3 className="text-xs font-semibold">{t("Memória do contato")}</h3>
           <p className="mt-1 text-xs text-muted-foreground">{t("Fatos duráveis registrados nas notas. Pendências pertencem à demanda vigente.")}</p>
-          {!sectionsLoading && fatos.map((f) => <details key={f.id} className="mt-2 text-xs"><summary className="wrap-anywhere">{f.headline}</summary><p className="mt-1 whitespace-pre-wrap wrap-anywhere">{f.body}</p></details>)}
-          {!sectionsLoading && fatos.length === 0 && <p className="mt-2 text-xs text-muted-foreground">{t("Nenhum fato durável registrado.")}</p>}
+          {/* Fork elllo (9005): o dossiê do contato — por categoria, com quem contou; o dono corrige. */}
+          {contactId && <DossieDoContato
+            contactId={contactId}
+            linhas={fatos}
+            carregando={sectionsLoading}
+            somenteLeitura={readonly || Boolean(user.support) || !roleAtLeast(activeOrg?.role, "manager")}
+          />}
           {!sectionsLoading && historico.length > 0 && <div className="mt-3 text-xs"><h4>{t("Histórico encerrado — sem tarefas pendentes")}</h4>{historico.map((h) => <p key={h.id}>{t(DESFECHO_LEGIVEL[h.desfecho] ?? h.desfecho)}{h.fechada_em ? ` · ${shortDate(h.fechada_em, localeDaData)}` : ""}</p>)}</div>}
         </section>
         <Separator />
