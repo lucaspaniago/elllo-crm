@@ -121,7 +121,7 @@ const TETO: Readonly<Record<string, { tokens: number; motivo: string }>> = {
   "send_message": { tokens: 137, motivo: BASE },
   "update_lead_state": { tokens: 240, motivo: BASE },
   "schedule_followup": { tokens: 200, motivo: BASE },
-  "save_lead_note": { tokens: 229, motivo: BASE },
+  "save_lead_note": { tokens: 427, motivo: "+198 do dossiê do contato (fork elllo, 9005): a categoria com o significado de cada uma e a regra de não guardar o que a pessoa contou de terceiros" },
   "get_lead_note": { tokens: 99, motivo: BASE },
   "search_knowledge": { tokens: 131, motivo: BASE },
   "request_human_handoff": { tokens: 510, motivo: BASE },
@@ -132,7 +132,7 @@ const TETO: Readonly<Record<string, { tokens: number; motivo: string }>> = {
   "schedule_followup (com negócio)": { tokens: 314, motivo: BASE },
 };
 
-const TETO_TOTAL = 29569;
+const TETO_TOTAL = 29767;
 
 const VARIANTE = "schedule_followup (com negócio)";
 

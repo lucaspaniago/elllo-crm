@@ -35,6 +35,8 @@ const ORDEM_ESPERADA = [
   "factual_claim",
   "case_promise",
   "internal_vocabulary",
+  // Fork elllo (9005): o que o Lucas contou do contato não vai ao contato.
+  "nota_do_lucas",
   "clinical_claim",
   "commercial_restriction",
   "agenda_stall",
@@ -71,8 +73,8 @@ describe("forma da cadeia before_send", () => {
     // O par (tamanho, versão) é o que amarra os dois. Acrescentar um gate sem
     // bumpar deixa o trace de auditoria mentindo sobre qual cadeia rodou — e o
     // trace é justamente a prova que as Fases 0–2 usam para dizer "não regrediu".
-    expect(BEFORE_SEND_GATES).toHaveLength(17);
-    expect(BEFORE_SEND_CHAIN_VERSION).toBe(13);
+    expect(BEFORE_SEND_GATES).toHaveLength(18);
+    expect(BEFORE_SEND_CHAIN_VERSION).toBe(14);
   });
 
   it("internal_vocabulary roda ANTES do disclosure — inspeciona o texto do modelo, não o emendado", () => {
@@ -94,7 +96,8 @@ describe("forma da cadeia before_send", () => {
     // Mesma razão dos dois vizinhos: o disclosure pode emendar o corpo, e a afirmação
     // clínica que se quer barrar é a que o MODELO escreveu.
     const nomes = BEFORE_SEND_GATES.map((g) => g.name);
-    expect(nomes.indexOf("clinical_claim")).toBe(nomes.indexOf("internal_vocabulary") + 1);
+    // Fork elllo (9005): `nota_do_lucas` fica entre os dois (também lê só o texto do modelo).
+    expect(nomes.indexOf("clinical_claim")).toBe(nomes.indexOf("nota_do_lucas") + 1);
     expect(nomes.indexOf("commercial_restriction")).toBe(nomes.indexOf("clinical_claim") + 1);
     expect(nomes.indexOf("agenda_stall")).toBe(nomes.indexOf("commercial_restriction") + 1);
   });
