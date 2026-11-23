@@ -157,7 +157,6 @@ CRONS="
 # relatório do dia local. Se a instalação estava parada na hora, sai na primeira
 # rodada depois. A linha única por organização e dia segura a repetição.
 */15 * * * *|90|api/v1/cron/relatorio-operacao-diario
-*/10 * * * *|90|api/v1/cron/apanhado-do-dono
 # A DATA DO FUNIL (#989). Mesma cadência e mesmo motivo do aniversário: de hora
 # em hora, e quem decide o momento é o relógio de parede de CADA organização —
 # a rodada só age naquela que marca a hora da varredura. Minuto diferente do
@@ -196,6 +195,9 @@ CRONS="
 # catalogo_do_feed (lib/cron/piso-ocioso.ts) faz a batida sair antes de
 # qualquer leitura no banco.
 25 */2 * * *|120|api/v1/cron/catalog-feed-sync
+# Fork elllo (9004): o apanhado das 7h ao dono. No FIM da lista, para não mover as
+# linhas que a documentação do autor cita por número (data-retention, media-retention).
+*/10 * * * *|90|api/v1/cron/apanhado-do-dono
 "
 
 # CRONTAB_PATH é ponto de injeção do teste (tests/shell/scheduler-entrypoint.test.sh).
