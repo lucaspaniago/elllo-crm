@@ -91,6 +91,10 @@ const NAO_AVALIAVEIS_SEM_TURNO: ReadonlyArray<{ gate: string; porque: string }> 
   },
   { gate: "disclosure", porque: "depende de esta ser a primeira mensagem ao contato" },
   {
+    gate: "nota_do_lucas",
+    porque: "depende das notas que a equipe escreveu sobre um contato de verdade — o teste não tem contato",
+  },
+  {
     gate: "clinical_claim",
     porque:
       "depende de a organização ter ligado \"Não fazer afirmação clínica\" em Segurança; quando ligada, a prévia do motor aplica",

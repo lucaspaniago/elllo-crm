@@ -2303,6 +2303,11 @@ export const DICIONARIO: Traducoes = {
   "Fatos duráveis registrados nas notas. Pendências pertencem à demanda vigente.": { es: "Hechos duraderos registrados en las notas. Los pendientes corresponden al caso vigente." },
   "Nenhum fato durável registrado.": { es: "No hay hechos duraderos registrados." },
   // Fork elllo (9005): o dossiê do contato.
+  "Não contar ao contato o que a equipe anotou só para a IA": { es: "No contarle al contacto lo que el equipo anotó solo para la IA" },
+  "Barra a mensagem que repete um trecho de uma nota que a equipe escreveu sobre o contato e não liberou para usar com ele.": { es: "Bloquea el mensaje que repite un fragmento de una nota que el equipo escribió sobre el contacto y no liberó para usar con él." },
+  "É o que a equipe contou em confiança. Liberar uma nota é escolha nota a nota, na ficha do contato. Regra fixa, sem custo.": { es: "Es lo que el equipo contó en confianza. Liberar una nota es una elección nota por nota, en la ficha del contacto. Regla fija, sin costo." },
+  "depende das notas que a equipe escreveu sobre um contato de verdade — o teste não tem contato": { es: "depende de las notas que el equipo escribió sobre un contacto real — la prueba no tiene contacto" },
+  "Não enviei: a mensagem repetia o que a equipe anotou sobre o contato só para a IA": { es: "No envié: el mensaje repetía lo que el equipo anotó sobre el contacto solo para la IA" },
   "Como se conheceram": { es: "Cómo se conocieron" },
   "Gostos e assuntos": { es: "Gustos y temas" },
   "Rotina": { es: "Rutina" },

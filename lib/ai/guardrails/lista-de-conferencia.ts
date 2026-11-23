@@ -202,6 +202,17 @@ export const CONFERENCIAS_DE_SAIDA: readonly ConferenciaDeSaida[] = [
      camada: null,
   },
   {
+    // Fork elllo (9005): o dossiê do contato.
+    nome: "nota_do_lucas",
+    rotulo: "Não contar ao contato o que a equipe anotou só para a IA",
+    oQueProtege:
+      "Barra a mensagem que repete um trecho de uma nota que a equipe escreveu sobre o contato e não liberou para usar com ele.",
+    escolha: null,
+    porQueNaoSeDesliga:
+      "É o que a equipe contou em confiança. Liberar uma nota é escolha nota a nota, na ficha do contato. Regra fixa, sem custo.",
+    camada: null,
+  },
+  {
     nome: "clinical_claim",
     rotulo: "Não fazer afirmação clínica",
     oQueProtege:

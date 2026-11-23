@@ -78,6 +78,8 @@ export function vetoReason(gate: string, code: string, trecho?: string | null): 
     promise: "Não enviei: a mensagem prometia algo que não posso garantir",
     internal_vocabulary:
       "Não enviei: a mensagem usava termos internos do sistema que o cliente não deve ler",
+    nota_do_lucas:
+      "Não enviei: a mensagem repetia o que a equipe anotou sobre o contato só para a IA",
     near_dup:
       "Não enviei: o agente ia repetir quase a mesma mensagem que já foi enviada nesta conversa",
     teto_de_respostas:

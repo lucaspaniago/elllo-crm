@@ -572,9 +572,8 @@ export const AGENT_TOOL_DEFS = {
       'oferecido. A headline (linha curta) entra sempre no índice de memória do lead; o corpo completo ' +
       'fica guardado e você o relê sob demanda com get_lead_note. Para CONSOLIDAR notas antigas, ' +
       'liste os ids delas em "supersedes" (você os vê no índice) — elas são removidas ao salvar a nova ' +
-      '(as que o Lucas contou ficam). Diga a categoria: o dossiê desta pessoa, para o rapport ' +
-      `(${CATEGORIAS_DO_DOSSIE.map((c) => `${c}: ${SIGNIFICADO_DA_CATEGORIA[c]}`).join('; ')}). ` +
-      'Guarde só o que a pessoa contou de si mesma ou o que você notou do jeito e do tom dela; nunca o ' +
+      '(as que o Lucas contou ficam). Diga a categoria (o dossiê desta pessoa, para o rapport). ' +
+      'Guarde só o que a pessoa contou de si ou o que você notou do jeito e do tom dela; nunca o ' +
       'que ela contou de outra pessoa.',
     // Schema LARGO para o SDK (o modelo vê os campos); a validação REAL é a whitelist
     // .strict() + guard de prototype pollution dentro de applySaveLeadNote — campo
@@ -590,7 +589,9 @@ export const AGENT_TOOL_DEFS = {
         categoria: z
           .enum(CATEGORIAS_DO_DOSSIE)
           .optional()
-          .describe('do que a nota fala (ausente = fato)'),
+          .describe(
+            `do que a nota fala (ausente = fato): ${CATEGORIAS_DO_DOSSIE.map((c) => `${c} = ${SIGNIFICADO_DA_CATEGORIA[c]}`).join('; ')}`,
+          ),
       })
       .passthrough(),
   },

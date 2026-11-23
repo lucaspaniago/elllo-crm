@@ -48,9 +48,9 @@ const LEITURAS: Array<[string, (sql: string) => boolean]> = [
   ["desfechos", (s) => s.includes("from demandas")],
   ["decisao", (s) => s.includes("crm_lead_activities")],
   ["proposta", (s) => s.includes("crm_proposals")],
-  ["indice_notas", (s) => s.includes("select id, headline from lead_notes")],
+  ["indice_notas", (s) => s.includes("select id, headline, categoria, fonte, liberada from lead_notes")],
   ["compromissos", (s) => s.includes("calendar_app")],
-  ["ids_notas", (s) => s.includes("select id from lead_notes")],
+  ["ids_notas", (s) => /select id, headline, case when fonte = 'lucas'/.test(s)],
 ];
 
 const LINHA_DO_CONTATO = {
