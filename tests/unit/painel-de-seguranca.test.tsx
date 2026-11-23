@@ -174,6 +174,8 @@ describe("painel de segurança — o que se confere antes de enviar", () => {
       "concessao_sem_lastro",
       "case_promise",
       "internal_vocabulary",
+      // Fork elllo (9005): o que a equipe anotou só para a IA não vai ao contato.
+      "nota_do_lucas",
       "agenda_stall",
       "horario_da_agenda",
       "registro_sem_efeito",

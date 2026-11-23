@@ -190,8 +190,9 @@ it("acima do teto inline, o prompt leva o índice sem corpo, e get_lead_note bus
     [0, 1, 2, 3].map((i) => ({ headline: `Nota ${i}`, body: `CORPO-LONGO-${i} ` + "x".repeat(3_980) })),
   );
   const inicio = abertura(prompts);
-  expect(inicio).toContain(`- [${ids[0]}] Nota 0`);
-  expect(inicio).toContain(`- [${ids[3]}] Nota 3`);
+  // Fork elllo (9005): entre o id e o título vem o rótulo do dossiê (do que fala, quem contou).
+  expect(inicio).toMatch(new RegExp(`- \\[${ids[0]}\\] (\\([^)]*\\) )?Nota 0`));
+  expect(inicio).toMatch(new RegExp(`- \\[${ids[3]}\\] (\\([^)]*\\) )?Nota 3`));
   expect(inicio).not.toContain("CORPO-LONGO-");
   const resposta = resultadoDoGetLeadNote(prompts);
   expect(resposta).toContain(`"note_id":"${ids[0]}"`);
