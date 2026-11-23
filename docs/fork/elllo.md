@@ -237,6 +237,35 @@ mandar um apanhado só, na manhã seguinte.
   `lib/waha/silencio-de-disparo.test.ts` e de `tolerancia-ao-sentimento.test.ts`,
   `tests/unit/dispatcher-org-parada.test.ts` (o handler novo é "pula").
 
+### F — a Helô lembra do contato: atendimentos anteriores e a mensagem citada
+
+- **Atendimentos anteriores** (`lib/agent-engine/agent/abertura/atendimentos-anteriores.ts`):
+  no turno, o resumo corrido do último checkpoint do contato FORA da fronteira
+  atual entra sob "Memória do lead", rotulado como PASSADO (preço, prazo e
+  combinado dali só valem se confirmados de novo). Sem fronteira, nada.
+- **A mensagem que o cliente cita** (`abertura/mensagem-citada.ts`): quando o
+  cliente usa "responder em cima", a citada entra logo depois da "Mensagem atual
+  do cliente", em JSON (dado, nunca instrução): autor (cliente, você, atendente,
+  automação, participante do grupo), hora, tipo de mídia, texto/legenda, conteúdo
+  já derivado e se ela está no histórico acima. Fora da janela, vem pelo id
+  (`reply_to_message_id`, mesma conversa); não achada, pela cópia do WhatsApp
+  (`metadata.reply_to_body` / `reply_to_type`), rotulada como não conferida.
+  Cobre a mensagem do job e as da mesma rajada (até 3); o rascunho assistido lê
+  as recebidas depois da última nossa. Apagada não repete o texto; foto para
+  agente que não vê imagens não leva a descrição.
+  - Os classificadores do turno (passagem por palavra, opt-out, manipulação,
+    estágio, roteador, Jev) NÃO recebem a citada: julgam o que o cliente disse
+    agora, e a citada costuma ser fala nossa (o menu "falar com atendente"
+    citado dispararia a passagem). O Jev só tem aceite para a mensagem sozinha.
+  - Upstream tocado: `lib/waha/ingest.ts`, `citacaoDoPayload` + `midiaDaCitada`
+    (tipo e legenda da citada que é mídia) e uma linha `reply_to_type` em cada
+    INSERT, marcadas "elllo". `inbound-turn.ts` e `abertura/ritual.ts`: um
+    parâmetro opcional a mais (`citacaoBlock`), vazio = abertura byte a byte a de antes.
+  - Canal oficial (Meta): o ingest do autor não grava citação (só reação), então
+    lá a citada não chega. Pendência.
+- Testes: `abertura/atendimentos-anteriores.test.ts`, `abertura/mensagem-citada.test.ts`
+  e os casos "elllo" de `lib/waha/ingest-citacao.test.ts`.
+
 ## Migrations do fork (faixa 9xxx)
 
 | Arquivo | O quê |
@@ -269,6 +298,12 @@ Os quatro blocos estão no `supabase/baseline.sql` **logo depois do bloco da 068
      `aplicarEfeitosPosEntrada`).
    - `lib/grupos/ingest.ts`: em `grupoLigado`, o bloco "Fork elllo" que liga o
      grupo novo (`ligarGrupoNovoNaEntrada`).
+   - `lib/waha/ingest.ts`: `citacaoDoPayload`/`midiaDaCitada` e a linha
+     `reply_to_type` dos dois INSERTs (marcadas "elllo").
+   - `lib/agent-engine/agent/inbound-turn.ts`: o `Promise.all` dos blocos do
+     sufixo (atendimentos anteriores + citação) e o `citacaoBlock` repassado ao
+     `buildOpening` (turno inbound e prévia); `abertura/ritual.ts`: o último
+     parâmetro de `buildOpeningMessage`.
    - `lib/event-log/register-handlers.ts` e `docker/scheduler/entrypoint.sh`:
      uma linha cada (o handler do grupo e o cron `apanhado-do-dono`).
 3. Se o upstream mudar `ERROS_DA_ENTREGA_DE_AVISO`, o CHECK de

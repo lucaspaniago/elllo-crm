@@ -252,6 +252,12 @@ export function buildOpeningMessage(
   origemBlock = '',
   /** Formato do histórico (`LEAD_CONTEXT_HISTORY_FORMAT`); `json` = o de sempre. */
   formatoDoHistorico: FormatoDoHistorico = 'json',
+  /**
+   * A mensagem que o cliente CITOU, já em texto (`abertura/mensagem-citada.ts`).
+   * Vai logo depois da mensagem atual: é a ela que a fala atual se refere.
+   * Vazio = sem citação, e a abertura sai byte a byte a de antes.
+   */
+  citacaoBlock = '',
 ): string {
   const entregue = (nome: string): boolean => entregues.includes(nome);
   const mensagemAtual =
@@ -301,6 +307,7 @@ export function buildOpeningMessage(
     ),
     '',
     ...mensagemAtualBlock,
+    ...(citacaoBlock !== '' ? ['', citacaoBlock] : []),
     '',
     'Responda ao lead usando a tool send_message — NUNCA escreva a resposta como texto direto',
     '(texto fora de tool é descartado pelo runtime). Use get_lead_context se precisar reler o contexto.',
