@@ -266,6 +266,43 @@ mandar um apanhado só, na manhã seguinte.
 - Testes: `abertura/atendimentos-anteriores.test.ts`, `abertura/mensagem-citada.test.ts`
   e os casos "elllo" de `lib/waha/ingest-citacao.test.ts`.
 
+### G — o dossiê do contato (rapport), com quem contou
+
+Pedido do dono (23/11/2026): "colocando na ficha de cada contato as informações
+necessárias para fazer esse rapport... Não só cliente". A mesma essência da Helô do
+Hermes (D0–D3); aqui a ficha é `lead_notes`.
+
+- **Migration 9005:** `lead_notes` ganha `categoria` (conheceu, gostos, rotina,
+  pendente, jeito, tom, fato), `fonte` (pessoa, helo, lucas) e `liberada`.
+  - A fonte é do código, nunca do modelo. O agente grava `pessoa`, e `helo` só em
+    jeito/tom (`fonteDaEscritaDoAgente`, `lib/agent-engine/agent/dossie.ts`). A tela
+    grava `lucas`.
+  - O default é `lucas`, a mais restrita: o mensageiro do dono grava pelo PostgREST
+    sem saber da coluna.
+  - Notas antigas: as "Recado do Lucas…" viram `pendente|lucas`, o resto `fato|pessoa`.
+  - Também nascem `lead_dossie_flushes` (a marca do atendimento já resumido; RLS sem
+    policy, só o servidor) e `fn_rapport_do_contato` (a leitura do mensageiro, só
+    `service_role`, sem mensagem da conversa e sem os recados).
+- **O que o Lucas contou não vai ao contato.** A nota `lucas` entra no prompt marcada
+  "só para você"; a cerca nova `nota_do_lucas` (`before-send.ts`, cadeia v14) barra a
+  resposta que repete um trecho de 5 palavras dela que a conversa ainda não tem.
+  `liberada` ("pode usar com ele") a tira da cerca. Sem fail-safe que a desarme.
+- **O agente não apaga a nota do Lucas** por `supersedes` (só consolida o que ele
+  escreveu).
+- **Ao fechar o atendimento** (`dossie-ao-fechar.ts`, laço do worker): o atendimento
+  fechado há 10 min ou mais vai para o dossiê em notas por categoria, pelo mesmo
+  `applySaveLeadNote` do flush. A instrução tira o que a pessoa contou de terceiros.
+  Desligado por padrão: `DOSSIE_AO_FECHAR_INTERVAL_MS` (0 = OFF).
+- **A tela:** a seção "Memória do contato" do painel lateral vira o dossiê
+  (`components/inbox/DossieDoContato.tsx`), por categoria e com quem contou; o
+  `manager` corrige, apaga, escreve e libera. Rotas `app/api/v1/contacts/[id]/dossie`
+  (POST) e `.../dossie/[noteId]` (PATCH, DELETE), com auditoria sem o texto.
+- **LGPD:** a anonimização já redige `headline`/`body` e zera o embedding (0494/0497/
+  9043); categoria e fonte não são dado da pessoa. `fn_rapport_do_contato` ignora
+  contato anonimizado e nota redigida.
+- Testes: `tests/unit/dossie-do-contato.test.ts` (vocabulário contra a 9005, fonte do
+  código, isolamento entre contatos, a cerca, a tela).
+
 ## Migrations do fork (faixa 9xxx)
 
 | Arquivo | O quê |
@@ -274,11 +311,12 @@ mandar um apanhado só, na manhã seguinte.
 | `supabase/migrations/20261025130000_9002_aviso_de_passagem_ao_suporte.sql` | `aviso_de_passagem_ligado`, `sondagem_minutos` (0..60), `entregas_de_aviso_de_passagem`, gatilho `trg_passagem_registrada` |
 | `supabase/migrations/20261026120000_9003_tolerancia_de_sentimento.sql` | `sondagem_minutos` vira a janela da tolerância: default 10 → 30 e comentário da coluna (sem renomear; linhas existentes mantêm o valor) |
 | `supabase/migrations/20261116120000_9004_apanhado_do_dono.sql` | `itens_do_apanhado` (propaganda silenciada e grupo que vale resposta, só o ponteiro para a mensagem; `unique (organization_id, message_id, tipo)`; RLS leitura manager, escrita só servidor) |
+| `supabase/migrations/20261123190000_9005_dossie_do_contato.sql` | `lead_notes.categoria`, `fonte` (default `lucas`) e `liberada`, com CHECKs; `lead_dossie_flushes` (só o servidor); `fn_rapport_do_contato` (só `service_role`) |
 
-Os quatro blocos estão no `supabase/baseline.sql` **logo depois do bloco da 0687**
+Os cinco blocos estão no `supabase/baseline.sql` **logo depois do bloco da 0687**
 (e portanto antes da VARREDURA anon), com os rótulos
 `-- ---- fork elllo: … (migration 9001) ----`, `… (migration 9002) ----` e
-`… (migration 9003) ----` e `… (migration 9004) ----`.
+`… (migration 9003) ----`, `… (migration 9004) ----` e `… (migration 9005) ----`.
 
 ## Como rebasear
 

@@ -112,6 +112,7 @@ import { runVoiceCallsBridgeLoop } from "@/lib/wacalls/events-bridge";
 import { runSessionWatchdogLoop } from "@/lib/agent-engine/edge/crm/session-reconciler";
 import { runHealthLoop } from "@/lib/agent-engine/health/circuit";
 import { runFlywheelLoop } from "@/lib/agent-engine/flywheel/live";
+import { runDossieAoFecharLoop } from "@/lib/agent-engine/agent/dossie-ao-fechar";
 import { llmEdgeConfigFromEnv } from "@/lib/agent-engine/edge/llm/run-model-call";
 import { loadEnv, type Env } from "@/lib/agent-engine/env";
 import { urlDoSupabaseNoServidor } from "@/lib/supabase/url-do-servidor";
@@ -408,6 +409,23 @@ export async function startWorker(
         )
       : Promise.resolve();
 
+  // Fork elllo (9005): o dossiê ao fechar o atendimento. Sem intervalo (0) fica OFF.
+  const dossieLoop =
+    env.DOSSIE_AO_FECHAR_INTERVAL_MS > 0
+      ? runDossieAoFecharLoop(
+          pool,
+          llmEdgeConfigFromEnv(env),
+          {
+            intervalMs: env.DOSSIE_AO_FECHAR_INTERVAL_MS,
+            limite: env.DOSSIE_AO_FECHAR_BATCH_LIMIT,
+            ...(env.COMPACTION_MODEL !== undefined ? { model: env.COMPACTION_MODEL } : {}),
+            notesIndexMaxTokens: env.LEAD_NOTES_INDEX_MAX_TOKENS,
+            log,
+          },
+          loopsAbort.signal,
+        )
+      : Promise.resolve();
+
   // Cron persistente por contato (follow-up) — só enfileira em job_queue.
   const cronLoop = runCronLoop(
     pool,
@@ -613,6 +631,7 @@ export async function startWorker(
           cronLoop,
           sessionWatchdogLoop,
           flywheelLoop,
+          dossieLoop,
           voiceCallsBridgeLoop,
         ]);
         await workerLoop;

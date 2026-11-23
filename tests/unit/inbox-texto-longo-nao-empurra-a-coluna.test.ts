@@ -33,7 +33,8 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-const PAINEL = "components/inbox/CRMSidePanel.tsx";
+// Fork elllo (9005): o fato da Memória do contato mora no dossiê, que o painel monta.
+const PAINEL = "components/inbox/DossieDoContato.tsx";
 const LAYOUT = "components/inbox/InboxLayout.tsx";
 const PASTA_INBOX = "components/inbox";
 
@@ -91,7 +92,7 @@ describe("inbox — texto longo não empurra a coluna (#1802)", () => {
 
   it("régua 2: o fato da Memória do contato quebra em qualquer ponto, e não volta break-words", () => {
     const fonte = ler(PAINEL);
-    const linha = fonte.split("\n").find((l) => l.includes("f.headline"));
+    const linha = fonte.split("\n").find((l) => l.includes("{l.headline}"));
     expect(linha, `não achei o bloco de fatos em ${PAINEL}`).toBeDefined();
 
     const summary = linha!.match(/<summary[^>]*>/)?.[0] ?? "";

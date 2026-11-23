@@ -58,6 +58,7 @@ import { decideSpinning } from '../spinning/engine';
 import type { RecentCopy } from '../spinning/engine';
 import { loadRecentCopies, loadSpinningKnobs, recordCopy } from '../spinning/store';
 import type { SpinningKnobs } from '../spinning/defaults';
+import { ENSINO_DA_NOTA_DO_LUCAS, trechosRepetidos } from '../agent/dossie';
 import { decidePromise } from './promise/engine';
 import { loadPromiseTable } from './promise/table';
 import type { PromiseTable } from './promise/table';
@@ -277,6 +278,13 @@ export interface GateContext {
    */
   factualClaim?: ConferenciaDeFato | null;
   internalVocabularyEnforced?: boolean;
+  /**
+   * Fork elllo (9005): os trechos (5 palavras) das notas que o LUCAS contou sobre este
+   * contato e não liberou, menos os que a conversa já tem (`trechosReservados`,
+   * `lib/agent-engine/agent/dossie.ts`). Arma o `notaDoLucasGate`. Ausente ou vazio =
+   * no-op: o caminho determinístico (follow-up, template) não tem texto do modelo.
+   */
+  trechosDoLucas?: ReadonlySet<string>;
   /**
    * Arma o `clinicalClaimGate` (diagnóstico, prescrição, promessa de resultado,
    * afirmação de câncer — `./afirmacao-clinica.ts`). Ausente = DESARMADO, pelas DUAS
@@ -765,6 +773,35 @@ export const internalVocabularyGate: Gate = {
       // nunca os termos — termo casado é trecho da candidata, e um snake_case pode ter
       // vindo de um dado do lead. A medição que a doutrina pede cabe nestes dois campos.
       detail: { leaked_count: achado.termos.length, leaked_kinds: achado.categorias.join(',') },
+    };
+  },
+};
+
+/**
+ * Fork elllo (9005) — o que o Lucas contou do contato não vai ao contato. Barra a
+ * mensagem do MODELO que repete um trecho de 5 palavras de uma nota de fonte `lucas`
+ * não liberada que a conversa ainda não tem. É a garantia de código da regra do dossiê
+ * (a nota entra no prompt para dar o tom; o texto dela não sai).
+ *
+ * Sem fail-safe que o desarme: entre a pessoa ficar sem resposta neste turno e receber
+ * o que o dono contou em confiança, fica a primeira. O ensino pede para reescrever.
+ *
+ * Posição: logo depois do `internalVocabularyGate`, pela mesma razão — antes de o
+ * disclosure emendar o corpo, para ver só o texto do modelo.
+ */
+export const notaDoLucasGate: Gate = {
+  name: 'nota_do_lucas',
+  evaluate: (ctx) => {
+    const reservados = ctx.trechosDoLucas;
+    if (reservados === undefined || reservados.size === 0) return { pass: true };
+    const repetidos = trechosRepetidos(ctx.body, reservados);
+    if (repetidos === 0) return { pass: true };
+    return {
+      pass: false,
+      code: 'nota_do_lucas_repetida',
+      reason: ENSINO_DA_NOTA_DO_LUCAS,
+      // Só a contagem: o trecho é da nota (PII), nunca vai a log nem a trace.
+      detail: { trechos: repetidos },
     };
   },
 };
@@ -1341,7 +1378,9 @@ const spinningGate: Gate = {
 // automáticas por CONVERSA numa janela. Fecha o pingue-pongue entre dois robôs (216 respostas em
 // 1 h para o mesmo contato), que nenhum gate de conteúdo pega porque cada resposta isolada é
 // legítima. Armado só pelo turno de entrada; disparo e follow-up não entram na conta.
-export const BEFORE_SEND_CHAIN_VERSION = 14;
+// v15 (fork elllo, 9005): insere `notaDoLucasGate` logo depois de `internal_vocabulary` —
+// trecho do que o Lucas contou do contato, que a conversa ainda não tem, não sai.
+export const BEFORE_SEND_CHAIN_VERSION = 15;
 
 /**
  * Gate 6.3 — CONFERÊNCIA DE FATO (#2231): a afirmação de FATO da resposta
@@ -1392,6 +1431,7 @@ export const factualClaimGate: Gate = {
  *   (6.5) case_promise — anti-alucinação de casos humanos (spec 15 §10.2, Wave 4);
  *   (6.7) internal_vocabulary — vazamento de vocabulário interno ao cliente (doutrina
  *         `separacao-fala-e-operacao.md`); antes do disclosure porque ele pode emendar o corpo;
+ *   (6.75) nota_do_lucas — fork elllo (9005): trecho do que o Lucas contou do contato;
  *   (6.8) clinical_claim — diagnóstico, prescrição, promessa de resultado ou afirmação de
  *         câncer escritos pelo modelo; só arma com a camada `afirmacao_clinica` ligada;
  *   (6.9) agenda_stall — "vou verificar/confirmar horário" sem ter chamado a ferramenta de
@@ -1415,6 +1455,7 @@ export const BEFORE_SEND_GATES: readonly Gate[] = [
   factualClaimGate,
   casePromiseGate,
   internalVocabularyGate,
+  notaDoLucasGate,
   clinicalClaimGate,
   commercialRestrictionGate,
   agendaStallGate,
@@ -1551,6 +1592,8 @@ export interface RunBeforeSendArgs {
    * depois de N vetos no mesmo turno o envio sai, com registro.
    */
   enforceInternalVocabulary?: boolean;
+  /** Fork elllo (9005): ver `GateContext.trechosDoLucas`. Ausente = no-op. */
+  trechosDoLucas?: ReadonlySet<string>;
   /**
    * Arma o `clinicalClaimGate` — ver `GateContext.clinicalClaimEnforced`. Ausente
    * (default) = no-op. O turno do agente passa a escolha da organização
@@ -1937,6 +1980,7 @@ export async function runBeforeSend(args: RunBeforeSendArgs): Promise<BeforeSend
         ? { humanPromiseExtraTargets: args.humanPromiseExtraTargets }
         : {}),
       internalVocabularyEnforced: args.enforceInternalVocabulary ?? false,
+      ...(args.trechosDoLucas !== undefined ? { trechosDoLucas: args.trechosDoLucas } : {}),
       clinicalClaimEnforced: args.enforceClinicalClaim ?? false,
       commercialRestrictionEnforced: restricaoComercial,
       ...(args.agenda !== undefined ? { agenda: args.agenda } : {}),
