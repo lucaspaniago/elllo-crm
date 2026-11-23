@@ -16,6 +16,7 @@ import { textosDoClienteNoHistorico } from './pedido-de-audio';
 import { claimOfJob } from '../queue/claim';
 import { currentExecutionBoundary, guardServiceEffect } from '@/lib/atendimento/fronteira-server';
 import { buildAtendimentosAnterioresBlock } from './abertura/atendimentos-anteriores';
+import { buildCitacaoBlock } from './abertura/mensagem-citada';
 /**
  * Loop do agente v0 — handler do job `inbound_turn` (F2-09; blueprint 8.8).
  *
@@ -2198,6 +2199,12 @@ export interface AgentTurnInput {
     /** Texto exato da mensagem que acordou este turno inbound. */
     currentInboundText?: string;
     /**
+     * A mensagem que o cliente CITOU ("responder em cima"), em texto — ver
+     * `abertura/mensagem-citada.ts`. Opcional pela mesma razão de `projeta`;
+     * vazio = o cliente não citou nada, e o prompt não muda.
+     */
+    citacaoBlock?: string;
+    /**
      * #2729 — quem escreveu a mensagem que acordou este turno, quando ela veio
      * de um GRUPO. Opcional pela mesma razão de `projeta`: quem monta um ritual
      * à mão (testes) não precisa dele, e a produção sempre o passa.
@@ -4175,9 +4182,9 @@ async function executarTurnoDoAgente(
     knowledgeSourceIds: agentConfig?.knowledgeSourceIds ?? [],
     activeKbVersionId: agentConfig?.activeKbVersionId ?? null,
   });
-  // Fork elllo: a origem e o resumo do atendimento anterior vão na MESMA trilha (o teto de
-  // `tests/unit/turno-le-em-paralelo.test.ts` é 4 em voo).
-  const [notesIndexBlockDoContato, compromissosBlock, [origemBlock, anterioresBlock], noteIdRows, indiceDeConhecimentoBlock] =
+  // Fork elllo: quatro trilhas, nunca mais (o teto de `tests/unit/turno-le-em-paralelo.test.ts`).
+  // A origem e o resumo anterior numa; a citação depois da leitura das notas, noutra.
+  const [notesIndexBlockDoContato, compromissosBlock, [origemBlock, anterioresBlock], [noteIdRows, citacao], indiceDeConhecimentoBlock] =
     await Promise.all([
       notasDaPrevia
         ? notasDaPrevia.bloco
@@ -4190,14 +4197,29 @@ async function executarTurnoDoAgente(
           // `abertura/atendimentos-anteriores.ts`). Fora da prévia; sem fronteira, ''.
           preview ? '' : await buildAtendimentosAnterioresBlock(pool, tenantId, leadId, currentExecutionBoundary()),
         ] as const)(),
-      preview
-        ? null
-        : pool
-            .query<{ id: string }>(
-              'select id from lead_notes where organization_id = $1 and contact_id = $2 order by created_at',
-              [tenantId, leadId],
-            )
-            .then((r) => r.rows),
+      (async () =>
+        [
+          preview
+            ? null
+            : await pool
+                .query<{ id: string }>(
+                  'select id from lead_notes where organization_id = $1 and contact_id = $2 order by created_at',
+                  [tenantId, leadId],
+                )
+                .then((r) => r.rows),
+          // A mensagem que o cliente citou (ver `abertura/mensagem-citada.ts`). O cenário
+          // do sandbox não tem conversa real; o rascunho assistido lê sem âncora.
+          preview?.kind === 'sandbox'
+            ? { bloco: '', origens: [] as string[] }
+            : await buildCitacaoBlock(pool, {
+                organizationId: tenantId,
+                conversationId: input.conversationId,
+                inboundMessageId: input.inboundMessageId ?? null,
+                historico: effectiveContext.messages,
+                fuso: fusoDaOrg,
+                verImagens: agentConfig?.imageVisionEnabled ?? true,
+              }),
+        ] as const)(),
       // Índice da base de conhecimento no contexto (#4133, item 1) — SÓ no modo
       // `leitura_direta`; no `busca` o turno é o de hoje, byte a byte.
       planoDeConhecimento.injetaIndice
@@ -4209,6 +4231,10 @@ async function executarTurnoDoAgente(
           )
         : Promise.resolve(''),
     ]);
+  if (citacao.origens.length > 0) {
+    // Só contagem e origem: o texto citado é PII e nunca vai a log.
+    runLog.info('mensagem citada pelo cliente entrou no turno', { citacoes: citacao.origens });
+  }
   // Entra junto do índice de notas, sob "Memória do lead": é memória do contato
   // que atravessa atendimentos. Vazio não muda o prompt.
   const notesIndexBlock =
@@ -7159,6 +7185,7 @@ async function executarTurnoDoAgente(
       origemBlock,
       passagemBlock,
       formatoDoHistorico: deps.knobs.historyFormat ?? 'json',
+      citacaoBlock: citacao.bloco,
       ...(currentInboundText !== null ? { currentInboundText } : {}),
       // #2729 — o autor da mensagem canônica, quando ela é de grupo. Vai junto
       // do texto: sem ele o modelo ouve a voz e não sabe de quem é.
@@ -8315,6 +8342,8 @@ export async function runAgentPreview(
           entregues,
           compromissosBlock,
           formatoDoHistorico,
+          passagemBlock,
+          citacaoBlock,
         }) =>
           buildOpeningMessage(
             previous,
@@ -8328,6 +8357,8 @@ export async function runAgentPreview(
             undefined,
             '',
             formatoDoHistorico,
+            passagemBlock,
+            citacaoBlock,
           ),
       },
       preview,
@@ -8553,6 +8584,7 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
         currentInboundSender,
         formatoDoHistorico,
         passagemBlock,
+        citacaoBlock,
       }) =>
         buildOpeningMessage(
           previous,
@@ -8567,6 +8599,7 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
           origemBlock,
           formatoDoHistorico,
           passagemBlock,
+          citacaoBlock,
         ),
     });
   };

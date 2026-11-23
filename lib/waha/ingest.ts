@@ -1077,18 +1077,51 @@ function contextoDoBaileys(p: WahaPayload): Record<string, unknown> | null {
  * o texto aparece quando o normalizado não o traz. Sem id não há o que
  * resolver: devolve `null` e a mensagem entra solta, como sempre entrou.
  */
-function citacaoDoPayload(p: WahaPayload): { id: string; texto: string | null } | null {
+function citacaoDoPayload(
+  p: WahaPayload,
+): { id: string; texto: string | null; tipo: string | null } | null {
   const direto = objetoSimples(p.replyTo);
   const contexto = contextoDoBaileys(p);
   const id = textoNaoVazio(direto?.id) ?? textoNaoVazio(contexto?.stanzaId);
   if (!id) return null;
   const citada = objetoSimples(contexto?.quotedMessage);
+  const midia = midiaDaCitada(citada);
   const texto =
     textoNaoVazio(direto?.body) ??
     textoNaoVazio(citada?.conversation) ??
     textoNaoVazio(objetoSimples(citada?.extendedTextMessage)?.text) ??
+    midia?.legenda ??
     null;
-  return { id, texto };
+  return { id, texto, tipo: midia?.tipo ?? null };
+}
+
+/**
+ * elllo: o TIPO e a legenda da citada quando ela é mídia (`quotedMessage.<tipo>Message`).
+ *
+ * Só serve quando a citada NÃO foi achada no banco: aí a cópia do WhatsApp é
+ * tudo o que o agente terá dela (`abertura/mensagem-citada.ts`), e uma foto
+ * citada sem legenda entrava sem rastro nenhum — nem `reply_to_body`. `null`
+ * quando a citada é texto ou não veio.
+ */
+const TIPOS_DE_MIDIA_CITADA: ReadonlyArray<readonly [string, string]> = [
+  ["imageMessage", "image"],
+  ["videoMessage", "video"],
+  ["audioMessage", "audio"],
+  ["documentMessage", "document"],
+  ["stickerMessage", "sticker"],
+  ["locationMessage", "location"],
+  ["contactMessage", "contact"],
+];
+function midiaDaCitada(
+  citada: Record<string, unknown> | null,
+): { tipo: string; legenda: string | null } | null {
+  if (!citada) return null;
+  const comLegenda = objetoSimples(objetoSimples(citada.documentWithCaptionMessage)?.message);
+  for (const [chave, tipo] of TIPOS_DE_MIDIA_CITADA) {
+    const m = objetoSimples(citada[chave]) ?? objetoSimples(comLegenda?.[chave]);
+    if (m) return { tipo, legenda: textoNaoVazio(m.caption) ?? null };
+  }
+  return null;
 }
 
 /**
@@ -1289,6 +1322,8 @@ async function handleInbound(
         // resolvida, a citada no banco é a fonte da verdade — uma edição
         // posterior mudaria o que a tela mostra, e a cópia ficaria velha.
         ...(citacao?.texto && !citadaId ? { reply_to_body: citacao.texto } : {}),
+        // elllo: o tipo da citada não achada, quando é mídia (`midiaDaCitada`).
+        ...(citacao?.tipo && !citadaId ? { reply_to_type: citacao.tipo } : {}),
         // O anúncio DESTA mensagem vai junto — o contato guarda só o primeiro, e
         // quem volta por outro anúncio precisa deixar rastro. Ver `metadataDoAnuncio`.
         ...metadataDoAnuncio(atribuicao),
@@ -1765,6 +1800,8 @@ async function handleOutboundFromUserPhone(
         ...(localizacaoDoPayload(p) ? { location: localizacaoDoPayload(p) } : {}),
         // Mesmo critério do inbound: cópia do texto só quando não há ponteiro.
         ...(citacao?.texto && !citadaId ? { reply_to_body: citacao.texto } : {}),
+        // elllo: o tipo da citada não achada, quando é mídia (`midiaDaCitada`).
+        ...(citacao?.tipo && !citadaId ? { reply_to_type: citacao.tipo } : {}),
         // Mesma regra do inbound (#2613): nome só quando há nome.
         ...(nomeDoArquivo ? { media_filename: nomeDoArquivo } : {}),
       },

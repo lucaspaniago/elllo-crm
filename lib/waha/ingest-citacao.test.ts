@@ -218,6 +218,7 @@ describe("a citação do cliente vira ponteiro na linha (issue #2474)", () => {
     // Com a citada resolvida, o banco é a fonte da verdade: uma cópia do texto
     // ficaria velha depois de uma edição da bolha original.
     expect(Object.keys(linha!.metadata ?? {})).not.toContain("reply_to_body");
+    expect(Object.keys(linha!.metadata ?? {})).not.toContain("reply_to_type");
   });
 
   it("a forma COMPOSTA legada da citada (`true_…`) também é encontrada", async () => {
@@ -344,6 +345,55 @@ describe("a citação do cliente vira ponteiro na linha (issue #2474)", () => {
     const linha = citadaGravada(messages, RECEBIDA_CITANDO_IA.id!);
     expect(linha!.reply_to_message_id).toBeNull();
     expect(linha!.metadata?.reply_to_body).toBe("citação rica sem linha no CRM");
+  });
+
+  // elllo: mídia citada fora do CRM — o agente precisa saber ao menos o TIPO.
+  const citandoMidiaFora = (quotedMessage: Record<string, unknown>) =>
+    envelope({
+      ...RECEBIDA_CITANDO_IA,
+      replyTo: undefined,
+      _data: {
+        message: {
+          extendedTextMessage: {
+            contextInfo: { stanzaId: `false_${CHAT}_${NAO_EXISTE}`, quotedMessage },
+          },
+        },
+      },
+    });
+
+  it("elllo: foto citada fora do CRM com legenda: `reply_to_type` e a legenda como texto", async () => {
+    const { admin, messages } = bancoDeMentira();
+    await dispatchWahaEvent(
+      admin as never,
+      SESSION as never,
+      citandoMidiaFora({ imageMessage: { caption: "modelo azul", mimetype: "image/jpeg" } }),
+      "req-1",
+    );
+    const linha = citadaGravada(messages, RECEBIDA_CITANDO_IA.id!);
+    expect(linha!.reply_to_message_id).toBeNull();
+    expect(linha!.metadata?.reply_to_type).toBe("image");
+    expect(linha!.metadata?.reply_to_body).toBe("modelo azul");
+  });
+
+  it("elllo: áudio citado fora do CRM, sem texto: fica o tipo (antes não ficava rastro)", async () => {
+    const { admin, messages } = bancoDeMentira();
+    await dispatchWahaEvent(admin as never, SESSION as never, citandoMidiaFora({ audioMessage: { seconds: 7 } }), "req-1");
+    const linha = citadaGravada(messages, RECEBIDA_CITANDO_IA.id!);
+    expect(linha!.metadata?.reply_to_type).toBe("audio");
+    expect(Object.keys(linha!.metadata ?? {})).not.toContain("reply_to_body");
+  });
+
+  it("elllo: documento com legenda (`documentWithCaptionMessage`) também é reconhecido", async () => {
+    const { admin, messages } = bancoDeMentira();
+    await dispatchWahaEvent(
+      admin as never,
+      SESSION as never,
+      citandoMidiaFora({ documentWithCaptionMessage: { message: { documentMessage: { caption: "orçamento" } } } }),
+      "req-1",
+    );
+    const linha = citadaGravada(messages, RECEBIDA_CITANDO_IA.id!);
+    expect(linha!.metadata?.reply_to_type).toBe("document");
+    expect(linha!.metadata?.reply_to_body).toBe("orçamento");
   });
 });
 
