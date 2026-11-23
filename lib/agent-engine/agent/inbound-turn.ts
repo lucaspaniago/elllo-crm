@@ -3700,36 +3700,45 @@ async function executarTurnoDoAgente(
   const notasDaPrevia = preview
     ? blocoDeNotasDaPrevia(preview.notes ?? [], deps.knobs.notesIndexMaxTokens)
     : null;
-  const [notesIndexBlockDoContato, compromissosBlock, origemBlock, noteIdRows, anterioresBlock, citacao] = await Promise.all([
-    notasDaPrevia
-      ? notasDaPrevia.bloco
-      : buildNotesIndexBlock(pool, tenantId, leadId, deps.knobs.notesIndexMaxTokens),
-    preview?.kind === 'sandbox' ? '' : buildCompromissosBlock(pool, tenantId, leadId, new Date()),
-    preview ? '' : buildOrigemBlock(pool, tenantId, leadId, new Date()),
-    preview
-      ? null
-      : pool
-          .query<{ id: string }>(
-            'select id from lead_notes where organization_id = $1 and contact_id = $2 order by created_at',
-            [tenantId, leadId],
-          )
-          .then((r) => r.rows),
-    // O resumo do atendimento ANTERIOR do contato, rotulado como passado (ver
-    // `abertura/atendimentos-anteriores.ts`). Fora da prévia; sem fronteira, ''.
-    preview ? '' : buildAtendimentosAnterioresBlock(pool, tenantId, leadId, currentExecutionBoundary()),
-    // A mensagem que o cliente citou (ver `abertura/mensagem-citada.ts`). O cenário
-    // do sandbox não tem conversa real; o rascunho assistido lê sem âncora.
-    preview?.kind === 'sandbox'
-      ? { bloco: '', origens: [] as string[] }
-      : buildCitacaoBlock(pool, {
-          organizationId: tenantId,
-          conversationId: input.conversationId,
-          inboundMessageId: input.inboundMessageId ?? null,
-          historico: effectiveContext.messages,
-          fuso: fusoDaOrg,
-          verImagens: agentConfig?.imageVisionEnabled ?? true,
-        }),
-  ]);
+  // Fork elllo: quatro trilhas, nunca mais (o teto de `tests/unit/turno-le-em-paralelo.test.ts`).
+  // O resumo anterior e a citação vão DEPOIS de uma leitura de 1 RTT, na mesma trilha.
+  const [notesIndexBlockDoContato, compromissosBlock, [origemBlock, anterioresBlock], [noteIdRows, citacao]] =
+    await Promise.all([
+      notasDaPrevia
+        ? notasDaPrevia.bloco
+        : buildNotesIndexBlock(pool, tenantId, leadId, deps.knobs.notesIndexMaxTokens),
+      preview?.kind === 'sandbox' ? '' : buildCompromissosBlock(pool, tenantId, leadId, new Date()),
+      (async () =>
+        [
+          preview ? '' : await buildOrigemBlock(pool, tenantId, leadId, new Date()),
+          // O resumo do atendimento ANTERIOR do contato, rotulado como passado (ver
+          // `abertura/atendimentos-anteriores.ts`). Fora da prévia; sem fronteira, ''.
+          preview ? '' : await buildAtendimentosAnterioresBlock(pool, tenantId, leadId, currentExecutionBoundary()),
+        ] as const)(),
+      (async () =>
+        [
+          preview
+            ? null
+            : await pool
+                .query<{ id: string }>(
+                  'select id from lead_notes where organization_id = $1 and contact_id = $2 order by created_at',
+                  [tenantId, leadId],
+                )
+                .then((r) => r.rows),
+          // A mensagem que o cliente citou (ver `abertura/mensagem-citada.ts`). O cenário
+          // do sandbox não tem conversa real; o rascunho assistido lê sem âncora.
+          preview?.kind === 'sandbox'
+            ? { bloco: '', origens: [] as string[] }
+            : await buildCitacaoBlock(pool, {
+                organizationId: tenantId,
+                conversationId: input.conversationId,
+                inboundMessageId: input.inboundMessageId ?? null,
+                historico: effectiveContext.messages,
+                fuso: fusoDaOrg,
+                verImagens: agentConfig?.imageVisionEnabled ?? true,
+              }),
+        ] as const)(),
+    ]);
   if (citacao.origens.length > 0) {
     // Só contagem e origem: o texto citado é PII e nunca vai a log.
     runLog.info('mensagem citada pelo cliente entrou no turno', { citacoes: citacao.origens });

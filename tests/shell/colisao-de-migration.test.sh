@@ -52,6 +52,10 @@ set -uo pipefail
 
 RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GATE_ORIGEM="$RAIZ/scripts/checar-colisao-de-migration.sh"
+# elllo: o gate tira "o próprio PR" pelo número do GITHUB_REF (refs/pull/N/merge). No CI de
+# um PR real de número 7 ou 9, ele tirava os PRs FINGIDOS #7/#9 destes casos e o teste
+# reprovava sem defeito nenhum (medido no PR #7 do fork). O teste mede o gate, não o CI dele.
+unset GITHUB_REF
 
 falhas=0; casos=0
 ok()   { casos=$((casos+1)); printf '  ✓ %s\n' "$1"; }

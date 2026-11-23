@@ -134,6 +134,9 @@ export const LEITORES_DA_DESCRICAO: Record<string, string> = {
   // O Jev do tom áspero recebe as MESMAS mensagens que a tolerância já leu
   // (é chamado de dentro dela): o mesmo leitor, o mesmo componente.
   "lib/escalacao/avaliacao-pelo-jev.ts": "agente que vê imagens",
+  // Fork elllo: a mensagem que o cliente cita entra no turno do agente, e a foto
+  // citada só leva a descrição quando o agente vê imagens (`citadaParaOPrompt`).
+  "lib/agent-engine/agent/abertura/mensagem-citada.ts": "agente que vê imagens",
   "lib/followup/atendimento.ts": "agente que vê imagens | inscrição sem agente",
   "lib/mcp/conferencia-de-campos.ts": "agente que vê imagens | token vivo",
   "lib/mcp/media-derived-read.ts": "token vivo (só com o escopo messages:derived:read)",
