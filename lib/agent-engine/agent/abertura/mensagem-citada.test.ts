@@ -265,13 +265,13 @@ describe("buildOpeningMessage — a citada entra logo depois da mensagem atual",
 
   it("sem citação, a abertura sai byte a byte a de antes", () => {
     const antes = buildOpeningMessage(null, null, contexto, "", false, [], "", "esse aqui");
-    const depois = buildOpeningMessage(null, null, contexto, "", false, [], "", "esse aqui", undefined, "", "json", "");
+    const depois = buildOpeningMessage(null, null, contexto, "", false, [], "", "esse aqui", undefined, "", "json", "", "");
     expect(depois).toBe(antes);
   });
 
   it("com citação, o bloco vem depois da mensagem atual e antes da instrução de envio", () => {
     const bloco = montarBlocoDaCitacao([citadaParaOPrompt(linha(), [], FUSO)!]);
-    const abertura = buildOpeningMessage(null, null, contexto, "", false, [], "", "esse aqui", undefined, "", "json", bloco);
+    const abertura = buildOpeningMessage(null, null, contexto, "", false, [], "", "esse aqui", undefined, "", "json", "", bloco);
     const iAtual = abertura.indexOf("## Mensagem atual do cliente");
     const iCitada = abertura.indexOf("## Mensagem que o cliente está respondendo");
     const iEnvio = abertura.indexOf("Responda ao lead usando a tool send_message");
