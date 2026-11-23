@@ -57041,6 +57041,406 @@ grant execute on function public.fn_definir_aviso_de_caso(uuid,uuid,text,text,bo
 drop function if exists public.fn_definir_aviso_de_caso(uuid,uuid,text,text,boolean,boolean);
 drop function if exists public.fn_definir_aviso_de_caso(uuid,uuid,text,text,boolean,boolean,boolean);
 
+-- ---- fork elllo: o aviso de caso em partes (migration 9001) ----
+-- `partes_enviadas` é o progresso do aviso fatiado (resposta por WhatsApp
+-- ligada): a rodada seguinte manda a próxima parte e nunca reenvia uma anterior.
+alter table public.entregas_de_aviso_de_caso
+  add column if not exists partes_enviadas smallint not null default 0;
+
+alter table public.entregas_de_aviso_de_caso
+  drop constraint if exists entregas_de_aviso_de_caso_partes_enviadas_check;
+alter table public.entregas_de_aviso_de_caso
+  add constraint entregas_de_aviso_de_caso_partes_enviadas_check
+  check (partes_enviadas between 0 and 20);
+
+-- ---- fork elllo: aviso de passagem ao dono (migration 9002) ----
+-- A configuração ganha os dois botões do fork, na MESMA linha do aviso de caso:
+-- o aviso de passagem vai pelo mesmo número e pela mesma conexão.
+--   aviso_de_passagem_ligado — default true: quem já ligou o aviso de caso passa
+--                              a receber também o de passagem;
+--   sondagem_minutos         — quanto a sondagem espera a resposta do cliente
+--                              antes de passar (0 = sem sondagem).
+alter table public.config_aviso_de_caso
+  add column if not exists aviso_de_passagem_ligado boolean not null default true;
+alter table public.config_aviso_de_caso
+  add column if not exists sondagem_minutos smallint not null default 10;
+
+alter table public.config_aviso_de_caso
+  drop constraint if exists config_aviso_de_caso_sondagem_minutos_check;
+alter table public.config_aviso_de_caso
+  add constraint config_aviso_de_caso_sondagem_minutos_check
+  check (sondagem_minutos between 0 and 60);
+
+-- A ENTREGA do aviso de passagem — espelho de `entregas_de_aviso_de_caso`
+-- (0292). Sem `erro_detalhe` (o texto cru do transporte é a única coluna capaz
+-- de ecoar um número; aqui ele fica no log), sem FK para `contacts` e sem coluna
+-- de texto do cliente: o aviso NUNCA é guardado, só o hash dele, e da avaliação
+-- só a hipótese.
+create table if not exists public.entregas_de_aviso_de_passagem (
+  id                  uuid primary key default gen_random_uuid(),
+  organization_id     uuid not null references public.organizations(id) on delete cascade,
+  passagem_id         uuid not null references public.passagens_de_atendimento(id) on delete cascade,
+  -- O destino NO INSTANTE do envio — registro, não estado (mesma razão da 0292).
+  destino             text not null,
+  channel_session_id  uuid references public.channel_sessions(id) on delete set null,
+  status              text not null default 'pendente',
+  tentativas          smallint not null default 0,
+  partes_enviadas     smallint not null default 0,
+  erro_codigo         text,
+  external_id         text,
+  corpo_hash          text,
+  hipotese            text,
+  enviado_em          timestamptz,
+  created_at          timestamptz not null default now(),
+  updated_at          timestamptz not null default now()
+);
+
+alter table public.entregas_de_aviso_de_passagem
+  add column if not exists channel_session_id uuid,
+  add column if not exists partes_enviadas    smallint not null default 0,
+  add column if not exists erro_codigo        text,
+  add column if not exists external_id        text,
+  add column if not exists corpo_hash         text,
+  add column if not exists hipotese           text,
+  add column if not exists enviado_em         timestamptz;
+
+-- Os CHECK nomeados fora do `create table` (auto-curativos, um por coluna).
+-- `status` e `erro_codigo` são o MESMO vocabulário da 0292 —
+-- `STATUS_DA_ENTREGA_DE_AVISO` e `ERROS_DA_ENTREGA_DE_AVISO`
+-- (lib/escalacao/vocabulario-do-aviso.ts); `hipotese` é
+-- `HIPOTESES_DA_PASSAGEM` (lib/escalacao/vocabulario-do-aviso-de-passagem.ts).
+-- Quem confere os três contra o TypeScript é
+-- tests/invariants/aviso-de-passagem-ao-suporte.test.ts.
+alter table public.entregas_de_aviso_de_passagem
+  drop constraint if exists entregas_de_aviso_de_passagem_status_check;
+alter table public.entregas_de_aviso_de_passagem
+  add constraint entregas_de_aviso_de_passagem_status_check
+  check (status in ('pendente', 'enviado', 'falhou', 'cancelado'));
+
+alter table public.entregas_de_aviso_de_passagem
+  drop constraint if exists entregas_de_aviso_de_passagem_erro_codigo_check;
+alter table public.entregas_de_aviso_de_passagem
+  add constraint entregas_de_aviso_de_passagem_erro_codigo_check
+  check (erro_codigo is null or erro_codigo in (
+    'canal_desconectado',
+    'canal_arquivado',
+    'canal_nao_aceita_aviso_livre',
+    'canal_desativado',
+    'transporte_ausente',
+    'destino_invalido',
+    'destino_da_propria_organizacao',
+    'teto_diario_do_numero',
+    'sem_endereco_publico',
+    'titular_anonimizado',
+    'expirou',
+    'falha_no_envio',
+    'indeterminado'));
+
+alter table public.entregas_de_aviso_de_passagem
+  drop constraint if exists entregas_de_aviso_de_passagem_hipotese_check;
+alter table public.entregas_de_aviso_de_passagem
+  add constraint entregas_de_aviso_de_passagem_hipotese_check
+  check (hipotese is null or hipotese in ('brincadeira', 'irritacao_real', 'engano', 'outro'));
+
+alter table public.entregas_de_aviso_de_passagem
+  drop constraint if exists entregas_de_aviso_de_passagem_partes_enviadas_check;
+alter table public.entregas_de_aviso_de_passagem
+  add constraint entregas_de_aviso_de_passagem_partes_enviadas_check
+  check (partes_enviadas between 0 and 20);
+
+-- A CHAVE DA IDEMPOTÊNCIA: o handler reivindica no INSERT e lê o `23505` como
+-- "outro processo chegou primeiro" — o mesmo desenho da 0292.
+create unique index if not exists entregas_de_aviso_de_passagem_unica
+  on public.entregas_de_aviso_de_passagem (organization_id, passagem_id, destino);
+
+-- Leitor declarado: "outra passagem desta conversa já foi avisada há menos de
+-- 30 min?" e a leitura do histórico pela organização.
+create index if not exists entregas_de_aviso_de_passagem_org_idx
+  on public.entregas_de_aviso_de_passagem (organization_id, created_at desc);
+
+drop trigger if exists trg_entregas_de_aviso_de_passagem_updated_at on public.entregas_de_aviso_de_passagem;
+create trigger trg_entregas_de_aviso_de_passagem_updated_at
+  before update on public.entregas_de_aviso_de_passagem
+  for each row execute function public.fn_set_updated_at();
+
+-- RLS e grants: os da 0292. `revoke all` PRIMEIRO, porque o default ACL do
+-- baseline daria INSERT/UPDATE/DELETE a `authenticated`; leitura só `manager`;
+-- escrita só pelo service role (o handler).
+alter table public.entregas_de_aviso_de_passagem enable row level security;
+revoke all    on public.entregas_de_aviso_de_passagem from anon, authenticated;
+grant  select on public.entregas_de_aviso_de_passagem to authenticated;
+grant  all    on public.entregas_de_aviso_de_passagem to service_role;
+
+drop policy if exists leitura_entregas_de_aviso_de_passagem on public.entregas_de_aviso_de_passagem;
+create policy leitura_entregas_de_aviso_de_passagem
+  on public.entregas_de_aviso_de_passagem
+  for select to authenticated
+  using (
+    organization_id in (select public.fn_user_org_ids())
+    and public.fn_role_at_least(organization_id, 'manager')
+  );
+
+-- A PASSAGEM ANUNCIA NO BARRAMENTO. Toda linha nova de
+-- `passagens_de_atendimento` — dos DOIS motores, que gravam por caminhos
+-- diferentes (pg.Pool e supabase-js) — vira um `ai.handoff_recorded` no
+-- `event_log`, consumido por `escalacao-aviso-de-passagem.v1`. Um gatilho, e não
+-- um emit em cada chamador: são treze caminhos que passam conversa para humano,
+-- e o décimo quarto nasceria sem o emit. Precedente: 0148 (`trg_agent_case_opened`).
+-- O gatilho NÃO faz HTTP: só a linha no `event_log`.
+create or replace function public.fn_emit_passagem_registrada()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  perform public.emit_event(
+    'ai.handoff_recorded',
+    'passagem_de_atendimento',
+    new.id,
+    jsonb_build_object(
+      'passagem_id',     new.id,
+      'conversation_id', new.conversation_id,
+      'contact_id',      new.contact_id,
+      'motivo_codigo',   new.motivo_codigo,
+      'origem',          new.origem,
+      'motor',           new.motor,
+      'caso_id',         new.caso_id
+    ),
+    '{}'::jsonb,
+    new.organization_id   -- SEMPRE de `new`: é o filtro de tenant
+  );
+  return null;            -- AFTER trigger: o retorno é ignorado
+end;
+$$;
+
+-- As DUAS origens de EXECUTE (item 9 da doutrina de migrations).
+revoke all     on function public.fn_emit_passagem_registrada() from public;
+revoke execute on function public.fn_emit_passagem_registrada() from anon, authenticated;
+
+drop trigger if exists trg_passagem_registrada on public.passagens_de_atendimento;
+create trigger trg_passagem_registrada
+  after insert on public.passagens_de_atendimento
+  for each row
+  execute function public.fn_emit_passagem_registrada();
+
+-- ---- fork elllo: tolerância ao sentimento (migration 9003) ----
+-- `sondagem_minutos` deixa de ser a espera da sondagem (removida) e vira a
+-- JANELA da tolerância ao sentimento (lib/escalacao/tolerancia-ao-sentimento.ts):
+-- só uma segunda irritação dentro dela, confirmada como irritação real, passa
+-- a conversa. Sem renomear; só o default muda (10 → 30). 0 = desligada.
+alter table public.config_aviso_de_caso
+  alter column sondagem_minutos set default 30;
+
+comment on column public.config_aviso_de_caso.sondagem_minutos is
+  'Fork elllo (9003): janela da tolerância ao sentimento, em minutos (0..60; 0 = desligada, passagem na hora como no upstream). Uma segunda irritação dentro da janela, confirmada como irritação real (confiança >= 0,8), passa a conversa para uma pessoa; a primeira só é registrada. O nome vem da sondagem da 9002, removida.';
+
+-- ---- fork elllo: o apanhado das 7h ao dono (migration 9004) ----
+-- `itens_do_apanhado`: a propaganda silenciada e a mensagem de grupo que vale
+-- resposta, só por referência à mensagem (o texto é lido na hora do apanhado).
+-- Cabeçalho da 9004 para o racional inteiro.
+create table if not exists public.itens_do_apanhado (
+  id               uuid primary key default gen_random_uuid(),
+  organization_id  uuid not null references public.organizations(id) on delete cascade,
+  tipo             text not null,
+  origem           text not null,
+  message_id       uuid not null references public.messages(id) on delete cascade,
+  conversation_id  uuid not null references public.conversations(id) on delete cascade,
+  -- A probabilidade que o Jev deu (propaganda ou "vale responder"); nula
+  -- quando quem decidiu foi a forma do disparo, sem modelo.
+  probabilidade    real,
+  -- O dia LOCAL do apanhado que levou o item; nulo = ainda não foi.
+  incluido_em      date,
+  created_at       timestamptz not null default now()
+);
+
+-- Vocabulário fechado, conferido contra o TypeScript por
+-- tests/invariants/apanhado-do-dono.test.ts (`TIPOS_DO_ITEM`, `ORIGENS_DO_ITEM`
+-- em lib/escalacao/vocabulario-do-apanhado.ts).
+alter table public.itens_do_apanhado
+  drop constraint if exists itens_do_apanhado_tipo_check;
+alter table public.itens_do_apanhado
+  add constraint itens_do_apanhado_tipo_check
+  check (tipo in ('propaganda', 'grupo'));
+
+alter table public.itens_do_apanhado
+  drop constraint if exists itens_do_apanhado_origem_check;
+alter table public.itens_do_apanhado
+  add constraint itens_do_apanhado_origem_check
+  check (origem in ('disparo_automatico', 'jev'));
+
+alter table public.itens_do_apanhado
+  drop constraint if exists itens_do_apanhado_probabilidade_check;
+alter table public.itens_do_apanhado
+  add constraint itens_do_apanhado_probabilidade_check
+  check (probabilidade is null or (probabilidade >= 0 and probabilidade <= 1));
+
+-- A mesma mensagem entra uma vez por tipo: o webhook do provedor chega em
+-- dobro (`message` e `message.any`) e o dreno repete evento.
+create unique index if not exists itens_do_apanhado_unico
+  on public.itens_do_apanhado (organization_id, message_id, tipo);
+
+-- Leitor declarado: "os itens de ontem desta organização que ainda não foram".
+create index if not exists itens_do_apanhado_pendentes_idx
+  on public.itens_do_apanhado (organization_id, created_at)
+  where incluido_em is null;
+
+-- RLS e grants: os da 9002. `revoke all` PRIMEIRO (o default ACL do baseline
+-- daria escrita a `authenticated`); leitura só `manager`; escrita só pelo
+-- service role.
+alter table public.itens_do_apanhado enable row level security;
+revoke all    on public.itens_do_apanhado from anon, authenticated;
+grant  select on public.itens_do_apanhado to authenticated;
+grant  all    on public.itens_do_apanhado to service_role;
+
+drop policy if exists leitura_itens_do_apanhado on public.itens_do_apanhado;
+create policy leitura_itens_do_apanhado
+  on public.itens_do_apanhado
+  for select to authenticated
+  using (
+    organization_id in (select public.fn_user_org_ids())
+    and public.fn_role_at_least(organization_id, 'manager')
+  );
+
+comment on table public.itens_do_apanhado is
+  'Fork elllo (9004): propaganda silenciada e mensagem de grupo que vale resposta, para o apanhado das 7h ao dono. Só o ponteiro para a mensagem (o texto é lido na hora, e a redação da LGPD vale). incluido_em = o dia local do apanhado que levou o item.';
+
+-- ---- fork elllo: o dossiê do contato (migration 9005) ----
+-- `lead_notes` ganha categoria, fonte (posta pelo código) e liberada; `lead_dossie_flushes`
+-- marca o atendimento fechado já resumido; `fn_rapport_do_contato` é a leitura do mensageiro.
+-- Cabeçalho da 9005 para o racional inteiro.
+do $$
+begin
+  if not exists (
+    select 1 from information_schema.columns
+     where table_schema = 'public' and table_name = 'lead_notes' and column_name = 'fonte'
+  ) then
+    alter table public.lead_notes add column categoria text not null default 'fato';
+    alter table public.lead_notes add column fonte text not null default 'lucas';
+    alter table public.lead_notes add column liberada boolean not null default false;
+    -- As notas de antes: recado do mensageiro é pendência contada pelo dono; o
+    -- resto foi o agente que gravou, do que o contato disse.
+    update public.lead_notes
+       set categoria = 'pendente', fonte = 'lucas'
+     where headline like 'Recado do Lucas%';
+    update public.lead_notes
+       set categoria = 'fato', fonte = 'pessoa'
+     where headline not like 'Recado do Lucas%';
+  end if;
+end $$;
+
+-- Vocabulário fechado, conferido contra o TypeScript por
+-- tests/unit/dossie-do-contato.test.ts (`CATEGORIAS_DO_DOSSIE`,
+-- `FONTES_DO_DOSSIE` em lib/agent-engine/agent/dossie.ts).
+alter table public.lead_notes drop constraint if exists lead_notes_categoria_check;
+alter table public.lead_notes add constraint lead_notes_categoria_check
+  check (categoria in ('conheceu', 'gostos', 'rotina', 'pendente', 'jeito', 'tom', 'fato'));
+
+alter table public.lead_notes drop constraint if exists lead_notes_fonte_check;
+alter table public.lead_notes add constraint lead_notes_fonte_check
+  check (fonte in ('pessoa', 'helo', 'lucas'));
+
+-- "Pode usar com ele" só existe para o que o dono contou: o que o próprio
+-- contato disse já é dele, e a observação da IA não vai ao contato.
+alter table public.lead_notes drop constraint if exists lead_notes_liberada_check;
+alter table public.lead_notes add constraint lead_notes_liberada_check
+  check (not liberada or fonte = 'lucas');
+
+-- A observação da IA é só sobre o jeito e o tom (a fonte `helo` não descreve
+-- fato da vida de ninguém).
+alter table public.lead_notes drop constraint if exists lead_notes_helo_so_jeito_e_tom_check;
+alter table public.lead_notes add constraint lead_notes_helo_so_jeito_e_tom_check
+  check (fonte <> 'helo' or categoria in ('jeito', 'tom'));
+
+comment on column public.lead_notes.categoria is
+  'Fork elllo (9005): conheceu, gostos, rotina, pendente, jeito, tom ou fato.';
+comment on column public.lead_notes.fonte is
+  'Fork elllo (9005): quem contou — pessoa (o contato), helo (observação da IA sobre jeito/tom) ou lucas (a empresa: tela ou mensageiro do dono). Posta pelo código; default lucas, a mais restrita.';
+comment on column public.lead_notes.liberada is
+  'Fork elllo (9005): o dono disse que pode usar com o contato. Só vale para fonte lucas.';
+
+-- ── a marca do atendimento já resumido ─────────────────────────────────────
+create table if not exists public.lead_dossie_flushes (
+  conversation_id  uuid not null references public.conversations(id) on delete cascade,
+  service_revision integer not null,
+  status           text not null,
+  notas_gravadas   integer not null default 0,
+  created_at       timestamptz not null default now(),
+  primary key (conversation_id, service_revision)
+);
+
+alter table public.lead_dossie_flushes drop constraint if exists lead_dossie_flushes_status_check;
+alter table public.lead_dossie_flushes add constraint lead_dossie_flushes_status_check
+  check (status in ('feito', 'sem_notas', 'falhou', 'sem_conversa'));
+
+alter table public.lead_dossie_flushes enable row level security;
+revoke all on public.lead_dossie_flushes from anon, authenticated;
+grant  all on public.lead_dossie_flushes to service_role;
+
+comment on table public.lead_dossie_flushes is
+  'Fork elllo (9005): o atendimento fechado (conversa, revisão) que o worker já resumiu no dossiê (lead_notes). Só a marca, sem texto. Só o servidor lê e grava.';
+
+-- ── a leitura de rapport do mensageiro ─────────────────────────────────────
+create or replace function public.fn_rapport_do_contato(
+  p_organization_id uuid,
+  p_contact_id uuid default null,
+  p_telefone text default null
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+begin
+  -- plpgsql e não sql: o corpo só é conferido na chamada, e o baseline cria esta
+  -- função antes de `contact_phones` (9043) existir.
+  return (
+  with contato as (
+    select c.id, c.display_name
+      from public.contacts c
+     where c.organization_id = p_organization_id
+       and coalesce(c.is_anonymized, false) = false
+       and (
+         (p_contact_id is not null and c.id = p_contact_id)
+         or (p_contact_id is null and p_telefone is not null and exists (
+               select 1 from public.contact_phones cp
+                where cp.organization_id = p_organization_id
+                  and cp.contact_id = c.id
+                  and public.fn_telefone_canonico(cp.phone_number) = public.fn_telefone_canonico(p_telefone)))
+       )
+     order by c.created_at
+     limit 1
+  )
+  select case when not exists (select 1 from contato) then null else jsonb_build_object(
+    'contact_id', (select id from contato),
+    'nome', (select display_name from contato),
+    'linhas', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'categoria', n.categoria,
+               'fonte', n.fonte,
+               'liberada', n.liberada,
+               'titulo', n.headline,
+               'texto', n.body,
+               'quando', n.created_at)
+             order by array_position(array['conheceu','gostos','rotina','pendente','jeito','tom','fato'], n.categoria), n.created_at)
+        from public.lead_notes n
+       where n.organization_id = p_organization_id
+         and n.contact_id = (select id from contato)
+         and n.headline not like 'Recado do Lucas%'
+         and n.headline <> '(anonimizado)'
+    ), '[]'::jsonb)
+  ) end
+  );
+end;
+$$;
+
+revoke all on function public.fn_rapport_do_contato(uuid, uuid, text) from public, anon, authenticated;
+grant execute on function public.fn_rapport_do_contato(uuid, uuid, text) to service_role;
+
+comment on function public.fn_rapport_do_contato(uuid, uuid, text) is
+  'Fork elllo (9005): o rapport do contato (notas por categoria, com a fonte), para o mensageiro do Hermes. Sem mensagem da conversa e sem os recados operacionais. Só service_role.';
+
 -- ---- #3042: desmarcar o exemplo tira do RAG os trechos já aprendidos da conversa (migration 0688) ----
 -- Desmarcar `usable_for_rag` só impedia ingestões futuras; os `ai_chunks` já gravados da conversa
 -- seguiam alcançáveis por `retrieve_top_k_chunks`. A função remove os trechos cujo

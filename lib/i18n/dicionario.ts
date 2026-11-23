@@ -46,6 +46,7 @@ import { TEXTOS_MCP_OAUTH } from "./mcp-oauth";
 import { TEXTOS_TABELA_DE_VALORES } from "./tabela-de-valores";
 import { TEXTOS_DO_MOTOR_GRAVADO } from "./motor-gravado";
 import { TEXTOS_AVISOS_DA_CENTRAL } from "./avisos-da-central";
+import { TEXTOS_AVISO_DE_PASSAGEM } from "./aviso-de-passagem";
 
 /** `pt-BR` não aparece: é a chave. Só o que DIFERE precisa de linha. */
 type Traducoes = Record<string, Partial<Record<Exclude<Idioma, "pt-BR">, string>>>;
@@ -578,6 +579,7 @@ export const DICIONARIO: Traducoes = {
   "Esta automação não repete para o mesmo contato dentro do intervalo configurado, e este contato passou por ela há menos tempo que isso. Nada foi enviado agora; ela volta a valer quando a janela terminar.": {
     es: "Esta automatización no se repite para el mismo contacto dentro del intervalo configurado, y este contacto pasó por ella hace menos tiempo que eso. No se envió nada ahora; vuelve a aplicarse cuando termine la ventana.",
   },
+  ...TEXTOS_AVISO_DE_PASSAGEM,
   "Há um ajuste proporcional esperando pagamento. Escolher outro plano cancela esse ajuste.": { es: "Hay un ajuste proporcional esperando el pago. Elegir otro plan cancela ese ajuste." },
   "Estamos preparando o ajuste proporcional. Aguarde alguns segundos e tente novamente.": { es: "Estamos preparando el ajuste proporcional. Espera unos segundos e inténtalo de nuevo." },
   "Estamos preparando o ajuste proporcional. Aguarde alguns segundos.": { es: "Estamos preparando el ajuste proporcional. Espera unos segundos." },
@@ -2300,6 +2302,34 @@ export const DICIONARIO: Traducoes = {
   "Memória do contato": { es: "Memoria del contacto" },
   "Fatos duráveis registrados nas notas. Pendências pertencem à demanda vigente.": { es: "Hechos duraderos registrados en las notas. Los pendientes corresponden al caso vigente." },
   "Nenhum fato durável registrado.": { es: "No hay hechos duraderos registrados." },
+  // Fork elllo (9005): o dossiê do contato.
+  "Não contar ao contato o que a equipe anotou só para a IA": { es: "No contarle al contacto lo que el equipo anotó solo para la IA" },
+  "Barra a mensagem que repete um trecho de uma nota que a equipe escreveu sobre o contato e não liberou para usar com ele.": { es: "Bloquea el mensaje que repite un fragmento de una nota que el equipo escribió sobre el contacto y no liberó para usar con él." },
+  "É o que a equipe contou em confiança. Liberar uma nota é escolha nota a nota, na ficha do contato. Regra fixa, sem custo.": { es: "Es lo que el equipo contó en confianza. Liberar una nota es una elección nota por nota, en la ficha del contacto. Regla fija, sin costo." },
+  "depende das notas que a equipe escreveu sobre um contato de verdade — o teste não tem contato": { es: "depende de las notas que el equipo escribió sobre un contacto real — la prueba no tiene contacto" },
+  "Não enviei: a mensagem repetia o que a equipe anotou sobre o contato só para a IA": { es: "No envié: el mensaje repetía lo que el equipo anotó sobre el contacto solo para la IA" },
+  "Como se conheceram": { es: "Cómo se conocieron" },
+  "Gostos e assuntos": { es: "Gustos y temas" },
+  "Rotina": { es: "Rutina" },
+  "Jeito que funciona": { es: "Lo que funciona con la persona" },
+  "Tom entre vocês": { es: "El tono entre ustedes" },
+  "Outros fatos": { es: "Otros hechos" },
+  "a pessoa contou": { es: "lo contó la persona" },
+  "observação da Helô": { es: "observación de Helô" },
+  "você contou": { es: "lo contaste tú" },
+  "Dossiê salvo.": { es: "Expediente guardado." },
+  "Não foi possível salvar a nota.": { es: "No se pudo guardar la nota." },
+  "Apagar esta nota do dossiê?": { es: "¿Borrar esta nota del expediente?" },
+  "Não foi possível apagar a nota.": { es: "No se pudo borrar la nota." },
+  "Uma linha curta": { es: "Una línea corta" },
+  "Pode usar com o contato": { es: "Se puede usar con el contacto" },
+  "pode usar": { es: "se puede usar" },
+  "Anotar no dossiê": { es: "Anotar en el expediente" },
+  "Nota inválida: título, texto e categoria.": { es: "Nota inválida: título, texto y categoría." },
+  "Contato anonimizado: o dossiê não aceita notas.": { es: "Contacto anonimizado: el expediente no acepta notas." },
+  "Nota inválida.": { es: "Nota inválida." },
+  "Não foi possível corrigir a nota.": { es: "No se pudo corregir la nota." },
+  "Só o que a equipe contou pode ser liberado para usar com o contato.": { es: "Solo lo que contó el equipo se puede liberar para usar con el contacto." },
   "Histórico encerrado — sem tarefas pendentes": { es: "Historial cerrado — sin tareas pendientes" },
 
   "Interface": { es: "Interfaz" },
@@ -15101,7 +15131,6 @@ export const DICIONARIO: Traducoes = {
   "Não repete": { es: "No se repite" },
   "Diária": { es: "Diaria" },
   "Semanal": { es: "Semanal" },
-  "Rotina": { es: "Rutina" },
   "A tarefa volta todo dia, no horário acima, no fuso da empresa.": {
     es: "La tarea vuelve todos los días, en el horario de arriba, en la zona horaria de la empresa.",
   },

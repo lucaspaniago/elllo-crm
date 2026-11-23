@@ -1481,6 +1481,12 @@ export const AUDIT_ACTIONS = [
   // A marca foi removida: só limpa `ai_opt_out`; a conversa segue com a trava
   // de handoff de quem a pôs.
   "contacts.always_human_unmarked",
+  // Fork elllo (9005): o dono escreveu, corrigiu ou apagou uma linha do dossiê do
+  // contato (`lead_notes`) pela tela. `resource_id` = o contato; o TEXTO da nota
+  // nunca entra no metadata (é dado da pessoa), só a nota, a categoria e a fonte.
+  "contacts.dossie_nota_criada",
+  "contacts.dossie_nota_corrigida",
+  "contacts.dossie_nota_apagada",
   // B1 (spec 24): a prévia da abordagem de prospecção foi GRAVADA no candidato
   // (`data.previa`) para o tick reusar — deixou de ser somente leitura, logo
   // tem trilha. `resource_id` = o candidato; o TEXTO não entra no metadata.

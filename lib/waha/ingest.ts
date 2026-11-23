@@ -59,6 +59,8 @@ import {
   type ChatIdentidade,
 } from "@/lib/escalacao/numero-interno-de-aviso";
 import { consumirRespostaDoSuporteNoWhatsApp } from "@/lib/escalacao/resposta-whatsapp-ao-caso";
+import { corpoComDisparo, detectarDisparoAutomatico, metadataDoDisparo } from "@/lib/waha/disparo-automatico";
+import { silenciarDisparoAutomatico } from "@/lib/waha/silencio-de-disparo";
 
 export type Admin = ReturnType<typeof createAdminClient>;
 
@@ -1075,18 +1077,51 @@ function contextoDoBaileys(p: WahaPayload): Record<string, unknown> | null {
  * o texto aparece quando o normalizado não o traz. Sem id não há o que
  * resolver: devolve `null` e a mensagem entra solta, como sempre entrou.
  */
-function citacaoDoPayload(p: WahaPayload): { id: string; texto: string | null } | null {
+function citacaoDoPayload(
+  p: WahaPayload,
+): { id: string; texto: string | null; tipo: string | null } | null {
   const direto = objetoSimples(p.replyTo);
   const contexto = contextoDoBaileys(p);
   const id = textoNaoVazio(direto?.id) ?? textoNaoVazio(contexto?.stanzaId);
   if (!id) return null;
   const citada = objetoSimples(contexto?.quotedMessage);
+  const midia = midiaDaCitada(citada);
   const texto =
     textoNaoVazio(direto?.body) ??
     textoNaoVazio(citada?.conversation) ??
     textoNaoVazio(objetoSimples(citada?.extendedTextMessage)?.text) ??
+    midia?.legenda ??
     null;
-  return { id, texto };
+  return { id, texto, tipo: midia?.tipo ?? null };
+}
+
+/**
+ * elllo: o TIPO e a legenda da citada quando ela é mídia (`quotedMessage.<tipo>Message`).
+ *
+ * Só serve quando a citada NÃO foi achada no banco: aí a cópia do WhatsApp é
+ * tudo o que o agente terá dela (`abertura/mensagem-citada.ts`), e uma foto
+ * citada sem legenda entrava sem rastro nenhum — nem `reply_to_body`. `null`
+ * quando a citada é texto ou não veio.
+ */
+const TIPOS_DE_MIDIA_CITADA: ReadonlyArray<readonly [string, string]> = [
+  ["imageMessage", "image"],
+  ["videoMessage", "video"],
+  ["audioMessage", "audio"],
+  ["documentMessage", "document"],
+  ["stickerMessage", "sticker"],
+  ["locationMessage", "location"],
+  ["contactMessage", "contact"],
+];
+function midiaDaCitada(
+  citada: Record<string, unknown> | null,
+): { tipo: string; legenda: string | null } | null {
+  if (!citada) return null;
+  const comLegenda = objetoSimples(objetoSimples(citada.documentWithCaptionMessage)?.message);
+  for (const [chave, tipo] of TIPOS_DE_MIDIA_CITADA) {
+    const m = objetoSimples(citada[chave]) ?? objetoSimples(comLegenda?.[chave]);
+    if (m) return { tipo, legenda: textoNaoVazio(m.caption) ?? null };
+  }
+  return null;
 }
 
 /**
@@ -1190,7 +1225,12 @@ async function handleInbound(
   if (!p.id) return;
   // WAHA emite eventos vazios p/ status/read-receipt/presence — não viram mensagem.
   const texto = bodyOf(p);
-  if (!texto && !mediaUrlOf(p) && !p.hasMedia) return;
+  // Fork elllo — disparo automático de empresa: o texto do modelo vira o corpo
+  // legível da mensagem (`lib/waha/disparo-automatico.ts`). `texto` segue o de
+  // sempre para os efeitos (opt-out, campanha, origem).
+  const disparo = detectarDisparoAutomatico(p);
+  const corpo = corpoComDisparo(texto, disparo);
+  if (!corpo && !mediaUrlOf(p) && !p.hasMedia) return;
   // Daqui para baixo era para ser uma mensagem de verdade: se o chat não é
   // endereçável, PERDEMOS uma — e isso precisa ser contável. O aviso fica depois
   // das guardas acima de propósito; antes delas, todo evento de presença viraria
@@ -1265,7 +1305,7 @@ async function handleInbound(
       direction: "inbound",
       status: "delivered",
       ack: p.ack ?? null,
-      body: texto,
+      body: corpo,
       media_url: mediaUrlOf(p),
       media_mime: mediaMimeOf(p),
       sent_via: "external_device",
@@ -1282,6 +1322,8 @@ async function handleInbound(
         // resolvida, a citada no banco é a fonte da verdade — uma edição
         // posterior mudaria o que a tela mostra, e a cópia ficaria velha.
         ...(citacao?.texto && !citadaId ? { reply_to_body: citacao.texto } : {}),
+        // elllo: o tipo da citada não achada, quando é mídia (`midiaDaCitada`).
+        ...(citacao?.tipo && !citadaId ? { reply_to_type: citacao.tipo } : {}),
         // O anúncio DESTA mensagem vai junto — o contato guarda só o primeiro, e
         // quem volta por outro anúncio precisa deixar rastro. Ver `metadataDoAnuncio`.
         ...metadataDoAnuncio(atribuicao),
@@ -1290,6 +1332,7 @@ async function handleInbound(
         // gravada vazia, e gravação é de linha NOVA (o INSERT é o único caminho
         // que escreve `metadata` aqui), então nada do que já está é sobrescrito.
         ...(nomeDoArquivo ? { media_filename: nomeDoArquivo } : {}),
+        ...metadataDoDisparo(disparo, corpo),
       },
     })
     .select("id")
@@ -1340,7 +1383,7 @@ async function handleInbound(
     return;
   }
 
-  await markConversation(admin, session.organization_id, conversationId, "inbound", previewFromMessage(p), dataDoTimestamp(p.timestamp, now));
+  await markConversation(admin, session.organization_id, conversationId, "inbound", previaDaMensagem(corpo, resolveMessageType(p)), dataDoTimestamp(p.timestamp, now));
 
   await audit({
     action: "message.received",
@@ -1366,7 +1409,20 @@ async function handleInbound(
   const atribuicaoGoogleDaMensagem = await extrairEEstamparAtribuicaoGoogle(
     admin, session.organization_id, contactId, texto,
   );
-  await aplicarEfeitosPosEntrada(admin, {
+  //
+  // Fork elllo — propaganda de empresa a quem nunca escrevemos não chega aos
+  // efeitos (sem card, sem turno da IA): `lib/waha/silencio-de-disparo.ts`.
+  const silenciado = await silenciarDisparoAutomatico(admin, {
+    organizationId: session.organization_id,
+    contactId,
+    conversationId,
+    messageId: insertedMessage?.id ?? null,
+    disparo,
+    requestId,
+    // Fork elllo (16/11) — o texto vai ao Jev quando a forma não é de disparo.
+    texto: corpo,
+  });
+  if (!silenciado) await aplicarEfeitosPosEntrada(admin, {
     organizationId: session.organization_id,
     contactId,
     conversationId,
@@ -1744,6 +1800,8 @@ async function handleOutboundFromUserPhone(
         ...(localizacaoDoPayload(p) ? { location: localizacaoDoPayload(p) } : {}),
         // Mesmo critério do inbound: cópia do texto só quando não há ponteiro.
         ...(citacao?.texto && !citadaId ? { reply_to_body: citacao.texto } : {}),
+        // elllo: o tipo da citada não achada, quando é mídia (`midiaDaCitada`).
+        ...(citacao?.tipo && !citadaId ? { reply_to_type: citacao.tipo } : {}),
         // Mesma regra do inbound (#2613): nome só quando há nome.
         ...(nomeDoArquivo ? { media_filename: nomeDoArquivo } : {}),
       },

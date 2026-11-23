@@ -280,6 +280,12 @@ export function criarIngestDeGrupoDb(admin: SupabaseClient): IngestDeGrupoDb {
               ia_responde: boolean | null;
             }
           | null;
+      // Fork elllo (16/11/2026) — grupo SEM linha entra sozinho, com a IA
+      // calada, para o Jev avaliar (`lib/escalacao/grupos-pelo-jev.ts`).
+      if (!r) {
+        const { ligarGrupoNovoNaEntrada } = await import("@/lib/escalacao/grupos-pelo-jev");
+        return await ligarGrupoNovoNaEntrada(admin, org, session, chatId);
+      }
       return r
         ? {
             id: r.id,

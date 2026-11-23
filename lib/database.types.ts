@@ -10570,35 +10570,77 @@ export type Database = {
           },
         ];
       };
+      lead_dossie_flushes: {
+        Row: {
+          conversation_id: string;
+          created_at: string;
+          notas_gravadas: number;
+          service_revision: number;
+          status: string;
+        };
+        ComputedFields: never;
+        Insert: {
+          conversation_id: string;
+          created_at?: string;
+          notas_gravadas?: number;
+          service_revision: number;
+          status: string;
+        };
+        Update: {
+          conversation_id?: string;
+          created_at?: string;
+          notas_gravadas?: number;
+          service_revision?: number;
+          status?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "lead_dossie_flushes_conversation_id_fkey";
+            columns: ["conversation_id"];
+            isOneToOne: false;
+            referencedRelation: "conversations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       lead_notes: {
         Row: {
           body: string;
+          categoria: string;
           contact_id: string;
           created_at: string;
           embedding: Json | null;
+          fonte: string;
           headline: string;
           id: string;
+          liberada: boolean;
           organization_id: string;
           updated_at: string;
         };
         ComputedFields: never;
         Insert: {
           body: string;
+          categoria?: string;
           contact_id: string;
           created_at?: string;
           embedding?: Json | null;
+          fonte?: string;
           headline: string;
           id?: string;
+          liberada?: boolean;
           organization_id: string;
           updated_at?: string;
         };
         Update: {
           body?: string;
+          categoria?: string;
           contact_id?: string;
           created_at?: string;
           embedding?: Json | null;
+          fonte?: string;
           headline?: string;
           id?: string;
+          liberada?: boolean;
           organization_id?: string;
           updated_at?: string;
         };
@@ -16669,6 +16711,10 @@ export type Database = {
           p256dh: string;
           user_id: string;
         }[];
+      };
+      fn_rapport_do_contato: {
+        Args: { p_contact_id?: string; p_organization_id: string; p_telefone?: string };
+        Returns: Json;
       };
       fn_reaplicar_modulos_instalados: { Args: Record<PropertyKey, never>; Returns: undefined };
       fn_reativar_organizacao: {

@@ -168,7 +168,7 @@ const TETO: Readonly<Record<string, { tokens: number; motivo: string }>> = {
   "send_message": { tokens: 422, motivo: "Medição do merge (#4129 + Spec 25 R4): `material_id` e a descrição do anexo da empresa entram no envio nativo ANTES da `imagem_url`, cujo bloco já estava na main — 422 é o peso real dos dois, não a soma dos dois tetos" },
   "update_lead_state": { tokens: 240, motivo: BASE },
   "schedule_followup": { tokens: 200, motivo: BASE },
-  "save_lead_note": { tokens: 229, motivo: BASE },
+  "save_lead_note": { tokens: 427, motivo: "+198 do dossiê do contato (fork elllo, 9005): a categoria com o significado de cada uma e a regra de não guardar o que a pessoa contou de terceiros" },
   "get_lead_note": { tokens: 99, motivo: BASE },
   "search_knowledge": { tokens: 131, motivo: BASE },
   // #4133: nasceu com o modo `leitura_direta` (índice no contexto + leitura do
@@ -242,7 +242,7 @@ const TETO: Readonly<Record<string, { tokens: number; motivo: string }>> = {
 // 45880 = 43286 + 2594 (2026-11-20), não somado à mão.
 // +39 de `crm_send_whatsapp_message` com media_storage_path e media_filename (#5034).
 // MEDIDO no merge com a main de 20/11: 45919 = 45880 + 39 (2026-11-20), não somado à mão.
-const TETO_TOTAL = 45919;
+const TETO_TOTAL = 46117;
 
 const VARIANTE = "schedule_followup (com negócio)";
 

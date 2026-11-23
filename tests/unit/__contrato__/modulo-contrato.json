@@ -245,6 +245,7 @@
     "contatos": [
       "DELETE /api/v1/companies/[id]",
       "DELETE /api/v1/contacts/[id]/always-human",
+      "DELETE /api/v1/contacts/[id]/dossie/[id]",
       "DELETE /api/v1/contacts/[id]/personal",
       "DELETE /api/v1/contacts/[id]/phones/[id]",
       "DELETE /api/v1/contacts/[id]/sem-interesse",
@@ -273,6 +274,7 @@
       "PATCH /api/v1/companies/[id]",
       "PATCH /api/v1/contacts/[id]",
       "PATCH /api/v1/contacts/[id]/carteira",
+      "PATCH /api/v1/contacts/[id]/dossie/[id]",
       "PATCH /api/v1/contacts/[id]/person",
       "PATCH /api/v1/contacts/[id]/phones/[id]",
       "POST /api/v1/companies",
@@ -280,6 +282,7 @@
       "POST /api/v1/companies/[id]/enrich",
       "POST /api/v1/contacts",
       "POST /api/v1/contacts/[id]/always-human",
+      "POST /api/v1/contacts/[id]/dossie",
       "POST /api/v1/contacts/[id]/empresa-da-prospeccao",
       "POST /api/v1/contacts/[id]/personal",
       "POST /api/v1/contacts/[id]/phones",
@@ -1121,6 +1124,26 @@
           "nome": "prospectEnrichmentSchema",
           "origem": "@/lib/prospecting/schema",
           "hash": "01ed8514f2d740fc"
+        }
+      ],
+      "resposta": []
+    },
+    "/api/v1/contacts/[id]/dossie": {
+      "corpo": [
+        {
+          "nome": "criarNotaSchema",
+          "origem": "@/lib/dossie/escrita-da-tela",
+          "hash": "2d4144288b1d2d2f"
+        }
+      ],
+      "resposta": []
+    },
+    "/api/v1/contacts/[id]/dossie/[id]": {
+      "corpo": [
+        {
+          "nome": "corrigirNotaSchema",
+          "origem": "@/lib/dossie/escrita-da-tela",
+          "hash": "b5b7418968f9c63e"
         }
       ],
       "resposta": []

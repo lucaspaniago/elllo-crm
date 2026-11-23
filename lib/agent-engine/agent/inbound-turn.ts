@@ -15,6 +15,8 @@ import { etiquetarProdutoAposEnvio } from './etiqueta-apos-envio';
 import { textosDoClienteNoHistorico } from './pedido-de-audio';
 import { claimOfJob } from '../queue/claim';
 import { currentExecutionBoundary, guardServiceEffect } from '@/lib/atendimento/fronteira-server';
+import { buildAtendimentosAnterioresBlock } from './abertura/atendimentos-anteriores';
+import { buildCitacaoBlock } from './abertura/mensagem-citada';
 /**
  * Loop do agente v0 — handler do job `inbound_turn` (F2-09; blueprint 8.8).
  *
@@ -162,6 +164,7 @@ import { buildOpeningMessage, ritualBlocks, type FormatoDoHistorico } from "./ab
 import { snapshotDoCaso } from "./conversa-do-caso/contexto";
 import { lerRemetenteDeGrupo, type RemetenteDeGrupo } from "@/lib/messaging/remetente-de-grupo";
 import { applySaveLeadNote, buildNotesIndexBlock, getLeadNoteBody } from './lead-notes';
+import { CATEGORIAS_DO_DOSSIE, SIGNIFICADO_DA_CATEGORIA, trechosReservados } from './dossie';
 import { buildCompromissosBlock } from './compromissos-do-contato';
 import { buildKnowledgeIndexBlock, ORCAMENTO_PADRAO_DO_INDICE } from './indice-de-conhecimento';
 import { lerDocumentoDoMaterial } from './ler-documento';
@@ -568,7 +571,10 @@ export const AGENT_TOOL_DEFS = {
       'você vai querer lembrar depois: preferências, contexto pessoal, restrições, o que já foi ' +
       'oferecido. A headline (linha curta) entra sempre no índice de memória do lead; o corpo completo ' +
       'fica guardado e você o relê sob demanda com get_lead_note. Para CONSOLIDAR notas antigas, ' +
-      'liste os ids delas em "supersedes" (você os vê no índice) — elas são removidas ao salvar a nova.',
+      'liste os ids delas em "supersedes" (você os vê no índice) — elas são removidas ao salvar a nova ' +
+      '(as que o Lucas contou ficam). Diga a categoria (o dossiê desta pessoa, para o rapport). ' +
+      'Guarde só o que a pessoa contou de si ou o que você notou do jeito e do tom dela; nunca o ' +
+      'que ela contou de outra pessoa.',
     // Schema LARGO para o SDK (o modelo vê os campos); a validação REAL é a whitelist
     // .strict() + guard de prototype pollution dentro de applySaveLeadNote — campo
     // extra/forjado vira erro de ENSINO ao modelo, nunca exceção do SDK nem strip silencioso.
@@ -580,6 +586,12 @@ export const AGENT_TOOL_DEFS = {
           .array(z.string())
           .optional()
           .describe('ids de notas que esta substitui/consolida (vistos no índice de memória)'),
+        categoria: z
+          .enum(CATEGORIAS_DO_DOSSIE)
+          .optional()
+          .describe(
+            `do que a nota fala (ausente = fato): ${CATEGORIAS_DO_DOSSIE.map((c) => `${c} = ${SIGNIFICADO_DA_CATEGORIA[c]}`).join('; ')}`,
+          ),
       })
       .passthrough(),
   },
@@ -2196,6 +2208,12 @@ export interface AgentTurnInput {
     passagemBlock?: string;
     /** Texto exato da mensagem que acordou este turno inbound. */
     currentInboundText?: string;
+    /**
+     * A mensagem que o cliente CITOU ("responder em cima"), em texto — ver
+     * `abertura/mensagem-citada.ts`. Opcional pela mesma razão de `projeta`;
+     * vazio = o cliente não citou nada, e o prompt não muda.
+     */
+    citacaoBlock?: string;
     /**
      * #2729 — quem escreveu a mensagem que acordou este turno, quando ela veio
      * de um GRUPO. Opcional pela mesma razão de `projeta`: quem monta um ritual
@@ -4174,21 +4192,48 @@ async function executarTurnoDoAgente(
     knowledgeSourceIds: agentConfig?.knowledgeSourceIds ?? [],
     activeKbVersionId: agentConfig?.activeKbVersionId ?? null,
   });
-  const [notesIndexBlock, compromissosBlock, origemBlock, noteIdRows, indiceDeConhecimentoBlock] =
+  // Fork elllo: quatro trilhas, nunca mais (o teto de `tests/unit/turno-le-em-paralelo.test.ts`).
+  // A origem e o resumo anterior numa; a citação depois da leitura das notas, noutra.
+  const [notesIndexBlockDoContato, compromissosBlock, [origemBlock, anterioresBlock], [noteIdRows, citacao], indiceDeConhecimentoBlock] =
     await Promise.all([
       notasDaPrevia
         ? notasDaPrevia.bloco
         : buildNotesIndexBlock(pool, tenantId, leadId, deps.knobs.notesIndexMaxTokens),
       preview?.kind === 'sandbox' ? '' : buildCompromissosBlock(pool, tenantId, leadId, new Date()),
-      preview ? '' : buildOrigemBlock(pool, tenantId, leadId, new Date()),
-      preview
-        ? null
-        : pool
-            .query<{ id: string }>(
-              'select id from lead_notes where organization_id = $1 and contact_id = $2 order by created_at',
-              [tenantId, leadId],
-            )
-            .then((r) => r.rows),
+      (async () =>
+        [
+          preview ? '' : await buildOrigemBlock(pool, tenantId, leadId, new Date()),
+          // O resumo do atendimento ANTERIOR do contato, rotulado como passado (ver
+          // `abertura/atendimentos-anteriores.ts`). Fora da prévia; sem fronteira, ''.
+          preview ? '' : await buildAtendimentosAnterioresBlock(pool, tenantId, leadId, currentExecutionBoundary()),
+        ] as const)(),
+      (async () =>
+        [
+          preview
+            ? null
+            : await pool
+                // Fork elllo (9005): a mesma leitura traz o texto das notas do Lucas, para a
+                // cerca `nota_do_lucas` (o corpo das outras não é lido aqui).
+                .query<{ id: string; headline: string; body: string; fonte: string; liberada: boolean }>(
+                  `select id, headline, case when fonte = 'lucas' and not liberada then body else '' end as body,
+                          fonte, liberada
+                     from lead_notes where organization_id = $1 and contact_id = $2 order by created_at`,
+                  [tenantId, leadId],
+                )
+                .then((r) => r.rows),
+          // A mensagem que o cliente citou (ver `abertura/mensagem-citada.ts`). O cenário
+          // do sandbox não tem conversa real; o rascunho assistido lê sem âncora.
+          preview?.kind === 'sandbox'
+            ? { bloco: '', origens: [] as string[] }
+            : await buildCitacaoBlock(pool, {
+                organizationId: tenantId,
+                conversationId: input.conversationId,
+                inboundMessageId: input.inboundMessageId ?? null,
+                historico: effectiveContext.messages,
+                fuso: fusoDaOrg,
+                verImagens: agentConfig?.imageVisionEnabled ?? true,
+              }),
+        ] as const)(),
       // Índice da base de conhecimento no contexto (#4133, item 1) — SÓ no modo
       // `leitura_direta`; no `busca` o turno é o de hoje, byte a byte.
       planoDeConhecimento.injetaIndice
@@ -4200,6 +4245,18 @@ async function executarTurnoDoAgente(
           )
         : Promise.resolve(''),
     ]);
+  // Fork elllo (9005): o que o Lucas contou deste contato e a conversa ainda não tem —
+  // a cerca `nota_do_lucas` do envio. Na prévia, quem monta é `previewGateContext`.
+  const trechosDoLucas =
+    noteIdRows === null ? undefined : trechosReservados(noteIdRows, effectiveContext.messages.map((m) => m.body));
+  if (citacao.origens.length > 0) {
+    // Só contagem e origem: o texto citado é PII e nunca vai a log.
+    runLog.info('mensagem citada pelo cliente entrou no turno', { citacoes: citacao.origens });
+  }
+  // Entra junto do índice de notas, sob "Memória do lead": é memória do contato
+  // que atravessa atendimentos. Vazio não muda o prompt.
+  const notesIndexBlock =
+    anterioresBlock !== '' ? `${notesIndexBlockDoContato}\n\n${anterioresBlock}` : notesIndexBlockDoContato;
   // Observabilidade da memória (Fase 2A): SÓ ids/contagens no log — headline/corpo
   // são PII e nunca saem do prompt. Prova auditável de que a memória durável do
   // lead entrou no contexto DESTE turno.
@@ -4208,6 +4265,7 @@ async function executarTurnoDoAgente(
       checkpoint_seq: effectivePrevious?.seq ?? null,
       notes_count: noteIdRows.length,
       note_ids: noteIdRows.map((r) => r.id),
+      resumo_anterior: anterioresBlock !== '',
     });
   }
 
@@ -5452,6 +5510,9 @@ async function executarTurnoDoAgente(
             // não é dele, e a única saída seria o silêncio. O follow-up determinístico
             // idem (ver GateContext.internalVocabularyEnforced).
             enforceInternalVocabulary: true,
+            // Fork elllo (9005): fica armada também no re-run do fail-safe (que só desarma o
+            // vocabulário interno) — ver `notaDoLucasGate`.
+            ...(trechosDoLucas !== undefined ? { trechosDoLucas } : {}),
             // Afirmação clínica: mesma razão do vocabulário (só o corpo do MODELO), e
             // só para a organização que ligou a camada — ver
             // `GateContext.clinicalClaimEnforced`. Sem linha, desligada: não há padrão de
@@ -7145,6 +7206,7 @@ async function executarTurnoDoAgente(
       origemBlock,
       passagemBlock,
       formatoDoHistorico: deps.knobs.historyFormat ?? 'json',
+      citacaoBlock: citacao.bloco,
       ...(currentInboundText !== null ? { currentInboundText } : {}),
       // #2729 — o autor da mensagem canônica, quando ela é de grupo. Vai junto
       // do texto: sem ele o modelo ouve a voz e não sabe de quem é.
@@ -8301,6 +8363,8 @@ export async function runAgentPreview(
           entregues,
           compromissosBlock,
           formatoDoHistorico,
+          passagemBlock,
+          citacaoBlock,
         }) =>
           buildOpeningMessage(
             previous,
@@ -8314,6 +8378,8 @@ export async function runAgentPreview(
             undefined,
             '',
             formatoDoHistorico,
+            passagemBlock,
+            citacaoBlock,
           ),
       },
       preview,
@@ -8539,6 +8605,7 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
         currentInboundSender,
         formatoDoHistorico,
         passagemBlock,
+        citacaoBlock,
       }) =>
         buildOpeningMessage(
           previous,
@@ -8553,6 +8620,7 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
           origemBlock,
           formatoDoHistorico,
           passagemBlock,
+          citacaoBlock,
         ),
     });
   };
