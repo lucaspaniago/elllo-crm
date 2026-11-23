@@ -102,7 +102,8 @@ function cortar(texto: string | null | undefined): string | null {
 }
 
 function comoData(v: string | Date): Date {
-  return v instanceof Date ? v : new Date(v);
+  // `new Date` aceita os dois transportes (Date do driver, texto do JSON): sem ramo.
+  return new Date(v);
 }
 
 /** Quem escreveu a citada, no vocabulário do prompt. */

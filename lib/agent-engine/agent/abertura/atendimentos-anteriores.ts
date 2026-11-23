@@ -40,7 +40,8 @@ export interface ResumoAnteriorRow {
 }
 
 function dataCurta(v: string | Date): string {
-  const d = v instanceof Date ? v : new Date(v);
+  // `new Date` aceita os dois transportes (Date do driver, texto do JSON): sem ramo.
+  const d = new Date(v);
   return Number.isNaN(d.getTime()) ? "data desconhecida" : d.toISOString().slice(0, 10);
 }
 

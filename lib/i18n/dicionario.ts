@@ -15131,7 +15131,6 @@ export const DICIONARIO: Traducoes = {
   "Não repete": { es: "No se repite" },
   "Diária": { es: "Diaria" },
   "Semanal": { es: "Semanal" },
-  "Rotina": { es: "Rutina" },
   "A tarefa volta todo dia, no horário acima, no fuso da empresa.": {
     es: "La tarea vuelve todos los días, en el horario de arriba, en la zona horaria de la empresa.",
   },

@@ -200,6 +200,28 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// Fork elllo: com a resposta por WhatsApp ligada, o aviso sai em PARTES, uma por rodada
+// do dreno (`montarPartesDoAvisoDeCaso`). Roda as rodadas até o fim e devolve a última.
+// O banco falso deste arquivo não guarda o que `atualizaEntrega` grava; aqui ele passa a
+// guardar (como o banco de verdade), para a rodada seguinte ver `partes_enviadas`.
+async function ateOFim(deps: Parameters<typeof aplicaAvisoDeCaso>[0], ev: Parameters<typeof aplicaAvisoDeCaso>[1]) {
+  let entrega: Record<string, unknown> | null = null;
+  const reivindica = deps.db.reivindicaEntrega.bind(deps.db);
+  const atualiza = deps.db.atualizaEntrega.bind(deps.db);
+  deps.db.reivindicaEntrega = async (x) => {
+    const r = await reivindica(x);
+    entrega ??= (r.entrega as unknown as Record<string, unknown>) ?? null;
+    return { ...r, entrega: entrega as never };
+  };
+  deps.db.atualizaEntrega = async (org, id, patch) => {
+    await atualiza(org, id, patch);
+    if (entrega) entrega = { ...entrega, ...(patch as Record<string, unknown>) };
+  };
+  let r = await aplicaAvisoDeCaso(deps, ev);
+  for (let i = 0; r.status === "retry" && i < 12; i++) r = await aplicaAvisoDeCaso(deps, ev);
+  return r;
+}
+
 describe("aviso ao suporte — nenhum desfecho é `error`", () => {
   it("evento de outro tipo sai `skipped`", async () => {
     const { deps } = monta();
@@ -737,16 +759,16 @@ describe("aviso ao suporte — RESPONDER/PERGUNTAR só para o número da empresa
         contato: null,
         whatsapps: new Map(),
       });
-      expect((await aplicaAvisoDeCaso(deps, retorno())).status).toBe("ok");
+      expect((await ateOFim(deps, retorno())).status).toBe("ok");
       expect(estado.enviados[0]?.to).toBe("5531998966398@c.us");
-      expect(estado.enviados[0]?.body).toContain(`RESPONDER ${CASO} ATUALIZACAO ${RESPOSTA}`);
+      expect(estado.enviados.map((e) => e.body).join("\n")).toContain(`RESPONDER ${CASO} ATUALIZACAO ${RESPOSTA}`);
     });
 
     it("no modo fixo vai ao número da empresa com o comando preso à resposta", async () => {
       const { deps, estado } = comRetorno("fixo");
-      expect((await aplicaAvisoDeCaso(deps, retorno())).status).toBe("ok");
+      expect((await ateOFim(deps, retorno())).status).toBe("ok");
       expect(estado.enviados[0]?.to).toBe("5531998966398@c.us");
-      expect(estado.enviados[0]?.body).toContain(`PERGUNTAR ${CASO} ATUALIZACAO ${RESPOSTA}`);
+      expect(estado.enviados.map((e) => e.body).join("\n")).toContain(`PERGUNTAR ${CASO} ATUALIZACAO ${RESPOSTA}`);
     });
 
     it("destino trocado durante o preparo cancela a entrega antes da rede", async () => {
