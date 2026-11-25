@@ -33,6 +33,7 @@ import {
   aplicaAvisoDeCaso,
   createSupabaseAvisoDb,
 } from "@/lib/escalacao/aviso-ao-suporte";
+import { orgsDoAvisoNatural } from "@/lib/escalacao/texto-do-aviso";
 
 export const AVISO_DE_CASO_HANDLER_KEY = "escalacao-aviso-ao-suporte.v1";
 
@@ -54,6 +55,7 @@ export const avisoDeCasoAoSuporteHandler: EventHandler = {
           clock: () => new Date(),
           urlPublica: env.NEXT_PUBLIC_APP_URL,
           origemDoDreno,
+          avisoNatural: (orgId) => orgsDoAvisoNatural(env.AVISO_DE_CASO_NATURAL_ORGS).has(orgId),
           audita: (entrada) => {
             // Fire-and-forget, como todo audit do produto: a trilha nunca pode
             // segurar o efeito que ela registra.

@@ -81,6 +81,13 @@ export const openHumanCaseInputSchema = z.strictObject({
    * de triagem — nunca pode ser motivo para o pedido do cliente não chegar.
    */
   kind: z.enum(TIPOS_DE_CASO_KEYS).optional(),
+  /**
+   * Fork elllo: o AVISO ao dono (`lib/escalacao/aviso-ao-dono.ts`). `unknown` DE PROPÓSITO: a
+   * forma é conferida por `camposDoAvisoAoDono`, que descarta a parte inválida em vez de recusar
+   * o caso — um compromisso sem fuso nunca pode impedir o pedido de chegar ao dono. Vai LIMPO
+   * para o `context_snapshot` (aviso_ao_dono, aviso_acao, aviso_compromisso); nunca vai ao cliente.
+   */
+  aviso_ao_dono: z.unknown().optional(),
 });
 export type OpenHumanCaseInput = z.infer<typeof openHumanCaseInputSchema>;
 

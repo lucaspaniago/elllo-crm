@@ -715,6 +715,14 @@ const schema = z.object({
    * fica com teto `agent` e sem pessoa. Instalação fresca não precisa dela. Nunca vai a log.
    */
   MODULE_JWT_PRIVATE_KEY: z.string().optional().default(""),
+
+  /**
+   * Fork elllo: as organizações (uuids separados por vírgula) que recebem o aviso de caso em
+   * LINGUAGEM NATURAL — um balão escrito para o dono e um com o link, sem as linhas
+   * RESPONDER/PERGUNTAR (o comando digitado continua aceito). Vazio = o aviso de sempre.
+   * Lido por `lib/escalacao/aviso-ao-suporte.handler.ts`; a volta é tirar a org daqui.
+   */
+  AVISO_DE_CASO_NATURAL_ORGS: z.string().optional().default(""),
 });
 
 let parsed = schema.safeParse(process.env);

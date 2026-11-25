@@ -316,6 +316,7 @@ import { montarContextoDaRevisao } from '../guardrails/promise/contexto-da-revis
 import { deveAbrirCasoDoFailsafe } from '../guardrails/failsafe-do-caso';
 import { expectativaDeAtendimento } from '@/lib/escalacao/disponibilidade';
 import { montarResumoDoCaso } from '@/lib/escalacao/resumo-do-caso';
+import { ACOES_DO_AVISO_AO_DONO, camposDoAvisoAoDono } from '@/lib/escalacao/aviso-ao-dono';
 import {
   montarBriefingDaPassagem,
   type BriefingDaPassagem,
@@ -731,6 +732,31 @@ export const AGENT_TOOL_DEFS = {
                 .join('; ') +
               '. Na dúvida entre dois, escolha o que descreve o PEDIDO, não o obstáculo.',
           ),
+        aviso_ao_dono: z
+          .object({
+            texto: z
+              .string()
+              .describe(
+                '1 a 2 frases ao responsável, começando com 1 emoji (📅 horário, ❓ dúvida, ⚠️ problema, 💰 pagamento, ' +
+                  '🔑 acesso, 📌 outro): quem pediu o quê, o que você JÁ disse ao cliente, e a pergunta de decisão no fim ' +
+                  '(ex.: "Ponho na sua agenda?", "O que eu respondo?"). Sem link, telefone nem CPF.',
+              ),
+            acao_proposta: z
+              .enum(ACOES_DO_AVISO_AO_DONO)
+              .optional()
+              .describe('o que o "pode" do responsável faria'),
+            compromisso: z
+              .object({
+                inicio: z.string().describe('ISO 8601 com fuso, ex.: 2026-12-04T09:40:00-04:00'),
+                duracao_min: z.number().optional(),
+                titulo: z.string(),
+              })
+              .nullable()
+              .optional()
+              .describe('só quando há data E hora certas; senão omita'),
+          })
+          .optional()
+          .describe('o aviso que o responsável lê no WhatsApp. Nunca vai ao cliente.'),
       })
       .passthrough(),
   },
@@ -6403,10 +6429,17 @@ async function executarTurnoDoAgente(
           };
         }
         try {
+          // Fork elllo: o aviso ao dono mora no snapshot (jsonb), já LIMPO — o banco guarda o que
+          // vai ao dono (aviso_ao_dono, aviso_acao, aviso_compromisso; ver `aviso-ao-dono.ts`).
+          const { aviso_ao_dono: avisoAoDonoBruto, ...dadosDoCaso } = parsed.data;
+          const camposDoAviso = camposDoAvisoAoDono(avisoAoDonoBruto);
           const res = await openCase(
             pool,
             { tenantId, conversationId: input.conversationId, agentId: agentConfig.agentId },
-            { ...parsed.data, contextSnapshot: buildCaseContextSnapshot() },
+            {
+              ...dadosDoCaso,
+              contextSnapshot: { ...buildCaseContextSnapshot(), ...(camposDoAviso ?? {}) },
+            },
           );
           if (!res.ok) return res;
           openedCaseThisTurn = true;

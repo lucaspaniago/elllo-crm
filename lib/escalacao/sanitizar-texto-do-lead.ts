@@ -51,6 +51,8 @@ export const TETOS_DO_TEXTO_DO_LEAD = {
   title: 90,
   summary: 160,
   blocker: 160,
+  /** Fork elllo: a frase que o modelo escreve ao dono no aviso natural (1 a 2 frases). */
+  aviso_ao_dono: 300,
 } as const;
 
 /** `http(s)://…` até o primeiro espaço. */

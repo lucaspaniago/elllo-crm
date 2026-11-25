@@ -177,7 +177,7 @@ const TETO: Readonly<Record<string, { tokens: number; motivo: string }>> = {
   "ler_documento": { tokens: 142, motivo: "ferramenta nova do modo leitura_direta (#4133), medida na criação (2026-11-06)" },
   "request_human_handoff": { tokens: 510, motivo: BASE },
   "read_skill_reference": { tokens: 154, motivo: BASE },
-  "open_human_case": { tokens: 384, motivo: BASE },
+  "open_human_case": { tokens: 664, motivo: "+280 do aviso natural ao dono (fork elllo): o campo opcional aviso_ao_dono (texto com o emoji por tipo e a pergunta de decisão, a ação proposta e o compromisso que a Helô do Hermes põe na agenda)" },
   "provide_case_update": { tokens: 102, motivo: BASE },
   "send_template": { tokens: 227, motivo: BASE },
   "schedule_followup (com negócio)": { tokens: 314, motivo: BASE },
@@ -242,7 +242,7 @@ const TETO: Readonly<Record<string, { tokens: number; motivo: string }>> = {
 // 45880 = 43286 + 2594 (2026-11-20), não somado à mão.
 // +39 de `crm_send_whatsapp_message` com media_storage_path e media_filename (#5034).
 // MEDIDO no merge com a main de 20/11: 45919 = 45880 + 39 (2026-11-20), não somado à mão.
-const TETO_TOTAL = 46117;
+const TETO_TOTAL = 46397;
 
 const VARIANTE = "schedule_followup (com negócio)";
 

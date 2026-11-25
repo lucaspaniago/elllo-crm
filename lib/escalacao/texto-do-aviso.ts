@@ -86,6 +86,28 @@ export interface AvisoDeCaso {
   /** Só ensina comandos quando a organização habilitou o opt-in. */
   respostaWhatsappHabilitada?: boolean;
   atualizacao?: { eventId: string; info: string; ask: string };
+  /**
+   * Fork elllo: o aviso em LINGUAGEM NATURAL (opção da organização, `AVISO_DE_CASO_NATURAL_ORGS`).
+   * Ligado, as partes viram duas: a frase ao dono e o link. Ver `textoNaturalDoAviso`.
+   */
+  natural?: boolean;
+  /** Fork elllo: `context_snapshot.aviso_ao_dono`, a frase que o modelo escreveu ao abrir o caso. */
+  avisoAoDono?: string | null;
+}
+
+/**
+ * Fork elllo: a lista de organizações do aviso natural, lida de uma variável
+ * (`AVISO_DE_CASO_NATURAL_ORGS`, uuids separados por vírgula ou espaço). Pura: quem lê o
+ * `env` é o handler. Caixa baixa nos dois lados, para um uuid colado em maiúsculas valer.
+ */
+export function orgsDoAvisoNatural(lista: string | null | undefined): Set<string> {
+  if (typeof lista !== "string") return new Set();
+  return new Set(
+    lista
+      .split(/[\s,;]+/)
+      .map((x) => x.trim().toLowerCase())
+      .filter((x) => x !== ""),
+  );
 }
 
 /**
@@ -194,6 +216,10 @@ export function montarAvisoDeCaso(aviso: AvisoDeCaso): string {
  * do número, é `./envio-em-partes.ts` + `aplicaAvisoDeCaso`.
  */
 export function montarPartesDoAvisoDeCaso(aviso: AvisoDeCaso): string[] {
+  if (aviso.natural) {
+    const tn = (texto: string): string => traduzir(texto, aviso.idioma);
+    return [textoNaturalDoAviso(aviso), `${tn("Abrir")}: ${aviso.link}`];
+  }
   if (!aviso.respostaWhatsappHabilitada) return [montarAvisoDeCaso(aviso)];
   const t = (texto: string): string => traduzir(texto, aviso.idioma);
   // O mesmo ciclo do autor (`ATUALIZACAO <evento>`) que `montarAvisoDeCaso` põe no comando.
@@ -207,6 +233,68 @@ export function montarPartesDoAvisoDeCaso(aviso: AvisoDeCaso): string[] {
     `PERGUNTAR ${aviso.caseId} ${ciclo}<pergunta ao cliente>`,
     t("A IA usa sua orientação e o histórico para continuar o atendimento."),
   ];
+}
+
+/**
+ * O molde do aviso natural quando o modelo não escreveu a frase (`aviso_ao_dono` ausente,
+ * fail-safe do guardrail, modelo antigo): o emoji de destaque e a pergunta de decisão por tipo.
+ * As perguntas são chaves do dicionário (o texto em português É a chave).
+ */
+const MOLDE_OUTRO = { emoji: "📌", pergunta: "Como eu sigo?" };
+const MOLDE_DO_AVISO_NATURAL: Record<string, { emoji: string; pergunta: string }> = {
+  agendamento: { emoji: "📅", pergunta: "Ponho na sua agenda?" },
+  duvida: { emoji: "❓", pergunta: "O que eu respondo?" },
+  problema: { emoji: "⚠️", pergunta: "Como eu sigo?" },
+  financeiro: { emoji: "💰", pergunta: "O que eu passo?" },
+  acesso: { emoji: "🔑", pergunta: "Eu libero?" },
+  outro: MOLDE_OUTRO,
+};
+
+/** Fecha a frase com ponto quando ela não termina em pontuação — o molde junta duas. */
+function comPonto(frase: string): string {
+  return /[.!?…:]$/.test(frase) ? frase : `${frase}.`;
+}
+
+/**
+ * O AVISO NATURAL (fork elllo) — UM balão, escrito para o dono ler e responder com
+ * "pode", "ok" ou um 👍. Sem uuid nem linhas de comando: quem liga a resposta ao caso é a
+ * Helô do Hermes (que lê o caso no banco); o `RESPONDER <id> …` digitado continua aceito
+ * por `resposta-whatsapp-ao-caso.ts`, que não muda.
+ *
+ * 1. **Atualização** (`ATUALIZACAO`): "🔁 Maria respondeu sobre «Assunto»: <info>".
+ * 2. **A frase do modelo** (`aviso_ao_dono`), limpa como os outros campos. No fail-safe
+ *    ela não existe (o motor abre o caso sem o modelo).
+ * 3. **O molde por tipo**: "📅 Maria: <o que precisa>. Ponho na sua agenda?". No fail-safe
+ *    leva a etiqueta "(montado automaticamente; confira na conversa)", como o aviso de sempre.
+ *
+ * Função total: nunca lança, nunca devolve vazio.
+ */
+export function textoNaturalDoAviso(aviso: AvisoDeCaso): string {
+  const t = (texto: string): string => traduzir(texto, aviso.idioma);
+  const cliente = primeiroNome(aviso.nomeDoCliente);
+  const failSafe = aviso.source === "guardrail_autofallback";
+  const assunto = failSafe ? null : sanitizarTextoDoLead(aviso.title, TETOS_DO_TEXTO_DO_LEAD.title);
+
+  if (aviso.atualizacao) {
+    const quem = cliente ?? t("O cliente");
+    const info = sanitizarTextoDoLead(aviso.atualizacao.info, TETOS_DO_TEXTO_DO_LEAD.summary);
+    const pergunta = sanitizarTextoDoLead(aviso.atualizacao.ask, TETOS_DO_TEXTO_DO_LEAD.blocker);
+    const cabeca = assunto ? `🔁 ${quem} ${t("respondeu sobre")} «${assunto}»` : `🔁 ${quem} ${t("respondeu")}`;
+    const linhas = [info ? `${cabeca}: ${info}` : comPonto(cabeca)];
+    if (pergunta) linhas.push(`(${t("Você tinha perguntado")}: ${pergunta})`);
+    return linhas.join("\n");
+  }
+
+  const frase = failSafe ? null : sanitizarTextoDoLead(aviso.avisoAoDono, TETOS_DO_TEXTO_DO_LEAD.aviso_ao_dono);
+  if (frase) return frase;
+
+  const molde = MOLDE_DO_AVISO_NATURAL[aviso.kind ?? "outro"] ?? MOLDE_OUTRO;
+  const precisa = sanitizarTextoDoLead(aviso.summary, TETOS_DO_TEXTO_DO_LEAD.summary);
+  const oQue = failSafe ? t("A IA prometeu algo e travou") : (precisa ?? assunto ?? t(tipoDeCasoLabel(aviso.kind ?? "outro")));
+  const corpo = cliente ? `${cliente}: ${oQue}` : oQue;
+  const linhas = [`${molde.emoji} ${comPonto(corpo)} ${t(molde.pergunta)}`];
+  if (failSafe && precisa) linhas.push(`${t("(montado automaticamente; confira na conversa)")} ${precisa}`);
+  return linhas.join("\n");
 }
 
 /**

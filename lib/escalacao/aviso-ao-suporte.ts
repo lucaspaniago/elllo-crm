@@ -161,6 +161,8 @@ export interface CasoDoAviso {
   title: string | null;
   summary: string | null;
   blocker: string | null;
+  /** Fork elllo: `context_snapshot->>aviso_ao_dono` (a frase do aviso natural). */
+  aviso_ao_dono?: string | null;
 }
 
 export interface EntregaDoAviso {
@@ -342,6 +344,11 @@ export interface AvisoDeps {
    */
   urlPublica: string;
   origemDoDreno: () => "worker" | "request";
+  /**
+   * Fork elllo: a organização recebe o aviso em linguagem natural? Ausente = não (o aviso de
+   * sempre). O handler lê `AVISO_DE_CASO_NATURAL_ORGS`; este módulo não importa `env`.
+   */
+  avisoNatural?: (orgId: string) => boolean;
   /** Fire-and-forget: auditar nunca pode segurar o aviso. */
   audita: (entrada: {
     action: "ai.case_alert_sent" | "ai.case_alert_failed";
@@ -711,6 +718,9 @@ export async function aplicaAvisoDeCaso(
     // mensagem comum. Para ele, o aviso diz para abrir o link (#3803).
     respostaWhatsappHabilitada: cfg.resposta_whatsapp_habilitada && destino.origem === "numero_da_empresa",
     ...(fato && caseEventId ? { atualizacao: { ...fato, eventId: caseEventId } } : {}),
+    // Fork elllo: o aviso natural (2 balões). Pelo modelo aprovado continua o texto inteiro.
+    natural: !modelo && (deps.avisoNatural?.(orgId) ?? false),
+    avisoAoDono: caso.aviso_ao_dono ?? null,
   };
   // Fork elllo: pelo modelo aprovado (conexão que só manda modelo, 9094) o
   // aviso sai inteiro numa mensagem, como no upstream — sete modelos pagos e
@@ -1103,7 +1113,9 @@ export function createSupabaseAvisoDb(admin: SupabaseClient): AvisoDb {
     async carregaCaso(orgId, caseId) {
       const { data, error } = await admin
         .from("agent_cases")
-        .select("id, organization_id, conversation_id, kind, source, status, title, summary, blocker")
+        .select(
+          "id, organization_id, conversation_id, kind, source, status, title, summary, blocker, aviso_ao_dono:context_snapshot->>aviso_ao_dono",
+        )
         .eq("organization_id", orgId)
         .eq("id", caseId)
         .maybeSingle();
