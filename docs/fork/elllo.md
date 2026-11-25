@@ -303,6 +303,24 @@ Hermes (D0–D3); aqui a ficha é `lead_notes`.
 - Testes: `tests/unit/dossie-do-contato.test.ts` (vocabulário contra a 9005, fonte do
   código, isolamento entre contatos, a cerca, a tela).
 
+### H — o aviso de caso em linguagem natural ao dono (25/11/2026)
+
+- **Opção por org:** `AVISO_DE_CASO_NATURAL_ORGS` (uuids). Ligada, o aviso de caso sai em 2 balões (a frase ao dono + o
+  link), sem uuid nem RESPONDER/PERGUNTAR; o comando digitado continua aceito. Desligada (o padrão), o aviso é o de
+  sempre, byte a byte (`tests/unit/aviso-de-caso-natural.test.ts`). Pelo modelo aprovado (9094), nada muda.
+- **`open_human_case.aviso_ao_dono`** `{texto, acao_proposta, compromisso}` → `lib/escalacao/aviso-ao-dono.ts` grava
+  LIMPO no `context_snapshot`: `aviso_ao_dono` (≤300), `aviso_acao`, `aviso_compromisso {inicio com fuso, duracao_min,
+  titulo}`. Tolerante: parte inválida cai, o caso abre igual. **Contrato com a Helô do Hermes** (sessão 2): ela lê as três
+  chaves, põe o compromisso na agenda no "pode" do Lucas e responde pelo RPC do RESPONDER. Mudar nome ou forma quebra o
+  lado dela.
+- Sem a frase: molde por tipo (`MOLDE_DO_AVISO_NATURAL`); atualização em "🔁 Fulano respondeu sobre «assunto»: …".
+- **No rebase:** `texto-do-aviso.ts` (o `natural` antes do `respostaWhatsappHabilitada`), `aviso-ao-suporte.ts` (o
+  `select` com `aviso_ao_dono:context_snapshot->>aviso_ao_dono` e o `natural: !modelo && …`), o executor do
+  `open_human_case` em `inbound-turn.ts` (o snapshot recebe `camposDoAvisoAoDono`) e o teto do `open_human_case` em
+  `peso-das-ferramentas.test.ts` (+280).
+- Prompt da Helô do CRM v23 (`f01da4ba`): a missão do recado (indicação vira nota `pendente` "Indicação para o recado:",
+  sem caso), o `aviso_ao_dono` e "nunca diga que não tem acesso à agenda". Fica no banco, não no código.
+
 ## Migrations do fork (faixa 9xxx)
 
 | Arquivo | O quê |
