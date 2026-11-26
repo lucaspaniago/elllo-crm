@@ -27,6 +27,7 @@ import { z } from "zod";
 
 import { resolveAuthDual, tetoDeEscritaDoToken } from "@/lib/api/auth-dual";
 import { audit } from "@/lib/audit";
+import { requireSupportWrite } from "@/lib/impersonate/support";
 import { requestTurnDeps } from "@/lib/agent-engine/agent/request-deps";
 import { getRequestPool } from "@/lib/agent-engine/db/request-pool";
 import { logger } from "@/lib/logger";
@@ -51,13 +52,14 @@ const corpoSchema = z.discriminatedUnion("acao", [
 ]);
 
 function responder(corpo: Record<string, unknown>, status: number, requestId: string) {
-  const res = NextResponse.json(corpo, { status });
-  res.headers.set("X-Request-Id", requestId);
-  return res;
+  return NextResponse.json(corpo, { status, headers: { "X-Request-Id": requestId } });
 }
 const erro = (codigo: string, status: number, requestId: string) => responder({ ok: false, erro: codigo }, status, requestId);
 
 export async function POST(req: NextRequest) {
+  // Mesma guarda de toda escrita do app: acompanhamento administrativo restrito só lê.
+  const supportDenied = await requireSupportWrite();
+  if (supportDenied) return supportDenied;
   const requestId = randomUUID();
   const authz = await resolveAuthDual(req, {
     requestId,
