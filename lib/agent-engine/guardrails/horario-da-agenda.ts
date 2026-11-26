@@ -33,6 +33,8 @@ export interface HorariosDaAgenda {
   marcouNesteTurno: boolean;
   /** Quantas vezes este gate já vetou neste turno — escala o ensino. */
   vetosAnteriores: number;
+  /** Fork elllo (voz2): a saída do 3º veto na voz da Helô (sem "a equipe … por aqui"). */
+  saidaNaVozDaHelo?: boolean;
 }
 
 export interface HorarioCitado {
@@ -150,6 +152,8 @@ export type VereditoDoHorario =
   | { pass: true }
   | { pass: false; code: 'agenda_confirmou_sem_marcar' | 'horario_sem_fonte'; reason: string };
 
+import { SAIDA_DE_HORARIO_NA_VOZ_DA_HELO } from './voz-da-helo';
+
 const SAIDA_PELA_EQUIPE =
   'Não escreva nenhum dia nem horário nesta mensagem e não diga que está agendado. ' +
   'Diga "Vou pedir para a equipe finalizar e já te retornam por aqui." e chame a ferramenta de passar para um humano.';
@@ -160,6 +164,7 @@ export function avaliarHorarios(corpo: string, agora: Date, h: HorariosDaAgenda 
   const doContato = new Set(h.doContato.map(minuto).filter((m): m is number => m !== null));
   const livres = new Set(h.livres.map(minuto).filter((m): m is number => m !== null));
   const escalar = h.vetosAnteriores >= 2;
+  const saida = h.saidaNaVozDaHelo === true ? SAIDA_DE_HORARIO_NA_VOZ_DA_HELO : SAIDA_PELA_EQUIPE;
 
   if (afirmaQueMarcou(corpo) && !h.marcouNesteTurno) {
     // Falar da consulta que o cliente JÁ tem é legítimo: a data citada precisa ser dela.
@@ -172,7 +177,7 @@ export function avaliarHorarios(corpo: string, agora: Date, h: HorariosDaAgenda 
         pass: false,
         code: 'agenda_confirmou_sem_marcar',
         reason: escalar
-          ? SAIDA_PELA_EQUIPE
+          ? saida
           : 'Você escreveu que a consulta está agendada/confirmada, mas crm_book_appointment NÃO ' +
             'gravou nada neste turno. Nada foi marcado. Se já tem os dados do paciente, chame ' +
             'crm_find_free_slots do dia escolhido e depois crm_book_appointment, e só então ' +
@@ -191,7 +196,7 @@ export function avaliarHorarios(corpo: string, agora: Date, h: HorariosDaAgenda 
     pass: false,
     code: 'horario_sem_fonte',
     reason: escalar
-      ? SAIDA_PELA_EQUIPE
+      ? saida
       : `Estes horários NÃO vieram da agenda neste turno (crm_find_free_slots ou a lista ` +
         `\`horarios\` da tentativa de marcação): ${lista}. Eles podem estar ` +
         'ocupados. Para cada dia que vai citar, chame crm_find_free_slots com `dia` (AAAA-MM-DD) e ' +

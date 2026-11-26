@@ -63,6 +63,7 @@ import { decidePromise } from './promise/engine';
 import { loadPromiseTable } from './promise/table';
 import type { PromiseTable } from './promise/table';
 import { renderSemanticPromiseVeto } from './promise/semantic';
+import { decisaoAutoriza, ensinoDePromessaSemCaso } from './voz-da-helo';
 import type { PromiseClassification } from './promise/semantic';
 import {
   bodyContainsDisclosure,
@@ -285,6 +286,17 @@ export interface GateContext {
    * no-op: o caminho determinístico (follow-up, template) não tem texto do modelo.
    */
   trechosDoLucas?: ReadonlySet<string>;
+  /**
+   * Fork elllo (voz2): a org está em SONDAR_E_MISSAO_ORGS. Muda só a FORMA do ensino de
+   * algumas travas (`./voz-da-helo.ts`), nunca a garantia. Ausente = o de sempre.
+   */
+  vozDaHelo?: boolean;
+  /**
+   * Fork elllo (voz2): na volta de um caso que o dono CONCLUIU, a nota dele. A promessa
+   * que só repete o que ele decidiu passa no `semanticPromiseGate` (`decisaoAutoriza`);
+   * compra e pagamento, nunca. Ausente = o de sempre.
+   */
+  decisaoDoDono?: string;
   /**
    * Arma o `clinicalClaimGate` (diagnóstico, prescrição, promessa de resultado,
    * afirmação de câncer — `./afirmacao-clinica.ts`). Ausente = DESARMADO, pelas DUAS
@@ -596,6 +608,10 @@ export const semanticPromiseGate: Gate = {
   name: 'semantic_promise',
   evaluate: (ctx) => {
     if (ctx.semanticPromise === null || !ctx.semanticPromise.isPromise) return { pass: true };
+    // Fork elllo (voz2): na volta do caso, repetir a decisão do dono não é promessa nova.
+    if (ctx.decisaoDoDono !== undefined && decisaoAutoriza(ctx.semanticPromise.suspectPhrase, ctx.decisaoDoDono)) {
+      return { pass: true };
+    }
     return {
       pass: false,
       code: 'promise_semantic',
@@ -727,8 +743,9 @@ export const casePromiseGate: Gate = {
     return {
       pass: false,
       code: 'case_promise_without_case',
-      reason:
-        (promessaDoAssistente || soRetornoDeHumano) && ctx.followup?.disponivel === true
+      reason: ctx.vozDaHelo === true
+        ? ensinoDePromessaSemCaso(ctx.followup?.disponivel === true)
+        : (promessaDoAssistente || soRetornoDeHumano) && ctx.followup?.disponivel === true
           ? 'Você prometeu voltar a falar com o cliente, mas não deixou o retorno marcado. ' +
             'Chame a tool schedule_followup (agendando o retorno) OU open_human_case ' +
             '(descrevendo o que precisa) OU reformule a mensagem sem prometer retorno.'
@@ -1594,6 +1611,9 @@ export interface RunBeforeSendArgs {
   enforceInternalVocabulary?: boolean;
   /** Fork elllo (9005): ver `GateContext.trechosDoLucas`. Ausente = no-op. */
   trechosDoLucas?: ReadonlySet<string>;
+  /** Fork elllo (voz2): ver `GateContext.vozDaHelo` e `GateContext.decisaoDoDono`. */
+  vozDaHelo?: boolean;
+  decisaoDoDono?: string;
   /**
    * Arma o `clinicalClaimGate` — ver `GateContext.clinicalClaimEnforced`. Ausente
    * (default) = no-op. O turno do agente passa a escolha da organização
@@ -1981,6 +2001,8 @@ export async function runBeforeSend(args: RunBeforeSendArgs): Promise<BeforeSend
         : {}),
       internalVocabularyEnforced: args.enforceInternalVocabulary ?? false,
       ...(args.trechosDoLucas !== undefined ? { trechosDoLucas: args.trechosDoLucas } : {}),
+      ...(args.vozDaHelo === true ? { vozDaHelo: true } : {}),
+      ...(args.decisaoDoDono !== undefined && args.decisaoDoDono !== '' ? { decisaoDoDono: args.decisaoDoDono } : {}),
       clinicalClaimEnforced: args.enforceClinicalClaim ?? false,
       commercialRestrictionEnforced: restricaoComercial,
       ...(args.agenda !== undefined ? { agenda: args.agenda } : {}),

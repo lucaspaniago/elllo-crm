@@ -187,11 +187,14 @@ export function createCaseReplyTurnHandler(deps: InboundTurnDeps) {
       return;
     }
 
+    const naVozDaHelo = sondarEMissaoLigado(tenantId);
     await runAgentTurn(deps, job, pool, ctx, {
       channelSessionId: caseConversation.channelSessionId,
       conversationId: caseConversation.conversationId,
+      // Fork elllo (voz2): a nota do dono no caso concluído vira autorização do que ela repete.
+      ...(naVozDaHelo && action === 'resolved' && payload.body ? { decisaoDoDono: payload.body } : {}),
       buildOpening: ({ previous, leadState, context, notesIndexBlock, projeta }) =>
-        buildCaseReplyOpeningMessage(action, payload.case_id, payload.body, previous, leadState, context, notesIndexBlock, projeta, sondarEMissaoLigado(tenantId)),
+        buildCaseReplyOpeningMessage(action, payload.case_id, payload.body, previous, leadState, context, notesIndexBlock, projeta, naVozDaHelo),
     });
   };
 }

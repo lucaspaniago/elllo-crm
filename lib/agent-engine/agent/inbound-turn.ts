@@ -175,7 +175,7 @@ import {
   planejarConhecimentoDoTurno,
 } from './modo-de-conhecimento';
 import { buildOrigemBlock } from './abertura/origem-do-contato';
-import { buildRecadosAbertosBlock } from './abertura/recados-abertos';
+import { buildRecadosAbertosBlock, sondarEMissaoLigado } from './abertura/recados-abertos';
 import { agendaNoFechamento } from './abertura/agenda-no-fechamento';
 import { applyScheduleFollowup, type FollowupWindowKnobs } from './schedule-followup';
 import { podeExporScheduleFollowup } from '@/lib/followup/callback-policy';
@@ -297,7 +297,7 @@ import {
 import { criarEfeitoDasEscrituras } from '@/lib/ai/runtime/efeito-das-escritas';
 import { lerAgendaDaRevisao, type EvidenciaDeAgendamento } from '@/lib/ai/runtime/recibos-de-agendamento';
 import { ferramentasDeRegistroDoAgente } from '../guardrails/registro-sem-efeito';
-import { colherDaFerramenta } from '../guardrails/horario-da-agenda';
+import { colherDaFerramenta, horariosCitados } from '../guardrails/horario-da-agenda';
 import { isStatusSendable } from '../../channels/meta/template-binding';
 import { capabilitiesOf } from '@/lib/channels/capabilities';
 import { renderTemplateBody } from '@/lib/channels/meta/render-template';
@@ -2194,6 +2194,12 @@ export interface AgentTurnInput {
   conversationId: string;
   /** Id da mensagem que criou o job inbound; não é usado por follow-ups. */
   inboundMessageId?: string;
+  /**
+   * Fork elllo (voz2): a nota do dono no caso CONCLUÍDO, na volta do caso (só com a org em
+   * SONDAR_E_MISSAO_ORGS). Os dias e horários dela contam como do contato no gate de horário,
+   * e a promessa que só a repete passa no semântico — ver `guardrails/voz-da-helo.ts`.
+   */
+  decisaoDoDono?: string;
   /**
    * A apresentação do catálogo retomada no início do job foi vetada por um gate
    * de envio: o turno segue pelo modelo, sem a ferramenta, e as mensagens dela
@@ -4577,13 +4583,25 @@ async function executarTurnoDoAgente(
           });
         })
     : Promise.resolve();
+  // Fork elllo (voz2): a voz da Helô (forma das travas) e a decisão do dono na volta do caso.
+  const vozDaHelo = sondarEMissaoLigado(tenantId);
+  const decisaoDoDono = vozDaHelo && input.decisaoDoDono ? input.decisaoDoDono : undefined;
   const horariosDaAgenda = (): NonNullable<GateContext['horariosDaAgenda']> => ({
     ativo: agentConfig !== null && temFerramentaDeAgenda(agentConfig.toolIds),
     fuso: fusoDaAgenda ?? 'America/Sao_Paulo',
     livres: [...horariosLivresDoTurno],
-    doContato: [...compromissosDoContato, ...marcadosNesteTurno],
+    doContato: [
+      ...compromissosDoContato,
+      ...marcadosNesteTurno,
+      ...(decisaoDoDono === undefined
+        ? []
+        : horariosCitados(decisaoDoDono, new Date(), fusoDaAgenda ?? 'America/Sao_Paulo').map((c) =>
+            new Date(c.instante).toISOString(),
+          )),
+    ],
     marcouNesteTurno,
     vetosAnteriores: horarioVetoCount,
+    ...(vozDaHelo ? { saidaNaVozDaHelo: true } : {}),
   });
   // Lido pelo `casePromiseGate` (#1873): true só depois de `schedule_followup` AGENDAR com
   // sucesso neste turno. Libera apenas a promessa de retorno do próprio assistente.
@@ -5557,6 +5575,8 @@ async function executarTurnoDoAgente(
             // Fork elllo (9005): fica armada também no re-run do fail-safe (que só desarma o
             // vocabulário interno) — ver `notaDoLucasGate`.
             ...(trechosDoLucas !== undefined ? { trechosDoLucas } : {}),
+            ...(vozDaHelo ? { vozDaHelo: true } : {}),
+            ...(decisaoDoDono !== undefined ? { decisaoDoDono } : {}),
             // Afirmação clínica: mesma razão do vocabulário (só o corpo do MODELO), e
             // só para a organização que ligou a camada — ver
             // `GateContext.clinicalClaimEnforced`. Sem linha, desligada: não há padrão de
@@ -6932,6 +6952,8 @@ async function executarTurnoDoAgente(
                 toolCalledThisTurn: agendaToolCalledThisTurn,
               },
               horariosDaAgenda: horariosDaAgenda(),
+              ...(vozDaHelo ? { vozDaHelo: true } : {}),
+              ...(decisaoDoDono !== undefined ? { decisaoDoDono } : {}),
               // Síncrono: sem a leitura das enviadas fora da janela — o Testar pode mostrar
               // um veto que a produção resolveria com elas.
               lastroComercial: lastroDoTurno(),
@@ -8405,6 +8427,7 @@ export async function runAgentPreview(
         tracoDoTurno: { coletor, desfecho },
         channelSessionId: preview.channelId ?? '',
         conversationId: preview.context.context.conversation_id ?? '',
+        ...(preview.decisaoDoDono !== undefined ? { decisaoDoDono: preview.decisaoDoDono } : {}),
         buildOpening: ({
           previous,
           leadState,

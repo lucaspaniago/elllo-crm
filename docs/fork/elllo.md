@@ -365,6 +365,23 @@ Hermes (D0–D3); aqui a ficha é `lead_notes`.
   ao conteúdo, cumprimento dosado, sem eco, ritmo, palavras de gente, um passo à frente), a apresentação quando o
   assunto tem a ver com o Lucas, e o repasse da resposta dele cobrindo a mesa inteira.
 
+### K — a forma de três travas na voz da Helô, sem mexer na garantia (26/11/2026)
+
+- **Opção:** a mesma `SONDAR_E_MISSAO_ORGS` (`GateContext.vozDaHelo`). Desligada, as travas e os ensinos de sempre.
+- **`case_promise`** (`guardrails/voz-da-helo.ts`, `ensinoDePromessaSemCaso`): o veto e o destino obrigatório (caso ou
+  retorno) ficam; o ensino manda agendar o retorno quando quem volta é ela, ou abrir o caso, e responder ao assunto sem
+  contar que anotou nem que passou.
+- **Volta do caso concluído** (`AgentTurnInput.decisaoDoDono`, posto pelo `case-reply-turn`): a nota do dono vira
+  autorização do que a mensagem só repete — `semantic_promise` passa com `decisaoAutoriza` (os números iguais e metade
+  das palavras de conteúdo; compra, pagamento, Pix e valor NUNCA); `horario_da_agenda` conta os dias e horários da nota
+  como do contato (outro horário segue vetado). A saída do 3º veto de horário sai na voz da Helô.
+- **Prévia:** `TurnPreview.decisaoDoDono` simula a volta de um caso.
+- **No rebase:** os dois campos de `GateContext` e dos args da cadeia, o desvio no `semanticPromiseGate` e o `reason` da
+  `casePromiseGate` em `before-send.ts`; `saidaNaVozDaHelo` em `horario-da-agenda.ts`; `decisaoDoDono` e `vozDaHelo` em
+  `inbound-turn.ts` (entrada, `horariosDaAgenda()` e os dois contextos de envio); a entrada no `case-reply-turn`.
+- **Nunca afrouxa:** nota "só para você", Pix fora do caso, família, agenda do dono, nome da agenda do celular, compra e
+  pagamento, vocabulário interno.
+
 ## Migrations do fork (faixa 9xxx)
 
 | Arquivo | O quê |

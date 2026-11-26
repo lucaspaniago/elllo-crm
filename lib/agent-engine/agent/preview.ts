@@ -56,6 +56,8 @@ export interface TurnPreview {
     liberada?: boolean;
   }>;
   feedback?: string;
+  /** Fork elllo (voz2): simula a volta de um caso concluído com esta nota do dono. */
+  decisaoDoDono?: string;
   /** Null means a scenario, never a synthetic identifier passed to SQL. */
   contactId: string | null;
   channelId: string | null;
