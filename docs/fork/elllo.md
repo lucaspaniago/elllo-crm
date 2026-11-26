@@ -321,6 +321,27 @@ Hermes (D0–D3); aqui a ficha é `lead_notes`.
 - Prompt da Helô do CRM v23 (`f01da4ba`): a missão do recado (indicação vira nota `pendente` "Indicação para o recado:",
   sem caso), o `aviso_ao_dono` e "nunca diga que não tem acesso à agenda". Fica no banco, não no código.
 
+### I — sondar e missão: o recado que volta por outro número, sem cerca falada (26/11/2026)
+
+- **Opção por org:** `SONDAR_E_MISSAO_ORGS` (uuids). Desligada (o padrão), o turno e a recusa de caso aberto são os de
+  sempre, byte a byte (`tests/unit/recados-abertos.test.ts`, `tests/unit/caso-aberto-na-voz-da-helo.test.ts`).
+- **Recados abertos no contato novo** (`lib/agent-engine/agent/abertura/recados-abertos.ts`): contato criado há até 14
+  dias e sem nota "Recado do Lucas" recebe, junto do índice de notas, os recados do Lucas e as indicações dos OUTROS
+  contatos dos últimos 14 dias (título da nota, nome, data; telefone mascarado; até 6). A leitura entra na trilha da
+  origem do `Promise.all` do turno (o teto de 4 trilhas fica). Erro de leitura = bloco vazio.
+- **Caso já aberto** (`human-cases.ts`, `recusaDeCasoAbertoNaVozDaHelo`): a mesma guarda (não dizer que alguém foi
+  acionado, não prometer prazo), sem mandar dizer ao cliente "não consigo te dar um prazo".
+- **Aviso natural**: o fail-safe "A IA prometeu algo e travou" vira "Prometi algo e travei" (só no ramo natural).
+- **No rebase:** o terceiro item da trilha da origem em `inbound-turn.ts` e o `notesIndexBlock` com
+  `recadosAbertosBlock`; o parâmetro `naVozDaHelo` de `recusaDeCasoAberto` e a chamada em `openCase`; a variável em
+  `lib/agent-engine/env.ts` e no `.env.example`.
+- **Contrato com a Helô do Hermes (sessão 2):** a nota de continuação no contato novo, título "Recado do Lucas
+  (continuação de <data>): <assunto>", categoria `pendente`, corpo com `Assunto:` / `Mesma pessoa de:` / `Resultado:`.
+- Prompt da Helô do CRM v24: sondar antes de se apresentar ("Oi, tudo bem? Em que posso ajudar?", variando), o recado
+  que volta por outro número, o fecho da missão com UM caso (💰 e a pergunta de decisão), cercas silenciosas e menos
+  balões; `inbound_debounce_ms` 20000 e `reply_min_interval_ms` 30000 na versão. A frase de passagem própria
+  (`ai_agents.config.aviso_de_handoff`) troca "atendente humano", "equipe" e "fila". Tudo no banco, não no código.
+
 ## Migrations do fork (faixa 9xxx)
 
 | Arquivo | O quê |
