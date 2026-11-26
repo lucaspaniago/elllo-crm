@@ -164,7 +164,8 @@ import { buildOpeningMessage, ritualBlocks, type FormatoDoHistorico } from "./ab
 import { snapshotDoCaso } from "./conversa-do-caso/contexto";
 import { lerRemetenteDeGrupo, type RemetenteDeGrupo } from "@/lib/messaging/remetente-de-grupo";
 import { applySaveLeadNote, buildNotesIndexBlock, getLeadNoteBody } from './lead-notes';
-import { CATEGORIAS_DO_DOSSIE, SIGNIFICADO_DA_CATEGORIA, trechosReservados } from './dossie';
+import { CATEGORIAS_DO_DOSSIE, SIGNIFICADO_DA_CATEGORIA, ehReservada, trechosReservados } from './dossie';
+import { jaDitoAoContato } from './ja-dito-ao-contato';
 import { buildCompromissosBlock } from './compromissos-do-contato';
 import { buildKnowledgeIndexBlock, ORCAMENTO_PADRAO_DO_INDICE } from './indice-de-conhecimento';
 import { lerDocumentoDoMaterial } from './ler-documento';
@@ -4277,8 +4278,16 @@ async function executarTurnoDoAgente(
     ]);
   // Fork elllo (9005): o que o Lucas contou deste contato e a conversa ainda não tem —
   // a cerca `nota_do_lucas` do envio. Na prévia, quem monta é `previewGateContext`.
+  // Fork elllo (voz1): "já dito" é tudo o que saiu a este contato (ou ele disse), em
+  // QUALQUER conversa dele ou de um contato juntado, não só a janela do turno — ver
+  // `ja-dito-ao-contato.ts`. A leitura só roda quando há nota reservada.
   const trechosDoLucas =
-    noteIdRows === null ? undefined : trechosReservados(noteIdRows, effectiveContext.messages.map((m) => m.body));
+    noteIdRows === null
+      ? undefined
+      : trechosReservados(noteIdRows, [
+          ...effectiveContext.messages.map((m) => m.body),
+          ...(noteIdRows.some(ehReservada) ? await jaDitoAoContato(pool, tenantId, leadId) : []),
+        ]);
   if (citacao.origens.length > 0) {
     // Só contagem e origem: o texto citado é PII e nunca vai a log.
     runLog.info('mensagem citada pelo cliente entrou no turno', { citacoes: citacao.origens });

@@ -342,6 +342,29 @@ Hermes (D0–D3); aqui a ficha é `lead_notes`.
   balões; `inbound_debounce_ms` 20000 e `reply_min_interval_ms` 30000 na versão. A frase de passagem própria
   (`ai_agents.config.aviso_de_handoff`) troca "atendente humano", "equipe" e "fila". Tudo no banco, não no código.
 
+### J — a voz mais solta: a cerca conta o que já foi dito, e as frases fixas sem cara de central (26/11/2026)
+
+- **A cerca `nota_do_lucas`** (`lib/agent-engine/agent/ja-dito-ao-contato.ts`): "já dito" passa a ser tudo o que saiu a
+  este contato (ou ele disse) em QUALQUER conversa dele ou de um contato juntado a ele (`is_merged_into`), em qualquer
+  data, até 400 mensagens — não só a janela do turno. Só lê quando há nota reservada. Erro de leitura = lista vazia (a
+  cerca fica mais rígida). Caso real: o recado ao Calebe saiu por um número, ele respondeu pelo outro, e a cerca vetava
+  o nome do livro. Vale para todas as orgs (é a regra da própria cerca do fork).
+- **O ensino da cerca** (`ENSINO_DA_NOTA_DO_LUCAS`, `dossie.ts`): reescrever com o mesmo calor e o mesmo assunto, sem a
+  frase genérica de espera.
+- **Caso aberto** (`FRASE_DA_HELO_EM_PEDIDO_SOBRE_CASO_ABERTO`): "Boa! Te conto quando tiver novidade." (sem o nome do
+  Lucas como muleta), e "não repita a frase da pessoa" no ensino.
+- **A resposta do dono a um caso** (`case-reply-turn.ts`, `instrucaoDoCasoConcluido`): atrás de `SONDAR_E_MISSAO_ORGS`,
+  pede a resposta com as palavras da Helô, cobrindo tudo o que estava em aberto, recusa calorosa e com porta aberta (no
+  lugar de "repasse … e encerre o assunto"). Desligada, a instrução de sempre, byte a byte.
+- **Teste que quebra:** `tests/unit/frases-de-central.test.ts` (lista de frases proibidas: "uma posição do Lucas",
+  "anotado", "me retornou", "seguir com a compra", "agradece a sua atenção"…).
+- **No rebase:** o import de `ehReservada` e `jaDitoAoContato` e o `trechosDoLucas` em `inbound-turn.ts`; o parâmetro
+  `naVozDaHelo` de `buildCaseReplyOpeningMessage` e a chamada no handler; as duas constantes em `dossie.ts` e
+  `human-cases.ts`.
+- Prompt da Helô do CRM v26 (no banco): "Como você soa no WhatsApp" (o Lucas só quando muda algo, sem bastidor, reagir
+  ao conteúdo, cumprimento dosado, sem eco, ritmo, palavras de gente, um passo à frente), a apresentação quando o
+  assunto tem a ver com o Lucas, e o repasse da resposta dele cobrindo a mesa inteira.
+
 ## Migrations do fork (faixa 9xxx)
 
 | Arquivo | O quê |

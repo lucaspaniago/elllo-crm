@@ -338,7 +338,7 @@ export async function openCase(
  * dizer que alguém foi acionado, não prometer prazo); o que muda é que ela não é
  * ANUNCIADA ao cliente. Atrás de SONDAR_E_MISSAO_ORGS; fora, a recusa de sempre.
  */
-export const FRASE_DA_HELO_EM_PEDIDO_SOBRE_CASO_ABERTO = 'Show! Te falo assim que o Lucas me responder.';
+export const FRASE_DA_HELO_EM_PEDIDO_SOBRE_CASO_ABERTO = 'Boa! Te conto quando tiver novidade.';
 
 export function recusaDeCasoAbertoNaVozDaHelo(): OpenCaseResult {
   return {
@@ -349,7 +349,7 @@ export function recusaDeCasoAbertoNaVozDaHelo(): OpenCaseResult {
         'já existe um caso humano aberto para esta conversa: este pedido novo NÃO foi avisado a ninguém agora. ' +
         'Se a mensagem nova traz informação para o caso e você tiver a ferramenta crm_add_case_note, registre-a ' +
         'no caso aberto. NÃO diga ao cliente que alguém foi acionado ou avisado de novo, não repita que já passou ' +
-        'ao Lucas e não fale de prazo, de garantia nem do que você não pode fazer. Se a mensagem não pede ' +
+        'ao Lucas e não fale de prazo, de garantia nem do que você não pode fazer. Não repita a frase da pessoa. Se a mensagem não pede ' +
         'resposta, não responda. Se pede, uma frase curta e natural, neste espírito: ' +
         `"${FRASE_DA_HELO_EM_PEDIDO_SOBRE_CASO_ABERTO}" Aguarde a resposta do Lucas antes de abrir outro caso.`,
     },

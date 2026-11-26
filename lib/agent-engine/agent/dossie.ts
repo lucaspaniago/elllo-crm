@@ -161,4 +161,5 @@ export function trechosRepetidos(texto: string, reservados: ReadonlySet<string>)
 export const ENSINO_DA_NOTA_DO_LUCAS =
   'Sua mensagem repete o que o Lucas contou sobre esta pessoa numa nota "só para você". ' +
   'Use a nota para entender e acertar o tom, mas não conte nem cite o que está nela, e não ' +
-  'diga que o Lucas contou. Reescreva sem esse trecho.';
+  'diga que o Lucas contou. Reescreva sem esse trecho, com o mesmo calor e o mesmo assunto; ' +
+  'não troque por uma frase genérica de espera ("assim que eu tiver uma posição", "te falo por aqui").';
