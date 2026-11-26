@@ -300,6 +300,11 @@ export const AUDIT_ACTIONS = [
   "ai_agent.tested",
   "ai_agent.reconciled",
   "ai_reply.generated",
+  // Fork elllo (teste1): o modo teste do Hermes pelo CRM (`app/api/v1/hermes/teste`).
+  "teste_do_hermes.opened",
+  "teste_do_hermes.turn",
+  "teste_do_hermes.closed",
+  "teste_do_hermes.swept",
   "ai_reply.approved",
   "ai_reply.rejected",
   "ai_agent.reverted",

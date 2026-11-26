@@ -127,6 +127,7 @@ const SEM_AREA: readonly EntradaSemArea[] = [
   // --- 5b. Escritas que gastam dinheiro da organização ou não se desfazem: lado seguro (decisão
   //         do engenheiro, 05/11). Afrouxar depois é fácil; apertar depois de um módulo usar, não.
   e("ai/budget", "escrita"), // teto de gasto de IA
+  e("hermes"), // fork elllo: modo teste do Hermes (gasta IA e apaga o contato de teste); nenhum módulo
   e("ai/voz", "escrita"), // custo de voz
   e("ai/knowledge/reindex-all", "escrita"), // reindexação inteira gasta IA
   e("contacts/merge", "escrita"), // fusão de contatos não se desfaz

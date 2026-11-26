@@ -382,6 +382,25 @@ Hermes (D0–D3); aqui a ficha é `lead_notes`.
 - **Nunca afrouxa:** nota "só para você", Pix fora do caso, família, agenda do dono, nome da agenda do celular, compra e
   pagamento, vocabulário interno.
 
+### L — o modo teste do Hermes pelo CRM (26/11/2026)
+
+- **Rota:** `POST /api/v1/hermes/teste` (`app/api/v1/hermes/teste/route.ts`), só por token `dsk_…` com `mcp:write`
+  (sessão: 403), com teto de escrita, porta de token em `lib/auth/portas-de-token/operacao.ts` e área "nenhuma"
+  em `areas.ts`. Liga por organização em `TESTE_DO_HERMES_ORGS` (vazio = 404). Formato combinado com o mensageiro,
+  fora do envelope `{data}`: `{"ok":true,…}` / `{"ok":false,"erro":…}`. `Idempotency-Key` respeitada.
+- **Regra** (`lib/teste-do-hermes/teste-do-hermes.ts`): `abrir` cria contato "TESTE Hermes — <persona> (apagar)"
+  com a etiqueta `teste-hermes`, sem telefone, e conversa `archived`; `turno` grava a fala como recebida
+  `historico_importado`, roda `runAgentPreview` (assistida) com o agente publicado e grava os candidatos como saída
+  `historico_importado`; `fechar` conta os efeitos (caso, compromisso, job, retorno, evento, passagem, agendada,
+  envio, mensagem com envio, apanhado — zero), apaga traço, conversa e contato e conta a sobra (zero); `varrer` é o
+  pente (fecha o que tem mais de 120 min). Só apaga etiqueta + prefixo + sem telefone.
+- **Por que nada sai:** conversa arquivada não pede roteamento; `historico_importado` não emite evento nem abre
+  demanda (0760); na prévia as escritas viram proposta. NÃO marcar o contato como pessoal (o STOP veta a prévia).
+- **Apanhado:** filtro pela etiqueta em `apanhado-do-dono.ts` (segunda guarda). A métrica por canal não conta a
+  conversa (sem atendente nem resposta humana).
+- **No rebase:** arquivos novos; a linha da porta, a da área, as 4 ações em `lib/audit/actions.ts`, a variável em
+  `lib/agent-engine/env.ts` e no `.env.example`, e o filtro do apanhado.
+
 ## Migrations do fork (faixa 9xxx)
 
 | Arquivo | O quê |

@@ -282,7 +282,7 @@ export async function criarDepsDoApanhado(admin: Admin): Promise<DepsDoApanhado>
       if (linhas.length === 0) return [];
       const { data: msgs, error: erroMsgs } = await admin
         .from("messages")
-        .select("id, body, metadata, contacts:contact_id(display_name, name)")
+        .select("id, body, metadata, contacts:contact_id(display_name, name, tags)")
         .eq("organization_id", orgId)
         .in(
           "id",
@@ -291,7 +291,7 @@ export async function criarDepsDoApanhado(admin: Admin): Promise<DepsDoApanhado>
       if (erroMsgs) throw new Error(erroMsgs.message);
       // O embutido `contacts:contact_id(...)` chega como objeto (muitos-para-um),
       // mas o tipo inferido pelo supabase-js é lista: aceita os dois.
-      type Contato = { display_name: string | null; name: string | null };
+      type Contato = { display_name: string | null; name: string | null; tags?: string[] | null };
       const porId = new Map(
         ((msgs ?? []) as unknown as Array<{
           id: string;
@@ -300,7 +300,9 @@ export async function criarDepsDoApanhado(admin: Admin): Promise<DepsDoApanhado>
           contacts: Contato | Contato[] | null;
         }>).map((m) => [m.id, { ...m, contacts: Array.isArray(m.contacts) ? (m.contacts[0] ?? null) : m.contacts }]),
       );
-      return linhas.map((l) => {
+      // Fork elllo (teste1): o contato do modo teste do Hermes nunca vai ao apanhado.
+      const doTeste = (l: { message_id: string }) => (porId.get(l.message_id)?.contacts?.tags ?? []).includes("teste-hermes");
+      return linhas.filter((l) => !doTeste(l)).map((l) => {
         const m = porId.get(l.message_id);
         const md = m?.metadata ?? {};
         const empresa = (md.disparo_automatico as { empresa?: unknown } | undefined)?.empresa;
