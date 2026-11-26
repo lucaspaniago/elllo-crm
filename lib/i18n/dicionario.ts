@@ -17240,6 +17240,7 @@ export const DICIONARIO: Traducoes = {
   Assunto: { es: "Asunto" },
   Abrir: { es: "Abrir" },
   "A IA prometeu algo e travou": { es: "La IA prometió algo y se trabó" },
+  "Prometi algo e travei": { es: "Prometí algo y me trabé" },
   "(montado automaticamente; confira na conversa)":
     { es: "(armado automáticamente; revisa la conversación)" },
   "Responder aqui não chega ao cliente — abra o link para responder.":

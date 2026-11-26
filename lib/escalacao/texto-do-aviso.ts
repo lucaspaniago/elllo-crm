@@ -290,7 +290,8 @@ export function textoNaturalDoAviso(aviso: AvisoDeCaso): string {
 
   const molde = MOLDE_DO_AVISO_NATURAL[aviso.kind ?? "outro"] ?? MOLDE_OUTRO;
   const precisa = sanitizarTextoDoLead(aviso.summary, TETOS_DO_TEXTO_DO_LEAD.summary);
-  const oQue = failSafe ? t("A IA prometeu algo e travou") : (precisa ?? assunto ?? t(tipoDeCasoLabel(aviso.kind ?? "outro")));
+  // Fork elllo (sondar1): na voz da Helô, em 1ª pessoa — "uma Helô só" (pedido do Lucas, 26/11).
+  const oQue = failSafe ? t("Prometi algo e travei") : (precisa ?? assunto ?? t(tipoDeCasoLabel(aviso.kind ?? "outro")));
   const corpo = cliente ? `${cliente}: ${oQue}` : oQue;
   const linhas = [`${molde.emoji} ${comPonto(corpo)} ${t(molde.pergunta)}`];
   if (failSafe && precisa) linhas.push(`${t("(montado automaticamente; confira na conversa)")} ${precisa}`);

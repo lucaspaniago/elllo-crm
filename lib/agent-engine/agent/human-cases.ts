@@ -1,4 +1,5 @@
 import { currentExecutionBoundary, guardServiceEffect } from "@/lib/atendimento/fronteira-server";
+import { sondarEMissaoLigado } from './abertura/recados-abertos';
 import { TIPOS_DE_CASO, type TipoDeCaso } from "@/lib/ai/case-copy";
 /**
  * Casos humanos (spec 15) — o loop assíncrono IA↔humano quando o agente esbarra
@@ -239,7 +240,8 @@ export const FRASE_AO_CLIENTE_EM_PEDIDO_SOBRE_CASO_ABERTO =
  * tool `open_human_case` (o caminho `if (!res.ok) return res`), e é ele que o
  * teste de `aviso-de-pedido-novo-no-caso.test.ts` prende.
  */
-export function recusaDeCasoAberto(): OpenCaseResult {
+export function recusaDeCasoAberto(naVozDaHelo = false): OpenCaseResult {
+  if (naVozDaHelo) return recusaDeCasoAbertoNaVozDaHelo();
   return {
     ok: false,
     error: {
@@ -321,9 +323,37 @@ export async function openCase(
     // A recusa é uma INSTRUÇÃO (não só um erro): é o texto que o modelo lê no
     // resultado da tool, e é ele que impede a promessa de que a equipe foi
     // acionada quando ninguém foi avisado (#3097).
-    return recusaDeCasoAberto();
+    return recusaDeCasoAberto(sondarEMissaoLigado(ids.tenantId));
   }
   return { ok: true, caseId };
+}
+
+/**
+ * Fork elllo (sondar1) — a MESMA recusa, sem a cerca falada.
+ *
+ * Medido em 25/11/2026 (caso Calebe): com o caso aberto, cada mensagem nova virou
+ * "já passei pro Lucas" e, na terceira, "não consigo te dar um prazo nem garantir a
+ * compra" — a frase de `FRASE_AO_CLIENTE_EM_PEDIDO_SOBRE_CASO_ABERTO` dita ao pé da
+ * letra. O Lucas: "Soa muito mecânico ... um excesso de zelo". A garantia continua (não
+ * dizer que alguém foi acionado, não prometer prazo); o que muda é que ela não é
+ * ANUNCIADA ao cliente. Atrás de SONDAR_E_MISSAO_ORGS; fora, a recusa de sempre.
+ */
+export const FRASE_DA_HELO_EM_PEDIDO_SOBRE_CASO_ABERTO = 'Show! Te falo assim que o Lucas me responder.';
+
+export function recusaDeCasoAbertoNaVozDaHelo(): OpenCaseResult {
+  return {
+    ok: false,
+    error: {
+      code: 'case_already_open',
+      message:
+        'já existe um caso humano aberto para esta conversa: este pedido novo NÃO foi avisado a ninguém agora. ' +
+        'Se a mensagem nova traz informação para o caso e você tiver a ferramenta crm_add_case_note, registre-a ' +
+        'no caso aberto. NÃO diga ao cliente que alguém foi acionado ou avisado de novo, não repita que já passou ' +
+        'ao Lucas e não fale de prazo, de garantia nem do que você não pode fazer. Se a mensagem não pede ' +
+        'resposta, não responda. Se pede, uma frase curta e natural, neste espírito: ' +
+        `"${FRASE_DA_HELO_EM_PEDIDO_SOBRE_CASO_ABERTO}" Aguarde a resposta do Lucas antes de abrir outro caso.`,
+    },
+  };
 }
 
 export type ProvideCaseUpdateResult =

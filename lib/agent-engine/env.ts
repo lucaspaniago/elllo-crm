@@ -366,6 +366,11 @@ const envSchema = z.object({
   // .env da instalação, e voltar a 0 desliga sem trocar imagem.
   DOSSIE_AO_FECHAR_INTERVAL_MS: z.coerce.number().int().min(0).default(0),
   DOSSIE_AO_FECHAR_BATCH_LIMIT: z.coerce.number().int().positive().default(10),
+  // Fork elllo (sondar1): organizações (uuids, vírgula) com o "sondar e missão" da Helô:
+  // o turno de contato NOVO recebe os recados do Lucas abertos em outros contatos
+  // (abertura/recados-abertos.ts) e a recusa de caso aberto sai sem cerca falada
+  // (human-cases.ts). Vazio = o de sempre. O motor lê direto de process.env.
+  SONDAR_E_MISSAO_ORGS: z.string().optional().default(''),
   // Contenção de egress — hosts EXTRA além do Supabase/WAHA (CSV). Fail-closed.
   EGRESS_EXTRA_ALLOWED_HOSTS: z.string().optional(),
   // Elegibilidade da IA (gate opt-in `channel_sessions.metadata.ai_gate=allowlist`):

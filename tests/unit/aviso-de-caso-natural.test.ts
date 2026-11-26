@@ -101,7 +101,7 @@ describe("aviso natural — ligado", () => {
       avisoAoDono: FRASE,
     });
     expect(texto).not.toContain("ADEPOL");
-    expect(texto.split("\n")[0]).toBe("📌 Maria: A IA prometeu algo e travou. Como eu sigo?");
+    expect(texto.split("\n")[0]).toBe("📌 Maria: Prometi algo e travei. Como eu sigo?");
     expect(texto).toContain("(montado automaticamente; confira na conversa) trecho copiado da conversa");
   });
 

@@ -174,6 +174,7 @@ import {
   planejarConhecimentoDoTurno,
 } from './modo-de-conhecimento';
 import { buildOrigemBlock } from './abertura/origem-do-contato';
+import { buildRecadosAbertosBlock } from './abertura/recados-abertos';
 import { agendaNoFechamento } from './abertura/agenda-no-fechamento';
 import { applyScheduleFollowup, type FollowupWindowKnobs } from './schedule-followup';
 import { podeExporScheduleFollowup } from '@/lib/followup/callback-policy';
@@ -4220,7 +4221,7 @@ async function executarTurnoDoAgente(
   });
   // Fork elllo: quatro trilhas, nunca mais (o teto de `tests/unit/turno-le-em-paralelo.test.ts`).
   // A origem e o resumo anterior numa; a citação depois da leitura das notas, noutra.
-  const [notesIndexBlockDoContato, compromissosBlock, [origemBlock, anterioresBlock], [noteIdRows, citacao], indiceDeConhecimentoBlock] =
+  const [notesIndexBlockDoContato, compromissosBlock, [origemBlock, anterioresBlock, recadosAbertosBlock], [noteIdRows, citacao], indiceDeConhecimentoBlock] =
     await Promise.all([
       notasDaPrevia
         ? notasDaPrevia.bloco
@@ -4232,6 +4233,9 @@ async function executarTurnoDoAgente(
           // O resumo do atendimento ANTERIOR do contato, rotulado como passado (ver
           // `abertura/atendimentos-anteriores.ts`). Fora da prévia; sem fronteira, ''.
           preview ? '' : await buildAtendimentosAnterioresBlock(pool, tenantId, leadId, currentExecutionBoundary()),
+          // Fork elllo: os recados do Lucas abertos em OUTROS contatos, para o contato novo
+          // (ver `abertura/recados-abertos.ts`). Atrás de SONDAR_E_MISSAO_ORGS; fora, ''.
+          preview?.kind === 'sandbox' ? '' : await buildRecadosAbertosBlock(pool, tenantId, leadId, new Date()),
         ] as const)(),
       (async () =>
         [
@@ -4281,8 +4285,13 @@ async function executarTurnoDoAgente(
   }
   // Entra junto do índice de notas, sob "Memória do lead": é memória do contato
   // que atravessa atendimentos. Vazio não muda o prompt.
-  const notesIndexBlock =
+  const notesIndexBlockComAnteriores =
     anterioresBlock !== '' ? `${notesIndexBlockDoContato}\n\n${anterioresBlock}` : notesIndexBlockDoContato;
+  // Fork elllo: vazio (opção desligada, contato antigo ou sem recado aberto) não muda o prompt.
+  const notesIndexBlock =
+    recadosAbertosBlock !== ''
+      ? `${notesIndexBlockComAnteriores}\n\n${recadosAbertosBlock}`
+      : notesIndexBlockComAnteriores;
   // Observabilidade da memória (Fase 2A): SÓ ids/contagens no log — headline/corpo
   // são PII e nunca saem do prompt. Prova auditável de que a memória durável do
   // lead entrou no contexto DESTE turno.
