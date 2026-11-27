@@ -181,6 +181,10 @@ const SITES: { arquivo: string; fronteira: string; papel?: "gerador" | "validado
   // package.ts. Nada de texto digitado pelo operador entra na chave.
   { arquivo: "lib/ai/skills/package-files.ts", fronteira: "storage.chave-de-objeto" },
   { arquivo: "app/api/v1/products/[id]/fotos/route.ts", fronteira: "storage.chave-de-objeto" },
+  // Fork elllo (acervo1): a foto da peça do acervo, MESMA chave do produto
+  // (`<org>/<id da peça = id do produto>/<uuid>.jpg|png`): org do token, id e nome gerados
+  // pelo servidor (randomUUID), extensão pela ASSINATURA dos bytes.
+  { arquivo: "app/api/v1/acervo/route.ts", fronteira: "storage.chave-de-objeto" },
   // #2526: a imagem que o operador carrega na Resposta rápida. O caminho é gerado
   // aqui (`${orgId}/templates/${templateId}/uuid.jpg|png`) — a forma é a mesma do
   // registro acima: UUID v4 de alfabeto ASCII + `.jpg`/`.png` conhecido pela

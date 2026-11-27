@@ -304,7 +304,7 @@ export async function previaCadastro(
   if (entrada.codigo) {
     const c = normalizarCodigo(entrada.codigo);
     if (!c) return falha("codigo_invalido", 422, "O código usa letras, números, ponto, hífen ou sublinhado (até 40).");
-    if (await codigoTomado(db, org, c)) return falha("codigo_ocupado", 409, `O código ${c} já é de outra peça ou produto.`);
+    if (await codigoTomado(db, org, c)) return falha("codigo_ocupado", 409, `Código ${c} já é de outra peça ou produto.`);
     codigo = c;
   } else {
     codigo = await sugerirCodigo(db, org);
@@ -467,7 +467,7 @@ const mudou = (detalhe: string, extra?: Record<string, unknown>) => falha("mudou
 
 async function aplicarCadastro(c: pg.PoolClient, org: string, d: Record<string, unknown>, fotos: string[]): Promise<Aplicado> {
   const codigo = String(d.codigo);
-  if (await codigoTomado(c, org, codigo)) return mudou(`O código ${codigo} foi tomado depois da prévia. Faça a prévia de novo.`);
+  if (await codigoTomado(c, org, codigo)) return mudou(`Código ${codigo} tomado depois da prévia. Faça a prévia de novo.`);
   const pecaId = String(d.peca_id);
   const campos = {
     modelo: String(d.modelo),
