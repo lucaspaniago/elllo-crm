@@ -4,8 +4,10 @@ import { requireSupportWrite } from "@/lib/impersonate/support";
  *                            Inclui kind, priority, published_version_id, paused_at, operation_mode, operation_revision, archived_at,
  *                            e o provider/model da VERSÃO PUBLICADA (ver abaixo).
  *                            Filtro `?include_archived=true` opcional.
- * POST /api/v1/ai/agents  — create agent (admin). UM caminho de escrita.
- *                            Mode A (corpo legado, Spec 05 / EPIC-06): body sem
+ * POST /api/v1/ai/agents  — create agent (admin). Dois canais.
+ *                            Voz (channel: "voice"): cria cadastro desativado,
+ *                              sem versão. A telefonia usa o próprio cadastro.
+ *                            WhatsApp, Mode A (Spec 05 / EPIC-06): body sem
  *                              `version` → o corpo é CONVERTIDO num `version`
  *                              (ver `corpoLegadoComoCorpoDeCriacao`) e segue o
  *                              mesmo bloco
@@ -29,8 +31,13 @@ import { ok, fail } from "@/lib/api/wrappers";
 import { audit } from "@/lib/audit";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { mcpAgentDraftRecords } from "@/lib/ai/agents/create-draft";
+import {
+  CODIGO_NOME_DE_AGENTE_EM_USO,
+  NOME_DE_AGENTE_EM_USO,
+  ehNomeDeAgenteRepetido,
+} from "@/lib/ai/agents/nome-repetido";
 import { codigoDoEscopo, mensagemDoEscopo, validarEscopoDaVersao } from "@/lib/ai/agents/escopo";
-import { agentCreateSchema } from "@/lib/ai/guardrails-schema";
+import { agentCreateSchema, agenteDeVozCreateSchema } from "@/lib/ai/guardrails-schema";
 import { corpoLegadoComoCorpoDeCriacao } from "@/lib/ai/agents/legado-para-versao";
 import { escolherModeloNoCatalogo } from "@/lib/ai/agents/escolher-modelo";
 import { agentMcpCreateSchema } from "@/lib/ai/agents/validation";
@@ -88,7 +95,7 @@ async function lerLlmDaOrganizacao(
 }
 
 const AGENT_COLUMNS =
-  "id, organization_id, name, description, model, system_prompt, is_active, is_default, kind, priority, published_version_id, paused_at, operation_mode, operation_revision, archived_at, config, guardrails, active_kb_version_id, created_at, updated_at";
+  "id, organization_id, name, description, model, system_prompt, is_active, is_default, kind, channel, priority, published_version_id, paused_at, operation_mode, operation_revision, archived_at, config, guardrails, active_kb_version_id, created_at, updated_at";
 
 /**
  * As mesmas colunas MAIS o join da versão publicada — só para a LISTAGEM.
@@ -107,7 +114,7 @@ const AGENT_COLUMNS_COM_VERSAO =
   ", versao_publicada:ai_agent_versions!ai_agents_published_version_id_fkey(provider, model)";
 
 const VERSION_COLUMNS =
-  "id, organization_id, agent_id, version_number, system_prompt, provider, model, credential_id, tool_ids, trigger_config, channel_session_id, max_steps, token_budget, cost_budget_cents, history_message_window, history_token_window, handoff_keywords, handoff_tool_enabled, handoff_legal_enabled, proposal_ai_draft_enabled, cases_enabled, split_messages, split_max_chars, followup, operator_enabled, operator_model, operator_tool_ids, status, published_at, superseded_at, created_at, created_by,pipeline_ids,knowledge_source_ids,provisioning_origin,inbound_debounce_ms";
+  "id, organization_id, agent_id, version_number, system_prompt, provider, model, credential_id, tool_ids, trigger_config, channel_session_id, max_steps, token_budget, cost_budget_cents, history_message_window, history_token_window, handoff_keywords, handoff_tool_enabled, handoff_legal_enabled, proposal_ai_draft_enabled, cases_enabled, split_messages, split_max_chars, followup, voz_enabled, voz_quando, operator_enabled, operator_model, operator_tool_ids, status, published_at, superseded_at, created_at, created_by,pipeline_ids,knowledge_source_ids,skill_names,image_vision_enabled,provisioning_origin,inbound_debounce_ms,reply_min_interval_ms";
 
 // ---------------------------------------------------------------------------
 // GET — list
@@ -146,6 +153,13 @@ export async function GET(req: NextRequest): Promise<Response> {
 // POST — create
 // ---------------------------------------------------------------------------
 
+function falhaAoCriarAgente(erro: unknown, t: (texto: string) => string, requestId: string) {
+  if (ehNomeDeAgenteRepetido(erro)) {
+    return fail(CODIGO_NOME_DE_AGENTE_EM_USO, t(NOME_DE_AGENTE_EM_USO), 409, { requestId });
+  }
+  return fail("internal_error", "Erro ao criar agent.", 500, { requestId });
+}
+
 export async function POST(req: NextRequest): Promise<Response> {
   const supportDenied = await requireSupportWrite();
   if (supportDenied) return supportDenied;
@@ -174,6 +188,45 @@ export async function POST(req: NextRequest): Promise<Response> {
     return fail("invalid_request", t("Body JSON inválido."), 400, { requestId });
   }
 
+  if (typeof rawBody === "object" && rawBody !== null && "channel" in rawBody && rawBody.channel === "voice") {
+    const parsed = agenteDeVozCreateSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return fail("validation_failed", t("Campos inválidos."), 422, {
+        requestId,
+        details: parsed.error.flatten(),
+      });
+    }
+
+    // O runtime da telefonia lê o cadastro, e o editor de voz o altera
+    // diretamente. Começa desligado até que o administrador o configure.
+    const { data: agent, error } = await createAdminClient()
+      .from("ai_agents")
+      .insert({
+        ...parsed.data,
+        organization_id: organizationId,
+        created_by: authUserId,
+        kind: "rag_bot",
+        is_active: false,
+        is_default: false,
+      })
+      .select(AGENT_COLUMNS)
+      .single();
+    if (error || !agent) return falhaAoCriarAgente(error, t, requestId);
+
+    void audit({
+      action: "ai_agent.created",
+      actorUserId: authUserId,
+      actorApiTokenId: authz.apiTokenId ?? null,
+      organizationId,
+      resourceType: "ai_agent",
+      resourceId: agent.id,
+      requestId,
+      metadata: { kind: agent.kind, channel: agent.channel },
+    });
+
+    return ok(agent, { status: 201, requestId });
+  }
+
   const wantsMcp =
     typeof rawBody === "object" &&
     rawBody !== null &&
@@ -181,7 +234,7 @@ export async function POST(req: NextRequest): Promise<Response> {
 
   const admin = createAdminClient();
 
-  // Dois formatos de corpo, UM caminho de escrita (issue #1357).
+  // No canal de mensagens: dois formatos de corpo, um caminho de escrita (#1357).
   //
   // O corpo legado — sem `version` — gravava `kind='rag_bot'` direto em
   // `ai_agents`, sem NENHUMA linha em `ai_agent_versions`. Era o formato que só
@@ -275,8 +328,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     .insert({ ...records.agent, created_by: authUserId })
     .select(AGENT_COLUMNS)
     .single();
-  if (agentError || !agentRow)
-    return fail("internal_error", "Erro ao criar agent.", 500, { requestId });
+  if (agentError || !agentRow) return falhaAoCriarAgente(agentError, t, requestId);
   const { data: versionRow, error: versionError } = await admin
     .from("ai_agent_versions")
     .insert({ ...records.version, created_by: authUserId })

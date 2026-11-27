@@ -4,8 +4,20 @@ import { MAX_MEDIA_BYTES } from "@/lib/messaging/media/types";
 export type MessageKind = "image" | "video" | "audio" | "document";
 
 /**
- * Posse do objeto no bucket: o path DEVE estar sob {org}/{conversation}/
- * (chaves do Storage são literais — sem semântica de traversal).
+ * Leitura por service role: a organização vem da autorização no backend.
+ * Os escritores também guardam PDFs em `{org}/{proposta}.pdf`, então não se
+ * exige pasta de conversa. O SDK concatena o path na URL de sign/download:
+ * recuse escapes e separadores ambíguos, sem normalizar para outro objeto.
+ */
+export function isMediaPathInOrganization(path: string, orgId: string): boolean {
+  const segmentos = path.split("/");
+  if (segmentos.length < 2 || segmentos[0] !== orgId) return false;
+  if (/[%\\?#\p{Cc}]/u.test(path) || path.endsWith(" ")) return false;
+  return segmentos.every((segmento) => segmento !== "" && segmento !== "." && segmento !== "..");
+}
+
+/**
+ * Posse do objeto para envio: o path DEVE estar sob {org}/{conversation}/.
  *
  * Morava dentro do módulo de transporte do provider legado e não tinha nada a
  * ver com o canal: valida um path do NOSSO Storage, antes de qualquer coisa
@@ -16,6 +28,9 @@ export type MessageKind = "image" | "video" | "audio" | "document";
 export function isMediaPathOwnedBy(path: string, orgId: string, conversationId: string): boolean {
   const prefixo = `${orgId}/${conversationId}/`;
   if (!path.startsWith(prefixo)) return false;
+  // #5034: o SDK cola o path na URL de assinatura, e a URL normaliza `%2e%2e` em `..`. A régua da
+  // organização já recusa `%`, `?`, `#`, controle e espaço final — o que passa aqui é o que se assina.
+  if (!isMediaPathInOrganization(path, orgId)) return false;
   // O prefixo sozinho não prova posse: `{org}/{conv}/../../{outra}/x` começa certo e,
   // se o Storage resolver o `..`, aponta para o arquivo de outra conversa ou organização.
   // Só segmento de nome comum depois do prefixo — nada de `..`, `.`, vazio ou barra invertida.
@@ -24,7 +39,23 @@ export function isMediaPathOwnedBy(path: string, orgId: string, conversationId: 
   return resto.split("/").every((s) => s !== "" && s !== "." && s !== "..");
 }
 
-const DOCUMENT_MIMES = new Set([
+/**
+ * A mesma régua para o anexo do negócio (#3229): o objeto mora sob
+ * `{org}/leads/{lead}/…` no `internal-media`. Quem assina ou remove com o
+ * cliente admin confere isto antes — o banco também prende o caminho
+ * (`crm_lead_attachments_storage_path_check`), e as duas camadas não se
+ * substituem.
+ */
+export function isLeadAttachmentPathOwnedBy(path: string, orgId: string, leadId: string): boolean {
+  return isMediaPathOwnedBy(path, orgId, `leads/${leadId}`);
+}
+
+/**
+ * A allowlist de documentos do upload outbound — exportada porque o bucket do
+ * material da empresa (#4129) promete a MESMA lista, e um teste de invariante
+ * precisa comparar as duas sem uma terceira cópia.
+ */
+export const DOCUMENT_MIMES = new Set([
   "application/pdf",
   "application/msword",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -35,6 +66,8 @@ const DOCUMENT_MIMES = new Set([
   "text/plain",
   "text/csv",
   "application/zip",
+  "application/xml",
+  "text/xml",
 ]);
 
 /**

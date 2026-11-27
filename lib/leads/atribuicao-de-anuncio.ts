@@ -13,10 +13,17 @@
  * ele vem embutido na própria mensagem. Procure por `extrairAtribuicao` para
  * achar os dois; citar o caminho aqui é justamente o que o invariante proíbe.
  *
- * Não há extrator de Google Ads: não existe mecanismo nativo equivalente para
- * WhatsApp. Aquele caminho depende de uma landing page que capture o `gclid` e
- * embuta um código de rastreio na mensagem pré-preenchida, e essa LP ainda não
- * existe.
+ * O TERCEIRO caminho é o formulário (issue #2317): quem anuncia para uma landing
+ * page com formulário manda o clique no próprio envio, e o extrator do webhook
+ * de entrada o lê para estampar a MESMA atribuição — `lib/conversoes` passa a
+ * saber de que clique veio a venda, sem depender do `referral` do
+ * clique-pro-WhatsApp.
+ *
+ * Não há extrator de Google Ads a partir do TEXTO da mensagem: não existe
+ * mecanismo nativo equivalente para WhatsApp. Aquele caminho depende de uma
+ * landing page que capture o `gclid` e o mande — ou embutido num código de
+ * rastreio na mensagem pré-preenchida (`lib/leads/origem-do-site.ts`), ou no
+ * payload do formulário (o terceiro caminho acima).
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -24,9 +31,29 @@ import { logger } from "@/lib/logger";
 
 export type PlataformaDeAnuncio = "meta_ads" | "google_ads";
 
+/** Vocabulário fechado compartilhado pela captura e pela limpeza do primeiro toque. */
+export const CHAVES_DE_METADADOS_DA_CAMPANHA = [
+  "utm_source",
+  "utm_medium",
+  "utm_campaign",
+  "utm_adset",
+  "utm_ad",
+  "utm_term",
+  "utm_content",
+  "utm_placement",
+  "google_campaign_id",
+  "google_adgroup_id",
+  "google_ad_id",
+  "google_customer_id",
+] as const;
+
 export interface AtribuicaoDeAnuncio {
   plataforma: PlataformaDeAnuncio;
-  /** `ctwa_clid` — identifica o clique específico que abriu a conversa. */
+  /**
+   * O CLIQUE que abriu a conversa — `ctwa_clid` no clique-pro-WhatsApp, e
+   * `fbclid`/`gclid` no lead que chega por formulário (#2317). É ele que liga a
+   * venda ao anúncio; sem clique não há atribuição utilizável.
+   */
   sourceId: string | null;
   /**
    * O ANÚNCIO, que não é o clique.
@@ -49,8 +76,24 @@ export interface AtribuicaoDeAnuncio {
    * extrator a conhece; quem não traz fica sem miniatura, nunca sem atribuição.
    */
   miniatura?: string | null;
+  /** Campos de campanha normalizados, sem copiar o query/payload bruto para o topo. */
+  metadadosDaCampanha?: Partial<Record<(typeof CHAVES_DE_METADADOS_DA_CAMPANHA)[number], string>>;
   /** Payload de onde isto foi extraído — nunca descartado, é a prova. */
   bruto: Record<string, unknown>;
+  /**
+   * A identidade do NAVEGADOR, presente quando o clique foi capturado na
+   * PÁGINA (formulário) e não no `referral` de uma conversa (#2317).
+   *
+   * A PRESENÇA deste campo é o que diz "esta captura foi na página": quem
+   * carimba lê isso para não tratar o clique como `ctwa_clid`, que é o formato
+   * do anúncio clique-pro-WhatsApp. `fbc`/`fbp` são os dois identificadores que
+   * a plataforma casa para venda vinda de página; quando a página manda só o
+   * `fbclid`, o `fbc` é remontado a partir dele no extrator.
+   */
+  identidadeDoNavegador?: {
+    fbc: string | null;
+    fbp: string | null;
+  };
 }
 
 export type Bruto = Record<string, unknown>;
@@ -109,11 +152,15 @@ export interface AnuncioDaMensagem {
  * não. Cada transporte chama o SEU extrator e passa o resultado aqui: quem lê o
  * payload é o canal; o formato gravado é um só.
  */
-export function metadataDoAnuncio(
-  atribuicao: AtribuicaoDeAnuncio | null,
-): { anuncio?: AnuncioDaMensagem } {
+export function metadataDoAnuncio(atribuicao: AtribuicaoDeAnuncio | null): {
+  anuncio?: AnuncioDaMensagem;
+} {
   if (!atribuicao) return {};
-  const anuncio: AnuncioDaMensagem = { titulo: atribuicao.titulo, texto: atribuicao.corpo, ad_id: atribuicao.adId };
+  const anuncio: AnuncioDaMensagem = {
+    titulo: atribuicao.titulo,
+    texto: atribuicao.corpo,
+    ad_id: atribuicao.adId,
+  };
   // Sem título, texto nem id não há o que comparar nem o que mostrar: o clique
   // sozinho identifica uma pessoa, não um produto.
   if (!anuncio.titulo && !anuncio.texto && !anuncio.ad_id) return {};
@@ -182,9 +229,9 @@ export function lerAnuncioDoContato(sourceMetadata: unknown): AnuncioDoContato |
 }
 
 /**
- * Grava a atribuição no CONTATO — só na primeira vez.
+ * Formato comum para a estampa do contato e o retrato do negócio novo.
  *
- * Primeiro toque: uma vez gravada, não muda. A pessoa pode clicar em outro
+ * No CONTATO, o primeiro toque, uma vez gravado, não muda. A pessoa pode clicar em outro
  * anúncio meses depois, numa conversa já aberta — isso não deveria reescrever
  * de onde ela veio ORIGINALMENTE, que é o dado que explica a existência do
  * relacionamento. `fn_estampar_atribuicao_de_anuncio` faz a guarda e o merge
@@ -199,28 +246,71 @@ export function lerAnuncioDoContato(sourceMetadata: unknown): AnuncioDoContato |
  * primeiro toque. Sem a organização não há chamada — a assinatura de três
  * argumentos foi derrubada no banco de propósito.
  */
+export function metadadosDaAtribuicao(atribuicao: AtribuicaoDeAnuncio): Record<string, unknown> {
+  return {
+    // A RPC faz merge. Sem limpar os campos ausentes, um cadastro importado
+    // sem ad_platform misturaria a campanha anterior com o clique provado.
+    ...(atribuicao.plataforma === "google_ads" && atribuicao.metadadosDaCampanha
+      ? Object.fromEntries(CHAVES_DE_METADADOS_DA_CAMPANHA.map((chave) => [chave, null]))
+      : {}),
+    ...atribuicao.metadadosDaCampanha,
+    // A marca de navegador da Meta tem precedência na leitura da conversão.
+    // Ela não pode sobreviver ao primeiro toque provado de outra plataforma.
+    ...(atribuicao.plataforma === "google_ads"
+      ? { ad_click_source: null, fbc: null, fbp: null }
+      : {}),
+    ad_platform: atribuicao.plataforma,
+    ad_source_id: atribuicao.sourceId,
+    // ─── Captura na PÁGINA, não no `referral` da conversa (#2317) ─────────
+    //
+    // O formulário grava o clique que a landing page capturou. Sem esta
+    // marca, `lib/conversoes` leria o `ad_source_id` como `ctwa_clid` e a
+    // venda sairia com a identidade do anúncio clique-pro-WhatsApp — formato
+    // que não é deste lead. A marca é `ad_click_source: "site"` porque é a
+    // MESMA ideia que a origem de site já usa (`ad_platform: "site"`): o
+    // clique veio da página. `ad_platform` segue sendo a PLATAFORMA, que é
+    // o que o card e o livro-razão mostram.
+    //
+    // `fbc`/`fbp` só entram quando existem: `source_metadata || p_metadata`
+    // aceita nulo, mas chave nula em metadata vira consulta de `typeof
+    // "string"` que falha do mesmo jeito e suja a prova com um campo vazio.
+    ...(atribuicao.plataforma === "meta_ads" && atribuicao.identidadeDoNavegador
+      ? {
+          ad_click_source: "site",
+          ...(atribuicao.identidadeDoNavegador.fbc
+            ? { fbc: atribuicao.identidadeDoNavegador.fbc }
+            : {}),
+          ...(atribuicao.identidadeDoNavegador.fbp
+            ? { fbp: atribuicao.identidadeDoNavegador.fbp }
+            : {}),
+        }
+      : {}),
+    ad_id: atribuicao.adId,
+    ad_title: atribuicao.titulo,
+    ad_body: atribuicao.corpo,
+    ad_source_url: atribuicao.sourceUrl,
+    ad_thumbnail_url: atribuicao.miniatura ?? null,
+    ad_raw: atribuicao.bruto,
+    ad_captured_at: new Date().toISOString(),
+  };
+}
+
+/** Primeiro toque no contato; o mesmo formato alimenta o nascimento do negócio. */
 export async function estamparAtribuicaoDoContato(
   admin: SupabaseClient,
   organizationId: string,
   contactId: string,
   atribuicao: AtribuicaoDeAnuncio,
 ): Promise<void> {
-  const { error } = await admin.rpc("fn_estampar_atribuicao_de_anuncio" as never, {
-    p_org: organizationId,
-    p_contact: contactId,
-    p_platform: atribuicao.plataforma,
-    p_metadata: {
-      ad_platform: atribuicao.plataforma,
-      ad_source_id: atribuicao.sourceId,
-      ad_id: atribuicao.adId,
-      ad_title: atribuicao.titulo,
-      ad_body: atribuicao.corpo,
-      ad_source_url: atribuicao.sourceUrl,
-      ad_thumbnail_url: atribuicao.miniatura ?? null,
-      ad_raw: atribuicao.bruto,
-      ad_captured_at: new Date().toISOString(),
-    },
-  } as never);
+  const { error } = await admin.rpc(
+    "fn_estampar_atribuicao_de_anuncio" as never,
+    {
+      p_org: organizationId,
+      p_contact: contactId,
+      p_platform: atribuicao.plataforma,
+      p_metadata: metadadosDaAtribuicao(atribuicao),
+    } as never,
+  );
 
   if (error) {
     // `logger.error`, não `console.error`: o DoD proíbe console em código

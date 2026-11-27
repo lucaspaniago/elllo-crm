@@ -14,6 +14,31 @@
  * `reason` é a classificação (ver `lib/net/alcance`), e é o que basta para saber
  * ONDE mexer.
  *
+ * ─── Por que agora também sai `causa` e `runbook` ────────────────────────────
+ * Uma instalação no plano free passou ~6 h com 100% de `/rest/v1` em 522 e este
+ * health respondendo só `tempo_esgotado`. A resposta estava certa e não dizia
+ * para onde ir: o runbook que já existia para o sintoma aponta OUTRA causa (o
+ * gateway reexecutando requisições), com uma proteção que já estava instalada e
+ * não resolve falta de memória. `causa` separa schema cache do PostgREST
+ * (`PGRST002`), projeto sem resposta na origem (`522`), banco inacessível e
+ * lentidão genérica; `runbook` é o CAMPO com o caminho do documento certo —
+ * separado de `error` porque `error` é redigido para quem não tem o segredo, e
+ * o caminho do doc é justamente o que serve a quem está com o sistema fora.
+ * Os campos antigos (`status`, `reason`, `error`, `latency_ms`, `target`)
+ * continuam com o mesmo nome e o mesmo significado; isto ACRESCENTA.
+ * Ver `lib/net/causa-do-supabase.ts` e
+ * `docs/runbooks/supabase-sem-memoria-no-free.md`.
+ *
+ * ─── Por que o check do banco recusa o 3xx e o 200 que não é JSON ────────────
+ * "O endereço respondeu" não é "o BANCO respondeu". Numa instalação em que o
+ * endereço configurado cai num proxy, o `fetch` seguia o `307` para a tela de
+ * login, tomava o `200` do HTML dela e o check saía `ok` — com o PostgREST
+ * inalcançável. Um `ok` assim é pior que um `down`: ele desliga a pergunta. Por
+ * isso o ping não segue redirect (`redirect: "manual"`), o `3xx` vira `down` com
+ * o destino do `Location` no detalhe, e um `200` só conta quando o corpo é do
+ * PostgREST (`corpoDoPostgrest`, abaixo). O `401/403` legítimo continua `ok`:
+ * ali quem respondeu foi o banco, recusando a credencial.
+ *
  * ─── Por que o ENDEREÇO só sai autenticado ───────────────────────────────────
  * Esta rota é pública — é o que permite um monitor externo bater nela. O endereço
  * do Redis e do WAHA é superfície de ataque: publicá-lo entrega a quem varre a
@@ -26,8 +51,16 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { env } from "@/lib/env";
 import { alvoDe, classificarFalhaDeAlcance, type FalhaDeAlcance } from "@/lib/net/alcance";
+import {
+  RUNBOOK_DA_CAUSA,
+  causaDaFalhaDeAlcance,
+  causaDaResposta,
+  mensagemDaCausa,
+  type CausaDoSupabase,
+} from "@/lib/net/causa-do-supabase";
 import { validarConfigRedisRest } from "@/lib/redis-config";
 import { urlDoSupabaseNoServidor } from "@/lib/supabase/url-do-servidor";
+import { comIdDaRequisicao } from "@/lib/api/wrappers";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -39,6 +72,7 @@ type MotivoDeFalha =
   | FalhaDeAlcance
   | "credencial_recusada"
   | "resposta_inesperada"
+  | "projeto_indisponivel"
   | "nao_configurado"
   | "configuracao_invalida";
 
@@ -47,6 +81,18 @@ type Check = {
   latency_ms: number;
   error?: string;
   reason?: MotivoDeFalha;
+  /**
+   * A CAUSA, no nível que muda a ação — só o check do banco preenche. É campo
+   * NOVO ao lado de `reason`, e não substituto: `reason: "projeto_indisponivel"`
+   * continua significando "522 ou schema cache", como para quem já consome.
+   */
+  causa?: CausaDoSupabase;
+  /**
+   * O runbook que ESTA causa pede, relativo à raiz do repositório. Ponteiro em
+   * campo próprio porque `error` é redigido para quem não tem o segredo interno
+   * — e o caminho do doc é o que mais serve a quem está com o sistema fora.
+   */
+  runbook?: string;
   /** Protocolo + host + porta que tentamos. Só com `?verbose=1` autenticado. */
   target?: string;
 };
@@ -67,6 +113,45 @@ function motivoDoStatusHttp(status: number): MotivoDeFalha {
   return status === 401 || status === 403 ? "credencial_recusada" : "resposta_inesperada";
 }
 
+/**
+ * O que respondeu no `200` é do PostgREST?
+ *
+ * ─── O defeito que este predicado separa ─────────────────────────────────────
+ * O `200` de uma leitura do PostgREST é JSON. Um `200` que NÃO é JSON é OUTRA
+ * COISA respondendo no endereço do banco — tipicamente a tela de login que um
+ * proxy serve no lugar da API. Contá-lo como banco de pé é o mesmo defeito do
+ * `307` seguido pelo `fetch`, só que pela porta do corpo: o `/health` diria `ok`
+ * com o PostgREST fora do ar, e `wait_app_healthy` liberaria (ou reverteria)
+ * uma atualização por causa de uma página de HTML.
+ *
+ * ─── Por que a régua é o CORPO, e não o `content-type` ───────────────────────
+ * Porque o cabeçalho não separa os dois. Medido no Node desta instalação (v22):
+ * `new Response("[]")` sai com `content-type: text/plain;charset=UTF-8`, e o
+ * mesmo carimbo vai num `new Response("<html>…")`. Ou seja, exigir
+ * `content-type: application/json` reprovaria o JSON do PostgREST que passou por
+ * um cliente sem cabeçalho, e aceitar `text/plain` aceitaria a tela de login.
+ * Quem distingue é o que veio no corpo.
+ *
+ * ─── Por que o corpo vazio conta como ok ─────────────────────────────────────
+ * Um `200` sem corpo não contradiz o banco — não afirma ser outra coisa. O que
+ * este check reprova é uma resposta que se declara NÃO sendo do PostgREST, e é
+ * o que o contrato antigo desta sonda já aceitava (`200/401/empty body`).
+ *
+ * O corpo chega aqui já lido, e lido UMA vez: quem chama precisa dele também
+ * para reconhecer o PGRST002, e a leitura passa pelo mesmo teto de tempo do
+ * `fetch` — um `200` cujo corpo nunca chega é um serviço que não respondeu, e
+ * cai no `catch` de quem chama, `down` com o motivo de alcance.
+ */
+function corpoDoPostgrest(corpo: string): boolean {
+  if (!corpo) return true;
+  try {
+    JSON.parse(corpo);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function checkSupabase(): Promise<Check> {
   const t0 = Date.now();
   // A sonda pergunta ao MESMO endereço que o app usa para falar com o banco, e
@@ -76,7 +161,7 @@ async function checkSupabase(): Promise<Check> {
   const url = urlDoSupabaseNoServidor(env.SUPABASE_SERVER_URL, env.NEXT_PUBLIC_SUPABASE_URL);
   try {
     // Ping leve via REST com anon key — não precisa de service_role pra health check.
-    // Se chegar 200/401/empty body, conexão e API key estão OK.
+    // Se chegar 200 (JSON) ou 401/403, conexão e API key estão OK.
     const key = env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
     const res = await withTimeout(
       fetch(`${url}/rest/v1/organizations?select=id&limit=1`, {
@@ -105,11 +190,84 @@ async function checkSupabase(): Promise<Check> {
           "Accept-Profile": "public",
         },
         cache: "no-store",
+        // O REDIRECT NÃO É SEGUIDO, e é o que separa "o banco respondeu" de
+        // "quem respondeu foi outra coisa".
+        //
+        // Medido numa instalação real: o endereço que o servidor usava para
+        // falar com o Supabase respondia `307` para `/login`. O `fetch`, sozinho,
+        // SEGUE o redirect — chegava na tela de login, recebia o `200` do HTML
+        // dela, e o check declarava o banco `ok`. O `/health` dizia `ok` com o
+        // PostgREST inalcançável, e `wait_app_healthy` (que decide se uma
+        // atualização é mantida ou revertida) lia esse `ok` como banco de pé.
+        // Com `redirect: "manual"` o `3xx` chega cru, com o `Location` que diz
+        // para onde fomos mandados, e o ramo abaixo o trata como `down`.
+        redirect: "manual",
       }),
     );
-    // 200 (lista vazia por RLS) ou 401/403 (auth ok mas RLS bloqueia anon) → conexão OK
-    if (res.status === 200 || res.status === 401 || res.status === 403) {
+    // 3xx: quem respondeu no endereço do banco não foi o PostgREST — foi um
+    // proxy que nos manda para outro lugar (a tela de login, no caso medido).
+    // O DESTINO vai no `error`, que é onde quem opera lê o "para onde"; como todo
+    // texto desta rota pública, ele é redigido para quem não tem o segredo.
+    if (res.status >= 300 && res.status < 400) {
+      const destino = res.headers.get("location");
+      return {
+        status: "down",
+        latency_ms: Date.now() - t0,
+        error: destino ? `redirect_${res.status}: ${destino}` : `redirect_${res.status}`,
+        reason: "resposta_inesperada",
+        target: alvoDe(url),
+      };
+    }
+    // 401/403 (auth ok mas RLS bloqueia anon) → chegamos ao PostgREST, conexão OK
+    if (res.status === 401 || res.status === 403) {
       return { status: "ok", latency_ms: Date.now() - t0, target: alvoDe(url) };
+    }
+    // Lê o corpo UMA vez: ele é o que distingue "o PostgREST não carregou o
+    // schema cache" de "nada respondeu na origem". Sem abrir conexão nova nem
+    // retry: só classificar o que já veio na resposta.
+    //
+    // Os dois ramos que já existiam continuam com o MESMO `reason`
+    // (`projeto_indisponivel`) porque é o contrato de quem já consome o health;
+    // o que se acrescenta é `causa` — `postgrest_sem_schema_cache` (503 PGRST002
+    // ou 5xx citando o schema cache: o PostgREST respondeu e o cache é o
+    // problema) e `projeto_sem_resposta_na_origem` (522 do Cloudflare, sem
+    // corpo). Não confundir com PGRST205 (tabela ausente num projeto de pé).
+    //
+    // A falha ao LER o corpo tem dois destinos. No `200` o corpo é a prova
+    // (`corpoDoPostgrest`): a falha propaga crua para o `catch`, que dá o
+    // motivo de alcance dela — timeout é `tempo_esgotado`, conexão cortada no
+    // meio continua sendo conexão cortada. Fora do `200` o status já chegou e o
+    // corpo só refina o motivo: uma leitura que falha não pode rebatizar a
+    // resposta, e ela cai no ramo `http_${status}`, como antes de o corpo ser lido.
+    const leitura = withTimeout(res.text());
+    const corpo = (res.status === 200 ? await leitura : await leitura.catch(() => "")).trim();
+    const causa = causaDaResposta(res.status, corpo);
+    if (causa) {
+      return {
+        status: "down",
+        latency_ms: Date.now() - t0,
+        error: mensagemDaCausa(causa, `HTTP ${res.status}`, TIMEOUT_MS),
+        // `reason` preservado: 522 e schema cache continuam "projeto_indisponivel".
+        reason: "projeto_indisponivel",
+        causa,
+        runbook: RUNBOOK_DA_CAUSA[causa],
+        target: alvoDe(url),
+      };
+    }
+    // 200 (lista vazia por RLS) → conexão OK, mas só se o que voltou FOR do
+    // PostgREST. Um `200` com HTML no corpo é a tela de login respondendo no
+    // lugar da API: antes do conserto, ele vinha com `status: ok`.
+    if (res.status === 200) {
+      if (corpoDoPostgrest(corpo)) {
+        return { status: "ok", latency_ms: Date.now() - t0, target: alvoDe(url) };
+      }
+      return {
+        status: "down",
+        latency_ms: Date.now() - t0,
+        error: `resposta_nao_json (content-type: ${res.headers.get("content-type") ?? "ausente"})`,
+        reason: "resposta_inesperada",
+        target: alvoDe(url),
+      };
     }
     return {
       status: "down",
@@ -119,11 +277,25 @@ async function checkSupabase(): Promise<Check> {
       target: alvoDe(url),
     };
   } catch (e) {
+    // Aqui é o ramo de "não houve resposta": a falha de alcance já dizia POR QUE
+    // (DNS, porta fechada, rota, TLS, tempo) e continua dizendo — `reason` é o
+    // mesmo de antes. `causa` traduz isso para as TRÊS ações possíveis: nenhuma
+    // conexão é `banco_inacessivel` (confira endereço/rede antes de reiniciar o
+    // projeto), tempo esgotado é `lentidao_generica` (não dá para separar schema
+    // cache de sobrecarga sem resposta — a issue viu EXATAMENTE isto), e
+    // `indeterminada` segue sem causa: campo vazio é melhor que frase inventada.
+    const falha = classificarFalhaDeAlcance(e);
+    const causa = causaDaFalhaDeAlcance(falha);
+    const texto = e instanceof Error ? e.message : String(e);
     return {
       status: "down",
       latency_ms: Date.now() - t0,
-      error: e instanceof Error ? e.message : String(e),
-      reason: classificarFalhaDeAlcance(e),
+      error:
+        causa === undefined
+          ? texto
+          : mensagemDaCausa(causa, falha === "tempo_esgotado" ? `timeout ${TIMEOUT_MS} ms` : falha, TIMEOUT_MS),
+      reason: falha,
+      ...(causa === undefined ? {} : { causa, runbook: RUNBOOK_DA_CAUSA[causa] }),
       target: alvoDe(url),
     };
   }
@@ -310,7 +482,7 @@ export async function GET(req: NextRequest) {
 
   const httpStatus = status === "unhealthy" ? 503 : 200;
 
-  return NextResponse.json(
+  return comIdDaRequisicao(NextResponse.json(
     {
       data: {
         status,
@@ -329,5 +501,5 @@ export async function GET(req: NextRequest) {
       },
     },
     { status: httpStatus },
-  );
+  ), req);
 }

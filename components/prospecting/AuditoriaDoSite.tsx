@@ -5,10 +5,12 @@ import { format } from "date-fns";
 import { useT } from "@/hooks/i18n/useT";
 import { useLocaleDeData } from "@/hooks/i18n/useLocaleDeData";
 import {
+  pontuarCompletudeDoSite,
   descreverProblema,
   type ClasseDeSite,
   type ItemDoRaioX,
 } from "@/lib/prospecting/site-classify";
+import { safePublicLink } from "@/lib/prospecting/schema";
 import {
   montarEstrategia,
   rotuloDaClasse,
@@ -20,7 +22,7 @@ import {
 export interface AuditoriaDoSiteDados {
   classe: ClasseDeSite;
   problemas: string[];
-  checklist: { tem: string[]; falta: string[] };
+  checklist: { tem: string[]; falta: string[]; inconclusivo?: boolean };
   provisorio?: boolean;
   /** Quando o veredito foi medido (ISO). Ausente em dado antigo: a data não aparece. */
   verificado_em?: string;
@@ -39,6 +41,7 @@ export function AuditoriaDoSite({
   nicho,
   status,
   sobrescritaVocabulario,
+  fontes,
 }: {
   site: AuditoriaDoSiteDados;
   nota: number | null;
@@ -49,6 +52,7 @@ export function AuditoriaDoSite({
   status: string;
   /** Sobrescrita de vocabulário da org. Ausente = mapa base. */
   sobrescritaVocabulario?: Record<string, string> | null;
+  fontes?: { website?: string | null; mapsUrl?: string | null; finalUrl?: string | null };
 }) {
   const t = useT();
   const locale = useLocaleDeData();
@@ -72,13 +76,20 @@ export function AuditoriaDoSite({
     },
     t,
   );
+  const completude = pontuarCompletudeDoSite(site.checklist);
+  const siteFonte = safePublicLink(fontes?.finalUrl ?? fontes?.website ?? null);
+  const mapsFonte = safePublicLink(fontes?.mapsUrl ?? null);
   return (
     <div className="mt-3 space-y-3 border-t pt-3">
       <div>
         <h4 className="font-medium">{t("Auditoria do site")}</h4>
         <p className="mt-1 text-xs text-muted-foreground">
           {rotuloDaClasse(site.classe, t)}
-          {site.provisorio === true ? ` — ${t("verificação pendente, sem citar na abordagem")}` : ""}
+          {site.provisorio === true
+            ? ` — ${t("verificação pendente, sem citar na abordagem")}`
+            : site.classe === "nao-medido"
+              ? ` — ${t("não medido, sem citar na abordagem")}`
+              : ""}
         </p>
         {verificadoEm && !Number.isNaN(verificadoEm.getTime()) && (
           <p className="text-xs text-muted-foreground">
@@ -86,12 +97,36 @@ export function AuditoriaDoSite({
           </p>
         )}
       </div>
+      <section aria-label={t("Completude do site")}>
+        <h5 className="font-medium">
+          {t("Completude do site")}: {completude.valor}% ({completude.presentes}/{completude.total})
+        </h5>
+        <p className="text-xs text-muted-foreground">
+          {t("Itens técnicos encontrados no site; não mede interesse de compra.")}
+        </p>
+      </section>
+      {(siteFonte || mapsFonte) && (
+        <div className="text-xs">
+          <h5 className="font-medium">{t("Fontes públicas consultadas")}</h5>
+          <div className="mt-1 flex flex-wrap gap-3">
+            {siteFonte && <a className="underline" href={siteFonte} target="_blank" rel="noreferrer">{t("Site auditado")}</a>}
+            {mapsFonte && <a className="underline" href={mapsFonte} target="_blank" rel="noreferrer">{t("Google Maps")}</a>}
+          </div>
+        </div>
+      )}
       {site.problemas.length > 0 && (
         <ul className="list-disc space-y-1 pl-4 text-xs">
           {site.problemas.map((problema) => (
             <li key={problema}>{descreverProblema(problema, t)}</li>
           ))}
         </ul>
+      )}
+      {site.checklist?.inconclusivo === true && (
+        <p className="text-xs text-muted-foreground">
+          {t(
+            "Checklist não medido: a página é montada por JavaScript e o HTML baixado não traz o conteúdo. Não cite estes itens.",
+          )}
+        </p>
       )}
       {(tem.length > 0 || falta.length > 0) && (
         <div className="grid grid-cols-2 gap-2 text-xs">
@@ -117,6 +152,7 @@ export function AuditoriaDoSite({
         <h4 className="font-medium">{t("Estratégia de abordagem")}</h4>
         <p className="mt-1">{estrategia.cenario}</p>
         <p className="mt-1 text-muted-foreground">{estrategia.angulo}</p>
+        {estrategia.complementar && <p className="mt-1">{estrategia.complementar}</p>}
         {estrategia.ganchos.length > 0 && (
           <ul className="mt-1 list-disc space-y-1 pl-4">
             {estrategia.ganchos.map((gancho, i) => (

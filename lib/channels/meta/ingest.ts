@@ -24,8 +24,13 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { audit } from "@/lib/audit";
-import { pausarIaPorAtendimentoManual } from "@/lib/escalacao/atendimento-manual";
+import {
+  pausarIaPorAtendimentoManual,
+  type FalhaDaPausa,
+  type MotivoDaPausaNaoGravada,
+} from "@/lib/escalacao/atendimento-manual";
 import { estamparAtribuicaoDoContato, metadataDoAnuncio } from "@/lib/leads/atribuicao-de-anuncio";
+import { ancoraCtwaDaMensagem } from "@/lib/leads/prova-meta-lead-submitted";
 import {
   ehNumeroInternoDeAviso,
   registrarMensagemIgnorada,
@@ -36,7 +41,7 @@ import { logger } from "@/lib/logger";
 import { ARCHIVED_AT, queryTolerantToMissingArchived } from "../archived";
 import { extrairAtribuicaoMeta } from "../atribuicao-de-anuncio-oficial";
 import { aplicarEfeitosPosEntrada } from "../pos-entrada";
-import { encontrarContatoPorTelefone } from "../contato-por-telefone";
+import { encontrarContatoPorTelefone, encontrarContatoPorTelefoneComAnonimizacao } from "../contato-por-telefone";
 import { marcarConversaComMensagem } from "../marcar-conversa";
 import { gravarReacaoDeMensagem } from "../reacao";
 import { canonicalPhoneBR, phoneLookupVariants } from "../phone-variants";
@@ -49,11 +54,22 @@ import type {
   OutboundEchoEvent,
   ReactionEvent,
 } from "./webhook";
+import { MOTIVO_CONTATO_ANONIMIZADO, MOTIVO_TITULAR_APAGADO, type ApagadosNoLote } from "./titular-apagado";
 
 type Admin = SupabaseClient;
 
 export type IngestOutcome =
-  | { status: "ingested"; messageId: string; conversationId: string }
+  | {
+      status: "ingested";
+      messageId: string;
+      conversationId: string;
+      /**
+       * A mensagem ENTROU, mas a pausa da IA não foi garantida (#534): o motivo
+       * é nomeado e a falha foi para o audit. Quem lê o desfecho não pode
+       * tratá-lo como "IA pausada".
+       */
+      pausaDaIANaoGravada?: MotivoDaPausaNaoGravada;
+    }
   | { status: "duplicate" }
   | { status: "no_session" }
   /**
@@ -288,6 +304,7 @@ export async function ingestMetaInbound(
       media_mime: e.media?.mime ?? null,
       sent_at: e.sentAt.toISOString(),
       metadata: {
+        ...ancoraCtwaDaMensagem(atribuicao),
         ...(e.media ? { meta_media_id: e.media.id, voice: e.media.voice } : {}),
         // Nome original do anexo (#2613) — o cartão do Inbox lê esta chave.
         // Só quando há nome (a Cloud API manda `filename` só em `document`):
@@ -295,6 +312,10 @@ export async function ingestMetaInbound(
         // `metadata` aqui, então nada já gravado é sobrescrito.
         ...(nomeDoArquivo ? { media_filename: nomeDoArquivo } : {}),
         ...(e.sharedContact ? { shared_contact: e.sharedContact } : {}),
+        // Tipo da Meta fora do vocabulário do banco: a linha entra como `text`
+        // e o tipo cru fica aqui (#4580). Só nesse caso — tipo conhecido não
+        // ganha a chave.
+        ...(e.rawType ? { raw_type: e.rawType } : {}),
         // O anúncio DESTA mensagem, não só o primeiro do contato: é o que mostra
         // na conversa que a pessoa voltou por outro anúncio. Ver `metadataDoAnuncio`.
         ...metadataDoAnuncio(atribuicao),
@@ -467,6 +488,8 @@ export async function ingestMetaEcho(
         // Mesma regra da recebida (#2613): nome só quando há nome.
         ...(nomeDoArquivo ? { media_filename: nomeDoArquivo } : {}),
         ...(e.sharedContact ? { shared_contact: e.sharedContact } : {}),
+        // Mesma regra da recebida (#4580): o tipo cru, só quando caiu em `text`.
+        ...(e.rawType ? { raw_type: e.rawType } : {}),
       },
     })
     .select("id")
@@ -504,10 +527,16 @@ export async function ingestMetaEcho(
     }
   }
 
+  let pausaDaIANaoGravada: MotivoDaPausaNaoGravada | undefined;
+  // #534: sem `avisar`, a falha da pausa viraria um `false` que ninguém lê.
   await pausarIaPorAtendimentoManual(admin, {
     organizationId: orgId,
     conversationId: conversationId as string,
     canal: "meta",
+    avisar: (falha) => {
+      pausaDaIANaoGravada = falha.motivo;
+      return avisarPausaNaoGravada(falha);
+    },
   });
 
   await audit({
@@ -524,7 +553,27 @@ export async function ingestMetaEcho(
     },
   });
 
-  return { status: "ingested", messageId, conversationId: conversationId as string };
+  return {
+    status: "ingested",
+    messageId,
+    conversationId: conversationId as string,
+    ...(pausaDaIANaoGravada ? { pausaDaIANaoGravada } : {}),
+  };
+}
+
+/** Aviso durável de que a pausa da IA não foi garantida (#534). */
+function avisarPausaNaoGravada(falha: FalhaDaPausa): Promise<void> {
+  return audit({
+    action: "ai.pausa_nao_gravada",
+    organizationId: falha.organizationId,
+    resourceType: "conversation",
+    resourceId: falha.conversationId,
+    metadata: {
+      canal: falha.canal ?? "meta",
+      motivo: falha.motivo,
+      detalhe: falha.detalhe ?? null,
+    },
+  });
 }
 
 /**
@@ -564,6 +613,13 @@ export async function ingestMetaAppContactSync(
     /** Ver `ingestMetaInbound`: sessão já resolvida pelo token (canal parceiro). */
     channelSessionId?: string;
   },
+  /**
+   * Quais telefones DESTE lote já foram respondidos como apagados a pedido, com
+   * UMA consulta pelo lote (`perguntarTitularesApagadosNoLote`, migration 9321).
+   * Quem ingere um webhook inteiro passa isto para não pagar uma pergunta por
+   * contato. Ausente = pergunta sozinho, para este número (ingestão avulsa).
+   */
+  apagadosNoLote?: ApagadosNoLote,
 ): Promise<IngestOutcome> {
   // Sem nome não há o que gravar — `remove` vem sem nome de propósito.
   const nome = e.name?.trim() ?? "";
@@ -593,7 +649,44 @@ export async function ingestMetaAppContactSync(
     return { status: "ignored", reason: "numero_interno_de_aviso" };
   }
 
-  const existente = await findContactByVariants(admin, orgId, e.phone);
+  // Titular apagado a pedido (LGPD) não volta pela agenda do app. A anonimização
+  // ZERA o telefone do cadastro (`phone_number = null`), então
+  // `findContactByVariants` não acha a ficha e `fn_upsert_wa_contact` — que casa
+  // contato só por `phone_number`/`wa_lid` — INSERIRIA uma ficha nova com o
+  // número e o nome da agenda. A pergunta vem antes de qualquer escrita, com a
+  // mesma régua do importador de histórico (`lib/channels/historico/rodada.ts`):
+  // na dúvida (erro ou resposta que não é sim/não) NÃO cria — falha fechada.
+  // O evento da agenda não traz LID, então a pergunta é só pelo telefone.
+  //
+  // Em LOTE a pergunta já foi feita uma vez, pelo chamador, para todos os
+  // contatos do webhook (`perguntarTitularesApagadosNoLote`, migration 9321):
+  // N consultas viram UMA, e nenhuma por contato. Sem o conjunto, pergunta aqui.
+  const telefoneCanonico = canonicalPhoneBR(telefone);
+  if (apagadosNoLote) {
+    if (apagadosNoLote.has(telefoneCanonico)) {
+      return { status: "ignored", reason: MOTIVO_TITULAR_APAGADO };
+    }
+  } else {
+    const { data: apagado, error: erroApagado } = await admin.rpc(
+      "fn_titular_apagado_a_pedido" as never,
+      { p_org: orgId, p_telefone: telefoneCanonico, p_lid: null } as never,
+    );
+    if (erroApagado || typeof apagado !== "boolean") {
+      return {
+        status: "failed",
+        reason: `titular_apagado: ${erroApagado?.message ?? "resposta sem booleano"}`,
+      };
+    }
+    if (apagado) return { status: "ignored", reason: MOTIVO_TITULAR_APAGADO };
+  }
+
+  // A ficha que JÁ está anonimizada também não recebe nada de volta — inclusive
+  // quando a marca da 0750 não existe, porque a anonimização é anterior a ela e
+  // não tem backfill possível (o telefone já tinha sido zerado). Achada por
+  // variante ou por telefone extra, ela é pulada: o `.eq("is_anonymized", false)`
+  // que o update do nome já tinha não impedia o upsert de criar o telefone.
+  const existente = await encontrarContatoPorTelefoneComAnonimizacao(admin, orgId, e.phone);
+  if (existente?.is_anonymized) return { status: "ignored", reason: MOTIVO_CONTATO_ANONIMIZADO };
   const phone = existente?.phone_number
     ? canonicalPhoneBR(existente.phone_number)
     : canonicalPhoneBR(telefone);

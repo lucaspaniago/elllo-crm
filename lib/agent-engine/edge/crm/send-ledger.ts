@@ -1,5 +1,6 @@
 import { ApiError } from "@/lib/api/types";
 import { OrgNaoOperanteError } from "@/lib/organizacao/operante";
+import { CHAVE_DA_FALHA_DE_ENVIO, falhaPermanenteNaMensagem } from "@/lib/channels/falha-de-envio";
 import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Queryable } from "../../queue/queue";
@@ -8,21 +9,68 @@ export type SendLedgerStatus = "requested" | "accepted" | "queued" | "vetoed" | 
 export type SendOutcome =
   | { kind: "sent"; idempotencyKey: string; crmMessageId: string }
   | {
-      kind: "already_sent" | "queued" | "failed";
+      kind: "already_sent" | "queued";
       idempotencyKey: string;
       crmMessageId: string | null;
     }
+  | {
+      kind: "failed";
+      idempotencyKey: string;
+      crmMessageId: string | null;
+      /**
+       * O canal recusou ESTE conteúdo em definitivo (`lib/channels/falha-de-envio.ts`):
+       * re-tentar o turno só repetiria a recusa. `false` = transitória — a fila
+       * re-tenta, como sempre.
+       */
+      permanente: boolean;
+    }
   | { kind: "blocked"; idempotencyKey: string };
-type Intent = { tenantId: string; leadId: string | null; jobId: string; seq: number; body: string };
-type Row = { id: string; status: SendLedgerStatus; crm_message_id: string | null };
-interface LedgerStore {
+/** A linha de `messages` que o ledger lê: o status e — só na `failed` — a natureza da recusa. */
+export type MensagemDoLedger = { id: string; status: string; metadata?: unknown };
+/**
+ * A intenção de uma MENSAGEM FÍSICA no ledger.
+ *
+ * `seq` é o contador do TURNO (quem manda no `channel.send` é quem sabe o
+ * número), e `(jobId, seq)` é a identidade exactly-once da linha.
+ *
+ * `envioSeq` (migration 9407) é a FRONTEIRA do envio: o `seq` da primeira
+ * bolha do `send_message` a que esta linha pertence. O `seq` sozinho não separa
+ * dois envios do mesmo job — ele cresce entre eles —, e o reprocesso da saída
+ * configurável precisa das bolhas DESTE envio, não do turno (#4370, medido pelo
+ * mantenedor nos cenários B e C). Opcional de propósito: quem envia UMA
+ * mensagem por job (follow-up) não tem o que separar, e gravar NULL cai na
+ * régua anterior, que ali é idêntica.
+ */
+export type Intent = {
+  tenantId: string;
+  leadId: string | null;
+  jobId: string;
+  seq: number;
+  envioSeq?: number;
+  body: string;
+};
+export type Row = {
+  id: string;
+  status: SendLedgerStatus;
+  crm_message_id: string | null;
+  /**
+   * Migration 9051. Opcional no TYPE (não no banco) de propósito: dublês de
+   * teste existentes constroem este objeto sem o campo, e exigi-lo quebraria
+   * cada um — a leitura trata ausência e `null` como a mesma coisa ("nada
+   * sintetizado ainda").
+   */
+  media_storage_path?: string | null;
+  /** Opcional no TYPE pela mesma razão de `media_storage_path`: dublês antigos não o têm. */
+  body_hash?: string | null;
+};
+export interface LedgerStore {
   create(input: Intent, hash: string): Promise<string>;
   find(input: Intent): Promise<Row | null>;
   rotate(input: Intent, hash: string): Promise<string>;
   /** Pela PK primeiro: o envio grava `messages.id = chave` (`internalMessageId`). O
    * `metadata->>'idempotency_key'` não tem índice e só alcança linha gravada antes
    * dessa convenção, então fica de reserva para quando a PK não acha. */
-  message(org: string, key: string): Promise<{ id: string; status: string } | null>;
+  message(org: string, key: string): Promise<MensagemDoLedger | null>;
   update(
     org: string,
     key: string,
@@ -30,36 +78,88 @@ interface LedgerStore {
     id: string | null,
     error: string | null,
   ): Promise<void>;
+  /**
+   * Grava o caminho da mídia JÁ sintetizada — só se a linha ainda não tiver
+   * um (o `coalesce` é a defesa: duas tentativas correndo em paralelo nunca
+   * deveriam acontecer, já que o job tem dono exclusivo, mas um UPDATE que só
+   * escreve quando está vazio custa zero e fecha a dúvida).
+   */
+  setMediaPath(org: string, key: string, path: string): Promise<string>;
 }
+
+/** O hash que identifica o CORPO desta tentativa — nunca o corpo em si (PII) chega ao ledger. */
+export function bodyHash(body: string): string {
+  return createHash("sha256").update(body).digest("hex");
+}
+/**
+ * A resolução de CHAVE — extraída de `sendWithLedger` para que a síntese de
+ * voz (Fase 6a do plano de voz) possa resolver a MESMA identidade de linha
+ * ANTES de decidir se precisa sintetizar, sem duplicar a lógica de
+ * create/find/rotate num segundo lugar que pudesse divergir dela.
+ *
+ * Comportamento idêntico ao bloco que existia inline em `sendWithLedger` —
+ * refactor puro, sem mudança de regra. Os cinco casos de
+ * `tests/unit/followup-send-ledger.test.ts` são a prova de que a extração não
+ * mudou nada.
+ */
+type ResolucaoDeChave =
+  | { kind: "key"; key: string; row: Row | null }
+  | { kind: "already_sent"; key: string; crmMessageId: string | null }
+  | { kind: "blocked"; key: string }
+  | { kind: "failed_permanent"; key: string; crmMessageId: string | null };
+
+export async function resolverChaveDoLedger(
+  store: LedgerStore,
+  input: Intent,
+  hash: string,
+): Promise<ResolucaoDeChave> {
+  try {
+    const key = await store.create(input, hash);
+    return { kind: "key", key, row: null };
+  } catch (error) {
+    if (!(error && typeof error === "object" && "code" in error && error.code === "23505"))
+      throw error;
+    const prior = await store.find(input);
+    if (!prior) throw new Error("send_ledger_missing");
+    if (prior.status === "accepted")
+      return { kind: "already_sent", key: prior.id, crmMessageId: prior.crm_message_id };
+    if (prior.status === "vetoed") return { kind: "blocked", key: prior.id };
+    if (prior.status === "failed") {
+      // A MESMA intenção, com o MESMO corpo, já foi recusada em definitivo pelo
+      // canal: mandar de novo só deixaria outro balão vermelho na conversa. O
+      // desfecho é o que já se sabe — nada sai. Corpo diferente é pedido novo
+      // (o turno re-rodado escreveu outra coisa) e segue rotacionando.
+      if (prior.body_hash === hash) {
+        const recusada = await store.message(input.tenantId, prior.crm_message_id ?? prior.id);
+        if (recusada?.status === "failed" && falhaPermanenteNaMensagem(recusada.metadata))
+          return { kind: "failed_permanent", key: prior.id, crmMessageId: recusada.id };
+      }
+      return { kind: "key", key: await store.rotate(input, hash), row: null };
+    }
+    return { kind: "key", key: prior.id, row: prior };
+  }
+}
+
 /** Inline e daemon compartilham identidade (job,seq), reconciliação e mensagem.
  * Página/worker perdido não cria uma segunda intenção. queued é reavaliado pelo
  * handler com o MESMO id; somente sent/delivered/read confirmam entrega. */
 export async function sendWithLedger(
   store: LedgerStore,
   input: Intent,
-  send: (key: string, messageId: string) => Promise<{ id: string; status: string }>,
+  send: (key: string, messageId: string) => Promise<MensagemDoLedger>,
 ): Promise<SendOutcome> {
-  const hash = createHash("sha256").update(input.body).digest("hex");
-  let key: string;
-  // Chave saída de `create` ou `rotate` é um uuid que acabou de nascer: nenhuma
-  // mensagem pode carregá-la ainda. Procurar seria uma leitura sob o lock do
-  // número que só pode devolver vazio.
-  let replay = false;
-  try {
-    key = await store.create(input, hash);
-  } catch (error) {
-    if (!(error && typeof error === "object" && "code" in error && error.code === "23505"))
-      throw error;
-    const prior = await store.find(input);
-    if (!prior) throw new Error("send_ledger_missing");
-    key = prior.id;
-    if (prior.status === "accepted")
-      return { kind: "already_sent", idempotencyKey: key, crmMessageId: prior.crm_message_id };
-    if (prior.status === "vetoed") return { kind: "blocked", idempotencyKey: key };
-    if (prior.status === "failed") key = await store.rotate(input, hash);
-    else replay = true;
-  }
-  const existing = replay ? await store.message(input.tenantId, key) : null;
+  const hash = bodyHash(input.body);
+  const resolucao = await resolverChaveDoLedger(store, input, hash);
+  if (resolucao.kind === "already_sent")
+    return { kind: "already_sent", idempotencyKey: resolucao.key, crmMessageId: resolucao.crmMessageId };
+  if (resolucao.kind === "blocked") return { kind: "blocked", idempotencyKey: resolucao.key };
+  if (resolucao.kind === "failed_permanent")
+    return { kind: "failed", idempotencyKey: resolucao.key, crmMessageId: resolucao.crmMessageId, permanente: true };
+  const key = resolucao.key;
+  // Chave saída de `create` ou `rotate` é um uuid que acabou de nascer (`row`
+  // null): nenhuma mensagem pode carregá-la ainda. Procurar seria uma leitura
+  // sob o lock do número que só pode devolver vazio.
+  const existing = resolucao.row ? await store.message(input.tenantId, key) : null;
   let message = existing;
   if (!message || message.status === "queued") {
     try {
@@ -82,16 +182,21 @@ export async function sendWithLedger(
     : message.status === "failed"
       ? "failed"
       : "queued";
+  const permanente = status === "failed" && falhaPermanenteNaMensagem(message.metadata);
   await store.update(
     input.tenantId,
     key,
     status,
     message.id,
-    status === "failed" ? "handler marcou a mensagem como failed" : null,
+    status !== "failed"
+      ? null
+      : permanente
+        ? "canal recusou a mensagem em definitivo — não re-tentar o mesmo conteúdo"
+        : "handler marcou a mensagem como failed",
   );
-  return status === "accepted"
-    ? { kind: "sent", idempotencyKey: key, crmMessageId: message.id }
-    : { kind: status, idempotencyKey: key, crmMessageId: message.id };
+  if (status === "accepted") return { kind: "sent", idempotencyKey: key, crmMessageId: message.id };
+  if (status === "failed") return { kind: "failed", idempotencyKey: key, crmMessageId: message.id, permanente };
+  return { kind: "queued", idempotencyKey: key, crmMessageId: message.id };
 }
 /** Reconcilia um recibo já existente sem criar intenção nem chamar o canal.
  * Consumidores determinísticos consultam isto antes dos gates de um NOVO envio. */
@@ -111,8 +216,12 @@ export function pgSendLedger(db: Queryable): LedgerStore {
   return {
     async create(i, hash) {
       const { rows } = await db.query<{ id: string }>(
-        "insert into send_ledger (organization_id, contact_id, job_id, seq, body_hash) values ($1, $2, $3, $4, $5) returning id",
-        [i.tenantId, i.leadId, i.jobId, i.seq, hash],
+        // `envio_seq` na ESCRITA (#4370, migration 9407): a fronteira do envio
+        // tem de estar na linha antes do envio sair. Gravá-la depois deixaria o
+        // envio interrompido por crash — justamente o que o reprocesso atende —
+        // sem a marca, e o reprocesso voltaria a ler o turno inteiro.
+        "insert into send_ledger (organization_id, contact_id, job_id, seq, envio_seq, body_hash) values ($1, $2, $3, $4, $5, $6) returning id",
+        [i.tenantId, i.leadId, i.jobId, i.seq, i.envioSeq ?? null, hash],
       );
       if (!rows[0]) throw new Error("send_ledger_insert_missing");
       return rows[0].id;
@@ -125,22 +234,29 @@ export function pgSendLedger(db: Queryable): LedgerStore {
       return rows[0] ?? null;
     },
     async rotate(i, hash) {
+      // `media_storage_path=null` É PARTE DA ROTAÇÃO, não um extra: rotate()
+      // é uma tentativa lógica NOVA (a anterior falhou), e o áudio que a
+      // tentativa anterior sintetizou — se houver — pode não corresponder ao
+      // texto desta. Herdar o path antigo serviria o ÁUDIO ERRADO para a
+      // mensagem nova, calado.
       const { rows } = await db.query<{ id: string }>(
-        "update send_ledger set id=gen_random_uuid(),status='requested',body_hash=$4,crm_message_id=null,last_error=null,updated_at=now() where organization_id=$1 and job_id=$2 and seq=$3 returning id",
+        "update send_ledger set id=gen_random_uuid(),status='requested',body_hash=$4,crm_message_id=null,last_error=null,media_storage_path=null,updated_at=now() where organization_id=$1 and job_id=$2 and seq=$3 returning id",
         [i.tenantId, i.jobId, i.seq, hash],
       );
       if (!rows[0]) throw new Error("send_ledger_rotation_missing");
       return rows[0].id;
     },
     async message(org, key) {
-      const { rows } = await db.query<{ id: string; status: string }>(
-        "select id,status from messages where organization_id=$1 and id=$2",
-        [org, key],
+      // Só a chave da natureza da recusa sai do `metadata` — o resto (PII de
+      // contato compartilhado, botões) não tem por que atravessar o ledger.
+      const { rows } = await db.query<MensagemDoLedger>(
+        "select id,status,jsonb_build_object($3::text, metadata->($3::text)) as metadata from messages where organization_id=$1 and id=$2",
+        [org, key, CHAVE_DA_FALHA_DE_ENVIO],
       );
       if (rows[0]) return rows[0];
-      const legado = await db.query<{ id: string; status: string }>(
-        "select id,status from messages where organization_id=$1 and metadata->>'idempotency_key'=$2 limit 1",
-        [org, key],
+      const legado = await db.query<MensagemDoLedger>(
+        "select id,status,jsonb_build_object($3::text, metadata->($3::text)) as metadata from messages where organization_id=$1 and metadata->>'idempotency_key'=$2 limit 1",
+        [org, key, CHAVE_DA_FALHA_DE_ENVIO],
       );
       return legado.rows[0] ?? null;
     },
@@ -150,6 +266,22 @@ export function pgSendLedger(db: Queryable): LedgerStore {
         [org, key, status, id, error],
       );
     },
+    async setMediaPath(org, key, path) {
+      const { rows } = await db.query<{ media_storage_path: string }>(
+        "update send_ledger set media_storage_path=coalesce(media_storage_path,$3),updated_at=now() where organization_id=$1 and id=$2 returning media_storage_path",
+        [org, key, path],
+      );
+      if (!rows[0]) throw new Error("send_ledger_set_media_path_missing");
+      return rows[0].media_storage_path;
+    },
+  };
+}
+/** A linha do PostgREST (`falha_de_envio` como coluna) no formato do caminho `pg`. */
+function comNatureza(linha: Record<string, unknown>): MensagemDoLedger {
+  return {
+    id: String(linha.id),
+    status: String(linha.status),
+    metadata: { [CHAVE_DA_FALHA_DE_ENVIO]: linha[CHAVE_DA_FALHA_DE_ENVIO] ?? null },
   };
 }
 export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
@@ -162,6 +294,8 @@ export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
           contact_id: i.leadId,
           job_id: i.jobId,
           seq: i.seq,
+          // Fronteira do envio na ESCRITA — o porquê está em `pgSendLedger.create`.
+          envio_seq: i.envioSeq ?? null,
           body_hash: hash,
         })
         .select("id")
@@ -172,7 +306,7 @@ export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
     async find(i) {
       const { data, error } = await db
         .from("send_ledger")
-        .select("id,status,crm_message_id")
+        .select("id,status,crm_message_id,media_storage_path,body_hash")
         .eq("organization_id", i.tenantId)
         .eq("job_id", i.jobId)
         .eq("seq", i.seq)
@@ -181,6 +315,8 @@ export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
       return data as Row | null;
     },
     async rotate(i, hash) {
+      // Ver o comentário irmão em `pgSendLedger.rotate`: path antigo não pode
+      // sobreviver a uma tentativa lógica nova.
       const { data, error } = await db
         .from("send_ledger")
         .update({
@@ -189,6 +325,7 @@ export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
           body_hash: hash,
           crm_message_id: null,
           last_error: null,
+          media_storage_path: null,
           updated_at: new Date().toISOString(),
         })
         .eq("organization_id", i.tenantId)
@@ -200,23 +337,25 @@ export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
       return data.id;
     },
     async message(org, key) {
+      // `metadata->falha_de_envio` vem com o nome da chave — o leitor central
+      // recebe o mesmo formato do caminho `pg`.
       const porId = await db
         .from("messages")
-        .select("id,status")
+        .select(`id,status,${CHAVE_DA_FALHA_DE_ENVIO}:metadata->${CHAVE_DA_FALHA_DE_ENVIO}`)
         .eq("organization_id", org)
         .eq("id", key)
         .maybeSingle();
       if (porId.error) throw porId.error;
-      if (porId.data) return porId.data;
+      if (porId.data) return comNatureza(porId.data as unknown as Record<string, unknown>);
       const { data, error } = await db
         .from("messages")
-        .select("id,status")
+        .select(`id,status,${CHAVE_DA_FALHA_DE_ENVIO}:metadata->${CHAVE_DA_FALHA_DE_ENVIO}`)
         .eq("organization_id", org)
         .eq("metadata->>idempotency_key", key)
         .limit(1)
         .maybeSingle();
       if (error) throw error;
-      return data;
+      return data ? comNatureza(data as unknown as Record<string, unknown>) : null;
     },
     async update(org, key, status, id, errorText) {
       const { error } = await db
@@ -231,8 +370,94 @@ export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
         .eq("id", key);
       if (error) throw error;
     },
+    async setMediaPath(org, key, path) {
+      // `coalesce` não existe no builder do supabase-js para update — lê
+      // primeiro, decide, grava; a janela é a mesma "concorrência não
+      // realista" documentada em `pgSendLedger.setMediaPath`.
+      const atual = await db
+        .from("send_ledger")
+        .select("media_storage_path")
+        .eq("organization_id", org)
+        .eq("id", key)
+        .maybeSingle();
+      if (atual.error) throw atual.error;
+      if (atual.data?.media_storage_path) return atual.data.media_storage_path as string;
+      const { data, error } = await db
+        .from("send_ledger")
+        .update({ media_storage_path: path, updated_at: new Date().toISOString() })
+        .eq("organization_id", org)
+        .eq("id", key)
+        .select("media_storage_path")
+        .single();
+      if (error) throw error;
+      return data.media_storage_path as string;
+    },
   };
 }
+/**
+ * Motivo do cancelamento quando o passo de follow-up foi vetado pela trava de
+ * repetição (`spinning`, código `mass_identical` — ver `decideSpinning`).
+ *
+ * `{n}` é a CONTAGEM de repetições que o próprio veto carrega (`matchCount`),
+ * materializada no texto por `motivoDoVetoDaTrava`. A chave com `{n}` é a mesma
+ * convenção do dicionário para texto que leva número (ex.: "Este contato tem {n}
+ * compromissos na Agenda."), e a tradução mora lá.
+ */
+export const MOTIVO_DO_VETO_DA_TRAVA_DE_REPETICAO =
+  "A trava de repetição (anti-ban) segurou este envio: o mesmo texto já saiu {n} vez(es) por este número. Varie o texto antes de reenviar.";
+
+/** O motivo de sempre, para toda causa de não-envio que não é a trava de repetição. */
+export const MOTIVO_DO_PASSO_SEM_ENVIO =
+  "O assistente concluiu este passo sem enviar uma mensagem. Revise o próximo passo.";
+
+/**
+ * A CONTAGEM de repetições de um trace de veto — `null` quando o trace não a tem.
+ *
+ * O `trace` é o JSONB que `persistTrace` grava em `before_send_traces`: um
+ * registro por gate, e o `detail` só existe no gate que devolveu valores
+ * estruturados. Veto de outra trava (ou linha gravada antes de a cadeia passar
+ * a mandar `matchCount`) não tem número — e sem número não há o que nomear.
+ */
+function contagemDoVetoDeRepeticao(trace: unknown): number | null {
+  if (!Array.isArray(trace)) return null;
+  for (const entrada of trace) {
+    if (typeof entrada !== "object" || entrada === null) continue;
+    const registro = entrada as { code?: unknown; detail?: unknown };
+    if (registro.code !== "mass_identical") continue;
+    const detalhe = registro.detail as { matchCount?: unknown } | undefined;
+    const contagem = detalhe?.matchCount;
+    if (typeof contagem === "number" && Number.isFinite(contagem) && contagem > 0) return contagem;
+  }
+  return null;
+}
+
+/**
+ * Por que o passo não enviou, quando o `send_ledger` não tem linha para o job.
+ *
+ * A cadeia `before_send` veta ANTES de gravar no ledger, então o veto da trava
+ * de repetição nunca chega ao ramo `status = 'vetoed'` abaixo: o único rastro
+ * dele é a linha em `before_send_traces` (`vetoed_gate`/`vetoed_code`/`trace`),
+ * escrita na mesma tentativa. Sem esta leitura, o motivo gravado na inscrição é
+ * sempre o genérico — quem abre o follow-up não descobre que houve trava.
+ *
+ * Devolve `null` para TODA causa que não é a trava de repetição com contagem:
+ * o chamador cai no texto de sempre, e nenhuma outra causa muda de motivo.
+ */
+async function motivoDoVetoDaTrava(db: Queryable, org: string, job: string): Promise<string | null> {
+  const { rows } = await db.query<{ vetoed_code: string | null; trace: unknown }>(
+    `select vetoed_code, trace from before_send_traces
+      where organization_id=$1 and job_id=$2 and vetoed_code is not null
+      order by created_at desc
+      limit 1`,
+    [org, job],
+  );
+  const linha = rows[0];
+  if (linha?.vetoed_code !== "mass_identical") return null;
+  const contagem = contagemDoVetoDeRepeticao(linha.trace);
+  if (contagem === null) return null;
+  return MOTIVO_DO_VETO_DA_TRAVA_DE_REPETICAO.replace("{n}", String(contagem));
+}
+
 /** Resultado do turno sem importar runtime/env; ausência de envio é terminal explícito. */
 export async function resultadoDoEnvioDoFollowup(
   db: Queryable,
@@ -243,11 +468,15 @@ export async function resultadoDoEnvioDoFollowup(
     "select status from send_ledger where organization_id=$1 and job_id=$2",
     [org, job],
   );
-  if (!rows.length)
+  if (!rows.length) {
+    // #4428: sem linha no ledger, o veto da cadeia é o que explica o silêncio —
+    // e ele tem nome. As demais causas continuam com o texto genérico.
+    const motivoDoVeto = await motivoDoVetoDaTrava(db, org, job);
     return {
       kind: "skipped",
-      reason: "O assistente concluiu este passo sem enviar uma mensagem. Revise o próximo passo.",
+      reason: motivoDoVeto ?? MOTIVO_DO_PASSO_SEM_ENVIO,
     };
+  }
   if (rows.every((row) => row.status === "vetoed"))
     return { kind: "skipped", reason: "O envio foi recusado pelas regras do atendimento." };
   if (rows.some((row) => row.status !== "accepted")) throw new Error("followup_message_not_sent");

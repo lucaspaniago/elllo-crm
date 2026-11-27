@@ -43,7 +43,7 @@ import { type NextRequest } from "next/server";
 
 import { audit } from "@/lib/audit";
 import { ApiError } from "@/lib/api/types";
-import { fail } from "@/lib/api/wrappers";
+import { comIdDaRequisicao, fail } from "@/lib/api/wrappers";
 import { requireRole } from "@/lib/auth/require-role";
 import {
   csvDosContatos,
@@ -80,7 +80,7 @@ async function decifraCpfs(
   destino: Map<string, string>,
 ): Promise<void> {
   for (const contato of contatos) {
-    if (!contato.cpf_hash) continue;
+    if (!contato.cpf_available) continue;
     const { data, error } = await supabase.rpc("decrypt_cpf", { p_contact_id: contato.id });
     if (error) {
       console.warn("[contacts.export] decrypt_cpf RPC indisponível", error.message);
@@ -121,6 +121,7 @@ export async function GET(req: NextRequest): Promise<Response> {
     modo: url.searchParams.get("modo") ?? undefined,
     source: url.searchParams.get("source") ?? undefined,
     pessoais: url.searchParams.get("pessoais") ?? undefined,
+    blocked: url.searchParams.get("blocked") ?? undefined,
     order_by: url.searchParams.get("order_by") ?? undefined,
     order_dir: url.searchParams.get("order_dir") ?? undefined,
     limit: String(TAMANHO_DA_PAGINA),
@@ -179,6 +180,7 @@ export async function GET(req: NextRequest): Promise<Response> {
     email: c.email,
     phone_number: c.phone_number,
     cpf: cpfs.get(c.id) ?? null,
+    birthdate: c.birthdate,
     tags: c.tags,
   }));
 
@@ -208,7 +210,7 @@ export async function GET(req: NextRequest): Promise<Response> {
     },
   });
 
-  return new Response(corpo, {
+  return comIdDaRequisicao(new Response(corpo, {
     status: 200,
     headers: {
       "Content-Type": formato === "csv" ? "text/csv; charset=utf-8" : "text/vcard; charset=utf-8",
@@ -217,5 +219,5 @@ export async function GET(req: NextRequest): Promise<Response> {
       "X-Request-Id": requestId,
       ...(truncado ? { "X-Export-Truncado": "true" } : {}),
     },
-  });
+  }), requestId);
 }

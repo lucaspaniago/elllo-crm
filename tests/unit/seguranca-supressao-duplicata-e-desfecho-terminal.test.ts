@@ -50,7 +50,7 @@ describe("follow-up fixo não tem gate near-dup (decisão mantida e documentada)
   it("o desfecho `duplicate_suppressed` deixou de existir no tipo e no consumo", () => {
     expect(followup).not.toContain("duplicate_suppressed");
     expect(followup).toMatch(
-      /type EnvioFixoDesfecho =\s*\| \{ kind: "sent" \}\s*\| \{ kind: "deferred"; until: Date; reason: string \}\s*\| \{ kind: "skipped" \};/,
+      /type EnvioFixoDesfecho =\s*\| \{ kind: "sent" \}\s*\| \{ kind: "deferred"; until: Date; reason: string; janelaRegulatoria: boolean \}\s*\| \{ kind: "skipped" \};/,
     );
   });
 
@@ -58,7 +58,7 @@ describe("follow-up fixo não tem gate near-dup (decisão mantida e documentada)
     // O caminho fixo (handoff-skip → getLeadContext → cadeia → despacho) não
     // contém NENHUMA comparação de conteúdo: nada de supressão implícita entre
     // o texto escolhido pelo operador e o envio.
-    const iHandoff = followup.indexOf("isLeadInHandoff(pool, tenantId, leadId)");
+    const iHandoff = followup.indexOf("isLeadInHandoff(pool, tenantId, leadId,");
     const iDespacho = followup.indexOf("const context = await getLeadContext(", iHandoff);
     expect(iHandoff).toBeGreaterThan(-1);
     expect(iDespacho).toBeGreaterThan(iHandoff);

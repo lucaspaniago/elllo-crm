@@ -8,9 +8,12 @@ import { useUser } from "@/hooks/auth/AuthProvider";
 import { useTagDeIdioma } from "@/hooks/i18n/useLocaleDeData";
 import { useT } from "@/hooks/i18n/useT";
 import { useAssignableMembers } from "@/hooks/inbox/useAssignableMembers";
+import type { Sector } from "@/hooks/team/useSectors";
+import { COR_DA_PRIORIDADE, ESTILO_DA_URGENCIA } from "./estilo-da-prioridade";
+import { SeloDeSetor } from "./SeloDeSetor";
 import {
   agrupaPorPrazo,
-  estaAtrasada,
+  calcularUrgenciaDoPrazo,
   estaEncerrada,
   type FaixaDePrazo,
   type PrioridadeDaTarefa,
@@ -18,6 +21,8 @@ import {
 } from "@/lib/tarefas/tipos";
 import { Check, Kanban, PencilSimple, Trash, UserCircle } from "@/lib/ui/icons";
 import { cn } from "@/lib/utils";
+
+const SEM_SETOR: ReadonlyMap<string, Sector> = new Map();
 
 interface Props {
   tarefas: Tarefa[];
@@ -31,15 +36,15 @@ interface Props {
    * repetir o nome dele em cada linha só tomaria espaço.
    */
   mostrarNegocio?: boolean;
+  /**
+   * Os setores por id, para dar NOME ao que o servidor decidiu (#4883): a
+   * tarefa chega com `setor: { id, origem }`, e é aqui que o id vira chip.
+   * Quem monta é a tela de Tarefas, que já busca setores e equipe — e só com o
+   * módulo opcional ligado (doc 213). Ausente = sem chip: a lista do painel do
+   * inbox e a do dossiê não pedem setores a ninguém.
+   */
+  setores?: ReadonlyMap<string, Sector>;
 }
-
-/** A cor é do TEMA, nunca um hex: ela tem de sobreviver ao claro e ao escuro. */
-const COR_DA_PRIORIDADE: Record<PrioridadeDaTarefa, string> = {
-  low: "bg-muted text-muted-foreground",
-  medium: "bg-primary/10 text-primary",
-  high: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
-  urgent: "bg-destructive/15 text-destructive",
-};
 
 function Linha({
   tarefa,
@@ -49,6 +54,7 @@ function Linha({
   aoApagar,
   mostrarNegocio,
   nomeDoResponsavel,
+  setores,
 }: {
   tarefa: Tarefa;
   podeEditar: boolean;
@@ -58,6 +64,7 @@ function Linha({
   mostrarNegocio: boolean;
   /** Já resolvido por quem monta a lista; `null` = sem responsável conhecido. */
   nomeDoResponsavel: string | null;
+  setores: ReadonlyMap<string, Sector>;
 }) {
   const t = useT();
   const tag = useTagDeIdioma();
@@ -65,7 +72,8 @@ function Linha({
   const [confirmando, setConfirmando] = useState(false);
 
   const encerrada = estaEncerrada(tarefa);
-  const atrasada = estaAtrasada(tarefa);
+  const urgencia = calcularUrgenciaDoPrazo(tarefa);
+  const estiloUrgencia = ESTILO_DA_URGENCIA[urgencia];
 
   const rotuloDaPrioridade: Record<PrioridadeDaTarefa, string> = {
     low: t("Baixa"),
@@ -98,7 +106,8 @@ function Linha({
         disabled={ocupada || !podeEditar}
         onClick={() => comBloqueio(() => aoAlternarConcluida(tarefa))}
         className={cn(
-          "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-md border transition-colors",
+          // O `before` estende a área de toque a 44px sem crescer o desenho de 16px.
+          "relative mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-md border transition-colors pointer-coarse:before:absolute pointer-coarse:before:-inset-3.5 pointer-coarse:before:content-['']",
           encerrada
             ? "border-primary bg-primary text-primary-foreground"
             : "border-muted-foreground/40 hover:border-primary",
@@ -129,7 +138,25 @@ function Linha({
           >
             {rotuloDaPrioridade[tarefa.priority]}
           </span>
-          <span className={cn("text-muted-foreground", atrasada && "font-semibold text-destructive")}>
+          {/* A ROTINA (#4595): a série e cada ocorrência que ela gerou levam o
+              mesmo selo, e é por ele que se vê que são a mesma rotina sem abrir
+              uma por uma. A próxima herda `recurrence_source_id`, e a série é a
+              linha que carrega a regra — as duas condições são o mesmo "faz
+              parte de uma rotina", e por isso o mesmo selo. */}
+          {tarefa.recurrence || tarefa.recurrence_source_id ? (
+            <span className="rounded-full border border-border px-2 py-0.5 text-muted-foreground">
+              {t("Rotina")}
+            </span>
+          ) : null}
+          <span
+            className={cn(
+              "flex items-center gap-1",
+              estiloUrgencia.textoPrazo,
+            )}
+          >
+            {estiloUrgencia.icone ? (
+              <span aria-hidden>{estiloUrgencia.icone}</span>
+            ) : null}
             {tarefa.due_date
               ? new Date(tarefa.due_date).toLocaleString(tag, {
                   day: "2-digit",
@@ -145,6 +172,7 @@ function Linha({
               {nomeDoResponsavel}
             </span>
           ) : null}
+          <SeloDeSetor setor={tarefa.setor} setores={setores} />
           {mostrarNegocio && tarefa.lead ? (
             <Link
               href={`/app/leads/${tarefa.lead.id}`}
@@ -159,11 +187,13 @@ function Linha({
       </div>
 
       {podeEditar ? (
-        <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+        // Escondidas até o hover SÓ onde existe hover: no toque elas ficavam
+        // invisíveis. Mesma regra de `components/kanban/KanbanCardActions.tsx`.
+        <div className="flex shrink-0 items-center gap-1 transition-opacity focus-within:opacity-100 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100">
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            className="md:h-7 md:w-7"
             aria-label={t("Editar a tarefa")}
             onClick={() => aoEditar(tarefa)}
           >
@@ -179,7 +209,7 @@ function Linha({
             <Button
               variant="destructive"
               size="sm"
-              className="h-7 px-2 text-[11px]"
+              className="px-2 text-[11px] md:h-7"
               disabled={ocupada}
               onClick={() => comBloqueio(() => aoApagar(tarefa))}
             >
@@ -189,7 +219,7 @@ function Linha({
             <Button
               variant="ghost"
               size="icon"
-              className="h-7 w-7"
+              className="md:h-7 md:w-7"
               aria-label={t("Apagar a tarefa")}
               onClick={() => setConfirmando(true)}
               onBlur={() => setConfirmando(false)}
@@ -210,6 +240,7 @@ export function ListaDeTarefas({
   aoEditar,
   aoApagar,
   mostrarNegocio = true,
+  setores = SEM_SETOR,
 }: Props) {
   const t = useT();
   const usuario = useUser();
@@ -218,6 +249,7 @@ export function ListaDeTarefas({
   // lê, a consulta nem sai e a linha fica sem o nome — nunca com um id cru.
   const membros = useAssignableMembers(podeEditar);
   const nomes = new Map((membros.data ?? []).map((m) => [m.user_id, m.full_name]));
+
 
   function nomeDoResponsavel(tarefa: Tarefa): string | null {
     if (!tarefa.assigned_to) return null;
@@ -268,6 +300,7 @@ export function ListaDeTarefas({
                 aoApagar={aoApagar}
                 mostrarNegocio={mostrarNegocio}
                 nomeDoResponsavel={nomeDoResponsavel(tarefa)}
+                setores={setores}
               />
             ))}
           </div>

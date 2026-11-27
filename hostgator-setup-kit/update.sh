@@ -20,6 +20,7 @@ source "$KIT_DIR/_common.sh"
 # shellcheck source=manutencao.sh
 source "$KIT_DIR/manutencao.sh"
 enter_project
+aviso_rede_do_supabase
 
 # ── 0-. O laço do diagnóstico (#1955) ───────────────────────────────────────
 # Toda execução termina com um arquivo legível — inclusive as que MORREM antes
@@ -101,6 +102,16 @@ setup_update_agent_cron
 PAR_VAPID_CRIADO=""
 PAR_LIGADO_AGORA=""
 completar_par_vapid .env
+
+# ── 0++. O consentimento de telemetria de quem já disse "sim" (#4936) ───────
+# Antes desta versão, o "sim" do install.sh virava `SENTRY_DSN=""` no .env. A
+# partir dela, vazio significa DESLIGADO e o aceite é `SENTRY_DSN=comunidade`.
+# Converter aqui é o que impede a atualização de apagar, em silêncio, o
+# consentimento de quem já havia aceitado — e sem pedir edição manual do .env,
+# que a doutrina de empacotamento proíbe (docs/doctrine/packaging.md).
+# Fica junto do par VAPID, ANTES das saídas de "nada a atualizar": aquelas saem
+# do script sem passar pelo `up -d`, e a conversão precisa ter acontecido.
+migrar_consentimento_de_telemetria .env
 subir_para_ler_o_par() {
   [ -n "$PAR_VAPID_CRIADO" ] || return 0
   PAR_VAPID_CRIADO=""
@@ -260,10 +271,53 @@ else
   c_grn "✓ preflight — as quatro imagens da $TARGET_TAG estão prontas no registro."
 fi
 
+# ── 1.6 A volta fica de prontidão (#2757) ──────────────────────────────────
+# Daqui para baixo a atualização VAI mexer no que está no ar. Esta marca é o
+# que autoriza o agente do host a voltar sozinho, sem ninguém do outro lado,
+# se o app não responder mais depois disto — é o caso em que o painel de
+# atualização está justamente dentro do app que parou, e nenhum botão salva.
+#
+# Nasce SÓ aqui: antes do preflight nada foi tocado (o `refuse` devolve RC 3 e
+# a versão atual segue no ar), e uma marca sem atualização de verdade seria
+# rollback disparado sobre uma queda qualquer. E só com a versão que ESTAVA no
+# ar — instalação fora de release não tem tag para onde voltar, e aí
+# `vigia_armar` fica calada em vez de prometer uma volta impossível.
+#
+# Quem DESARMA é o agente, quando vê o app respondendo (ou quando a janela de
+# validade fecha) — não este script: ele termina com o app saudável, mas é a
+# vigência de alguns minutos depois que prova que a versão nova continuou de
+# pé sob os primeiros requests e sob o primeiro cron novo.
+#
+# EXCETO quando esta execução É a volta: andar pra trás não arma. Sem isto a
+# própria volta gravaria uma marca nova (o `vigia_encerrar` do agente corre
+# ANTES de chamar este script), e o agente — vendo o app ainda fora do ar,
+# porque a queda não era da versão — voltaria de novo daqui a dois ciclos,
+# para a release que acabou de ser largada. As duas trocas se alternariam a
+# cada ~10 min, com backup e migration de cada vez, até a janela de duas
+# horas fechar: o laço que a issue apontou como risco principal. Uma ida,
+# uma vigília — quem está saindo não vigia.
+VOLTA_NO_TEMPO=""
+if [ -z "$MESMA_TAG" ]; then
+  # O MESMO critério da recusa lá em cima (e do agente): alvo contido no que
+  # roda aqui = versão anterior. `2` (não consegui ter certeza) não é volta
+  # comprovada, e aí armar continua sendo o lado seguro.
+  is_already_in_head "$TARGET_TAG" && VOLTA_NO_TEMPO=1 || VOLTA_NO_TEMPO=""
+fi
+if [ -n "$VOLTA_NO_TEMPO" ]; then
+  c_ylw "Volta para a $TARGET_TAG — a vigência pós-atualização não re-arma: quem está voltando não vigia."
+else
+  vigia_armar "$CURRENT_TAG"
+fi
+
 # ── 2. Backup de segurança ANTES de tocar no banco ───────────────────────────
 if [ -z "$SKIP_BACKUP" ]; then
   step "Backup de segurança (antes de mexer no banco)"
-  if bash "$KIT_DIR/backup.sh"; then
+  # BACKUP_ESPERA_LOCK: dois caminhos chamam o backup.sh (este e o cron diário),
+  # e no mesmo segundo eles disputam a mesma pasta (#4222). Aqui não vale "o
+  # outro está fazendo": este backup é a rede de segurança DESTA atualização, e
+  # seguir sem ele seria pior que esperar o outro terminar. A trava é do
+  # backup.sh; aqui só se diz que ela pode ser esperada.
+  if BACKUP_ESPERA_LOCK=300 bash "$KIT_DIR/backup.sh"; then
     c_grn "✓ backup feito. Ele só volta num banco VAZIO, não por cima deste (restore.sh; ver hostgator-setup-kit/README.md)."
   else
     if [ -n "${DESKCOMM_AGENT_REPORT:-}" ] || [ ! -t 0 ]; then
@@ -284,6 +338,12 @@ step "Baixando o código novo"
 if ! git checkout --quiet "$TARGET_TAG" 2>&1; then
   die "Não consegui trocar para a versão $TARGET_TAG (parece haver mudanças locais que divergem).
      Rode 'git status' pra ver, ou peça ajuda. NÃO mexi no banco — está tudo como estava."
+fi
+# Ida para frente: guarda de onde saiu. É para lá, e só para lá, que o agente
+# do host aceita voltar quando o pedido vem do app (ver agent.sh). Volta e
+# reinstalação da mesma versão não regravam: a origem continua a da última ida.
+if [ -z "$VOLTA_NO_TEMPO" ] && [ -z "$MESMA_TAG" ] && [ -n "$CURRENT_TAG" ]; then
+  printf '%s\n' "$CURRENT_TAG" > "$PROJECT_DIR/${ORIGEM_DA_ATUALIZACAO_ARQUIVO:-.update-de-onde-vim}" 2>/dev/null || true
 fi
 
 # As funções do kit são carregadas na linha 16, ANTES deste checkout — então,

@@ -10,19 +10,43 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { capabilitiesOf } from "@/lib/channels/capabilities";
 import type { ChannelProvider } from "@/lib/channels/types";
 import { ProspectingError } from "@/lib/prospecting/provider";
-import { campaignConfigSchema, prospectingInputSchema, type Prospect } from "@/lib/prospecting/schema";
+import {
+  campaignConfigSchema,
+  prospectingInputSchema,
+  type CampaignConfig,
+  type Prospect,
+} from "@/lib/prospecting/schema";
+import { listarCampanhasDaLista } from "@/lib/prospecting/campanhas-da-lista";
+import { arquivadaEm } from "@/lib/prospecting/arquivamento";
 import { configPadraoDaOrganizacao } from "@/lib/prospecting/config-padrao";
+import { provedorExigeCredencialDaOrganizacao } from "@/lib/prospecting/provedor";
 import { auditarSite } from "@/lib/prospecting/site-fetch";
-import { gravarPrevia } from "@/lib/prospecting/previa";
+import {
+  aprovarPrevia,
+  gravarPrevia,
+  previaDoAgente,
+} from "@/lib/prospecting/previa";
 import { gerarPreviaDoCandidato } from "@/lib/prospecting/previa-gerar";
 import { enriquecerSitesPendentes } from "@/lib/prospecting/site-enrich";
 import { lerPersonalizacao } from "@/lib/prospecting/personalizar";
 import {
+  completarLinksDoContato,
+  contatoPrecisaDeLinks,
+  linksDoCandidato,
+} from "@/lib/prospecting/links-do-candidato";
+import {
   activateCampaign,
   adjustPace,
+  adjustTags,
+  arquivarCampanha,
+  assertCanalLivre,
   configureCredential,
   createSearch,
+  desarquivarCampanha,
   descartarDesmarcadas,
+  editBriefing,
+  exigirAprovacaoAntesDoPrimeiroContato,
+  moverListaParaNovaCampanha,
   selecionarNaFila,
   validateConfig,
   withProspectingLock,
@@ -42,6 +66,7 @@ const ORDENACAO_POR_SCORE = `(least(greatest(coalesce((p.data->>'rating')::float
     * case when coalesce(c.config->'ofertas'->>0, 'site') like '%automacao%' then 0.4 else 0.3 end
   + case when coalesce((p.data->'site'->>'provisorio')::boolean, false) then 18
     else case coalesce(p.data->'site'->>'classe', '')
+      when 'nao-medido' then 18
       when 'sem-site' then case when coalesce(c.config->'ofertas'->>0, 'site') like '%automacao%' then 20 else 30 end
       when 'agregador' then case when coalesce(c.config->'ofertas'->>0, 'site') like '%automacao%' then 20 else 30 end
       when 'site-ruim' then case when coalesce(c.config->'ofertas'->>0, 'site') like '%automacao%' then 14 else 22 end
@@ -51,13 +76,38 @@ const ORDENACAO_POR_SCORE = `(least(greatest(coalesce((p.data->>'rating')::float
       else 0 end end) desc, p.created_at desc`;
 function failure(error: unknown, requestId: string) {
   return fail(
-    "prospecting_unavailable",
+    // O CÓDIGO do erro quando ele declara um (conflito de número:
+    // `prospecting_channel_busy`); sem ele, o genérico de sempre.
+    error instanceof ProspectingError
+      ? (error.codigo ?? "prospecting_unavailable")
+      : "prospecting_unavailable",
     error instanceof ProspectingError
       ? error.message
       : "Não foi possível concluir a operação. Verifique a configuração e tente novamente.",
     error instanceof ProspectingError ? error.status : 500,
-    { requestId, headers },
+    {
+      requestId,
+      headers,
+      // `details` é o caminho para a tela oferecer "abrir essa campanha" em vez
+      // de só mostrar a frase — sem ele o 409 do número ocupado obrigava o
+      // operador a procurar a campanha a pé.
+      ...(error instanceof ProspectingError && error.detalhes
+        ? { details: error.detalhes }
+        : {}),
+    },
   );
+}
+async function validateConfigUsingPool(
+  pool: ReturnType<typeof getRequestPool>,
+  organizationId: string,
+  config: CampaignConfig,
+): Promise<CampaignConfig> {
+  const client = await pool.connect();
+  try {
+    return await validateConfig(client, organizationId, config);
+  } finally {
+    client.release();
+  }
 }
 export async function GET(req: NextRequest) {
   const requestId = randomUUID();
@@ -81,10 +131,10 @@ export async function GET(req: NextRequest) {
       ordenar === "score" ? ORDENACAO_POR_SCORE : "p.created_at desc";
     const [settings, campaigns, candidates, agents, channels, stages, organizacao] = await Promise.all([
       db.query("select organization_id from prospecting_settings where organization_id=$1", [org]),
-      db.query(
-        "select id,name,search,config,status,search_status,run_id,cost_usd,result_count,skipped_count,error,next_send_at,created_at from prospecting_campaigns where organization_id=$1 order by created_at desc limit 50",
-        [org],
-      ),
+      // #4947: a contagem do cartão vem das LINHAS da lista, e não da coluna
+      // `result_count` — ver `campanhas-da-lista.ts`. A ordem (#4359) e o teto de 50
+      // continuam lá, junto da explicação.
+      listarCampanhasDaLista(db, org),
       db.query(
         `select p.id,p.campaign_id,p.data,p.status,p.selected,p.error,p.lead_id,p.conversation_id,p.attempted_at,p.automatic_sends,p.exit_offered_at,m.status as message_status,ct.is_blocked,case when l.stage_id::text=c.config->>'qualified_stage_id' then 'qualified' when v.last_inbound_at is not null then 'replied' else p.status end as progress from prospecting_candidates p join prospecting_campaigns c on c.organization_id=p.organization_id and c.id=p.campaign_id left join crm_leads l on l.organization_id=p.organization_id and l.id=p.lead_id left join conversations v on v.organization_id=p.organization_id and v.id=p.conversation_id left join messages m on m.organization_id=p.organization_id and m.id=p.message_id left join contacts ct on ct.organization_id=p.organization_id and ct.id=p.contact_id where p.organization_id=$1 order by ${ordemCandidatos} limit 5000`,
         [org],
@@ -114,13 +164,20 @@ export async function GET(req: NextRequest) {
     const previaPadrao = await configPadraoDaOrganizacao(db, org)
       .then((p) => p !== null)
       .catch(() => false);
+    // `configured` libera a busca na tela. O `local-http` (#2942) não grava chave
+    // por organização (a URL é da instalação), então a linha em
+    // prospecting_settings nunca existe para ele. Escolha desconhecida cai na
+    // régua antiga: a busca falha fechado no POST, a lista não cai aqui.
+    const configured =
+      !!settings.rows.length ||
+      !(await provedorExigeCredencialDaOrganizacao(db, org).catch(() => true));
     const personalizacao = lerPersonalizacao(
       (organizacao.rows[0] as { settings?: unknown } | undefined)?.settings,
     );
     return ok(
       {
-        configured: !!settings.rows.length,
-        campaigns: campaigns.rows,
+        configured,
+        campaigns,
         candidates: candidates.rows,
         previa_padrao: previaPadrao,
         personalizacao,
@@ -205,6 +262,35 @@ export async function POST(req: NextRequest) {
       result = next;
       // O histórico precisa dizer DE QUANTO PARA QUANTO — só o nome da ação não diz.
       auditMetadata = { operation: body.action, previous, next };
+    } else if (body.action === "move_list") {
+      const movida = await moverListaParaNovaCampanha(pool, org, body.id, body.request_id);
+      result = movida;
+      // Só contagens e ids de campanha: nenhuma linha de empresa vai para a trilha.
+      auditMetadata = {
+        operation: body.action,
+        new_campaign_id: movida.campaign_id,
+        moved: movida.moved,
+        repeated: movida.repeated,
+      };
+    } else if (body.action === "adjust_tags") {
+      // Mesma régua do ritmo (spec 27): só campanha pausada, e a auditoria diz de quanto para quanto.
+      const { previous, next } = await adjustTags(pool, org, body.id, body.contact_tags);
+      result = next;
+      auditMetadata = { operation: body.action, previous, next };
+    } else if (body.action === "edit_briefing") {
+      // Mesma régua do ritmo (#4570): só campanha pausada. O texto e as ofertas são
+      // lidos da config a cada turno, então o que se grava aqui alcança as próximas
+      // conversas — e o histórico já trocado não é reescrito. A auditoria guarda o
+      // texto anterior, que é o único registro de como a campanha falava antes.
+      const { previous, next } = await editBriefing(pool, org, body.id, {
+        instruction: body.instruction,
+        qualification: body.qualification,
+        ofertas: body.ofertas,
+        usar_ficha_digital: body.usar_ficha_digital,
+        fonte_da_abordagem: body.fonte_da_abordagem,
+      });
+      result = next;
+      auditMetadata = { operation: body.action, previous, next };
     } else if (body.action === "select") {
       result = await withProspectingLock(pool, org, async (db) => {
         const campaign = (
@@ -276,7 +362,7 @@ export async function POST(req: NextRequest) {
       // somente leitura: a copy que a pessoa revisa vira o rascunho que o tick
       // envia, e a gravação precisa de trilha.
       const linhas = await pool.query(
-        "select pc.id, pc.data, pc.status, pc.contact_id, pc.campaign_id, c.config, c.search from prospecting_candidates pc join prospecting_campaigns c on c.organization_id=pc.organization_id and c.id=pc.campaign_id where pc.organization_id=$1 and pc.campaign_id=$2 and pc.id=$3",
+        "select pc.id, pc.data, pc.status, pc.contact_id, pc.campaign_id, c.config, c.search, c.status as campaign_status from prospecting_candidates pc join prospecting_campaigns c on c.organization_id=pc.organization_id and c.id=pc.campaign_id where pc.organization_id=$1 and pc.campaign_id=$2 and pc.id=$3",
         [org, body.id, body.candidate_id],
       );
       const linha = linhas.rows[0] as
@@ -287,6 +373,7 @@ export async function POST(req: NextRequest) {
             contact_id: string | null;
             config: unknown;
             search: { niche?: string };
+            campaign_status: string;
           }
         | undefined;
       if (!linha) throw new ProspectingError("Candidato não encontrado.", 404);
@@ -295,7 +382,12 @@ export async function POST(req: NextRequest) {
       // guarda sozinho saem do mesmo código. Esta rota só traduz o motivo em HTTP.
       // Campanha ainda sem agente (busca nova): a prévia usa o agente PADRÃO da
       // organização, como o preparo automático — o botão e o tick não divergem.
-      const configDaCampanha = campaignConfigSchema.safeParse(linha.config);
+      if (body.config && linha.campaign_status !== "draft" && linha.campaign_status !== "paused")
+        throw new ProspectingError("Pause a campanha antes de preparar ou revisar uma prévia.", 409);
+      const configParaPrevia = body.config
+        ? await validateConfigUsingPool(pool, org, body.config)
+        : linha.config;
+      const configDaCampanha = campaignConfigSchema.safeParse(configParaPrevia);
       const padrao =
         configDaCampanha.success && configDaCampanha.data.agent_id
           ? null
@@ -303,7 +395,7 @@ export async function POST(req: NextRequest) {
       const gerada = await gerarPreviaDoCandidato(
         pool,
         org,
-        padrao ? { ...linha, config: padrao.config } : linha,
+        padrao ? { ...linha, config: padrao.config } : { ...linha, config: configParaPrevia },
       );
       if (!gerada.ok) {
         if (gerada.motivo === "auditoria_pendente")
@@ -340,7 +432,7 @@ export async function POST(req: NextRequest) {
           actorApiTokenId: auth.apiTokenId ?? null,
           resourceType: "prospecting",
           resourceId: body.candidate_id,
-          metadata: { operation: body.action, score: score.valor },
+          metadata: { operation: body.action, score: score?.valor ?? null },
           requestId,
         });
       } catch (error) {
@@ -352,6 +444,60 @@ export async function POST(req: NextRequest) {
         });
       }
       result = { mensagem: gerada.texto, estrategia, score, salva };
+    } else if (body.action === "aprovar_previa") {
+      if (auth.actor.type !== "user")
+        return fail("forbidden", "A aprovação da primeira abordagem exige uma sessão humana.", 403, {
+          requestId,
+          headers,
+        });
+      const aprovadoEm = new Date().toISOString();
+      result = await withProspectingLock(pool, org, async (db) => {
+        const linha = (
+          await db.query<{
+            id: string;
+            data: Prospect;
+            status: string;
+            selected: boolean;
+            config: unknown;
+            campaign_status: string;
+          }>(
+            "select pc.id,pc.data,pc.status,pc.selected,c.config,c.status as campaign_status from prospecting_candidates pc join prospecting_campaigns c on c.organization_id=pc.organization_id and c.id=pc.campaign_id where pc.organization_id=$1 and pc.campaign_id=$2 and pc.id=$3",
+            [org, body.id, body.candidate_id],
+          )
+        ).rows[0];
+        if (!linha) throw new ProspectingError("Candidato não encontrado.", 404);
+        if (linha.selected === false || !["new", "queued"].includes(linha.status))
+          throw new ProspectingError("Só é possível aprovar uma empresa ainda não abordada e selecionada.", 409);
+        if (!["draft", "paused"].includes(linha.campaign_status))
+          throw new ProspectingError("Pause a campanha antes de aprovar a prévia.", 409);
+        const configBruta = body.config ?? campaignConfigSchema.parse(linha.config);
+        const config = await validateConfig(db, org, configBruta);
+        const previa = previaDoAgente(linha.data, config.agent_id, config.briefing_editado_em, config.fonte_da_abordagem ?? "estrategia");
+        if (!previa)
+          throw new ProspectingError("Gere uma nova prévia com o agente escolhido antes de aprová-la.", 409);
+        const gravada = await aprovarPrevia(db, {
+          organizationId: org,
+          campaignId: body.id,
+          candidateId: body.candidate_id,
+          agentId: config.agent_id,
+          baseadaEm: previa.baseada_em,
+          geradaEm: previa.gerada_em,
+          approverUserId: auth.actor.id,
+          approvedAt: aprovadoEm,
+        });
+        if (!gravada) throw new ProspectingError("A prévia mudou. Gere e revise a versão atual.", 409);
+        return { approved: true, approved_at: aprovadoEm };
+      });
+      await audit({
+        action: "prospecting.preview_approved",
+        organizationId: org,
+        actorUserId: auth.actor.type === "user" ? auth.actor.id : null,
+        resourceType: "prospecting",
+        resourceId: body.candidate_id,
+        metadata: { campaignId: body.id },
+        requestId,
+      });
+      return ok(result, { requestId, headers });
     } else if (body.action === "verificar_sites") {
       // "Verificar agora" (spec 24): ADIANTA o que o preparo automático do tick
       // faria sozinho (`prepararCandidatos`) — o MESMO enriquecimento, com teto de
@@ -368,6 +514,66 @@ export async function POST(req: NextRequest) {
         enriquecidos: enriquecido.enriquecidos,
         classes: enriquecido.classes,
       };
+    } else if (body.action === "completar_fichas") {
+      // "Completar fichas" (spec 26 §3.3): para cada candidato da campanha que já tem
+      // contato, acrescenta à ficha os links que faltam (o que a pessoa digitou fica).
+      // Teto de 100 GRAVAÇÕES por clique: quem já está completo não escreve e não conta
+      // no teto, então clicar de novo avança. `faltam` = quem ainda precisa depois do
+      // teto, medido só por leitura (mesmo predicado da escrita). Ordem por id: a mesma
+      // em todo clique. Toda leitura e escrita filtra `organization_id` (fonte: a sessão).
+      const TETO_DE_GRAVACOES = 100;
+      const resumo = await withProspectingLock(pool, org, async (db) => {
+        const candidatos = (
+          await db.query<{ contact_id: string; data: Prospect }>(
+            "select contact_id, data from prospecting_candidates where organization_id=$1 and campaign_id=$2 and contact_id is not null order by id",
+            [org, body.id],
+          )
+        ).rows;
+        let completadas = 0;
+        let jaCompletas = 0;
+        let semLinks = 0;
+        let faltam = 0;
+        for (const candidato of candidatos) {
+          const links = linksDoCandidato(candidato.data);
+          if (Object.keys(links).length === 0) {
+            semLinks++;
+            continue;
+          }
+          if (completadas >= TETO_DE_GRAVACOES) {
+            if (await contatoPrecisaDeLinks(db, org, candidato.contact_id, links)) faltam++;
+            else jaCompletas++;
+            continue;
+          }
+          if (await completarLinksDoContato(db, org, candidato.contact_id, links)) completadas++;
+          else jaCompletas++;
+        }
+        return { completadas, ja_completas: jaCompletas, sem_links: semLinks, faltam };
+      });
+      result = resumo;
+      // Sem endereços na trilha: só contagens (o log não carrega dado de contato).
+      auditMetadata = {
+        operation: body.action,
+        completadas: resumo.completadas,
+        ja_completas: resumo.ja_completas,
+        sem_links: resumo.sem_links,
+      };
+    } else if (body.action === "arquivar" || body.action === "desarquivar") {
+      // #4359 — ARQUIVAR NÃO EXCLUI. O único efeito é o marcador `config.arquivada_em`
+      // (e a pausa de uma campanha que estava `running`): negócio, conversa,
+      // candidato e custo ficam intactos. Fechada ao token, porque esconder campanha
+      // é gesto de quem está lendo a lista.
+      const arquivamento =
+        body.action === "arquivar"
+          ? await arquivarCampanha(pool, org, body.id)
+          : await desarquivarCampanha(pool, org, body.id);
+      result = arquivamento;
+      // O estado DEPOIS do gesto vai para a trilha: "arquivei" sem dizer que a
+      // campanha ficou pausada não deixa conferir, depois, se o envio parou.
+      auditMetadata = {
+        operation: body.action,
+        ja_estava: arquivamento.ja_estava,
+        status: arquivamento.status,
+      };
     } else {
       result = await withProspectingLock(pool, org, async (db) => {
         const c = (
@@ -377,20 +583,45 @@ export async function POST(req: NextRequest) {
           )
         ).rows[0];
         if (!c?.config) throw new ProspectingError("Campanha pausada não encontrada.", 404);
-        await validateConfig(db, org, c.config);
-        if (
-          (
-            await db.query(
-              "select id from prospecting_campaigns where organization_id=$1 and status='running'",
-              [org],
-            )
-          ).rows.length
-        )
-          throw new ProspectingError("Pause a outra campanha antes de retomar.", 409);
-        await db.query(
-          "update prospecting_campaigns set status='running',error=null,next_send_at=greatest(next_send_at,now()+interval '1 minute'),updated_at=now() where organization_id=$1 and id=$2",
-          [org, body.id],
-        );
+        // #4359: campanha ARQUIVADA não retoma pelo servidor. Ela saiu da lista para
+        // não ser mais vista; voltar a enviar sem passar pelo "desarquivar" seria uma
+        // campanha invisível disparando mensagem. Desarquivar primeiro devolve o
+        // cartão à lista, e aí o Retomar vira um gesto de quem está vendo a campanha.
+        if (arquivadaEm(c.config))
+          throw new ProspectingError("Desarquive a campanha antes de retomar.", 409);
+        const config = await validateConfig(db, org, c.config);
+        // Aprovação da prévia é OPÇÃO da campanha (desligada por padrão): só com
+        // ela ligada a retomada confere quem ainda não recebeu o primeiro contato.
+        if (config.exigir_aprovacao_da_previa) {
+          const candidatos = await db.query<{
+            id: string;
+            data: Prospect;
+            phone: string | null;
+            selected: boolean;
+            automatic_sends: number;
+          }>(
+            "select id,data,phone,selected,automatic_sends from prospecting_candidates where organization_id=$1 and campaign_id=$2 and status='queued' and selected is not false and coalesce(automatic_sends,0)=0",
+            [org, body.id],
+          );
+          exigirAprovacaoAntesDoPrimeiroContato(candidatos.rows, config);
+        }
+        // A MESMA régua do `start` (#3896): a retomada também é do NÚMERO. Com
+        // a checagem só no início, retomar uma campanha pausada continuava
+        // travada pela organização — o caminho inverso do mesmo defeito.
+        await assertCanalLivre(db, org, body.id, config.channel_session_id);
+        try {
+          await db.query(
+            "update prospecting_campaigns set status='running',channel_session_id=$3,error=null,channel_down_since=null,next_send_at=greatest(next_send_at,now()+interval '1 minute'),updated_at=now() where organization_id=$1 and id=$2",
+            [org, body.id, config.channel_session_id],
+          );
+        } catch (error) {
+          // 23505 = `prospecting_one_running_canal`: alguém ocupou o número
+          // entre a checagem e o UPDATE. Vira o MESMO 409 com o nome de quem
+          // ocupa — nunca um 500.
+          if ((error as { code?: string }).code === "23505")
+            await assertCanalLivre(db, org, body.id, config.channel_session_id);
+          throw error;
+        }
         return { resumed: true };
       });
     }

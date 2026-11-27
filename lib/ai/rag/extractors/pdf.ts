@@ -105,11 +105,26 @@ const PDFJS_LEGACY = "pdfjs-dist/legacy/build/pdf.mjs";
 const HEAP_DO_FILHO_MB = 160;
 const TEMPO_MAXIMO_MS = 60_000;
 
-/** `processo-a-parte` só sob o `tsx` — é o único lugar onde o custo existe. */
+/**
+ * `processo-a-parte` só sob o `tsx` — é o único lugar onde o custo existe.
+ *
+ * O `tsx` aparece no `execArgv` de duas formas, e as duas já foram produção:
+ *
+ * - pela CLI (`pnpm exec tsx`, o CMD antigo da imagem): caminhos absolutos,
+ *   `.../node_modules/tsx/dist/loader.mjs`;
+ * - pelo hook (`node --import tsx`, o CMD desde o #2823): o especificador CRU,
+ *   `tsx` — ou `tsx/esm`, ou `--import=tsx`. Sem barra antes.
+ *
+ * Até 21/10/2026 só a primeira forma era reconhecida. O #2823 trocou o CMD, a
+ * estratégia caiu para `em-processo` em silêncio, e o primeiro PDF recebido
+ * derrubou o worker com `heap limit` — o incidente de 15/09 de volta.
+ */
 export function estrategiaPadrao(
   execArgv: readonly string[] = process.execArgv,
 ): EstrategiaDeExtracao {
-  return execArgv.some((arg) => /[\\/]tsx[\\/]/.test(arg)) ? "processo-a-parte" : "em-processo";
+  return execArgv.some((arg) => /(^|[\\/=])tsx([\\/]|$)/.test(arg))
+    ? "processo-a-parte"
+    : "em-processo";
 }
 
 /**
@@ -348,7 +363,18 @@ async function extrairEmProcessoAParte(
 
   const texto = resposta.texto ?? "";
   if (texto.length === 0) {
-    throw new PdfExtractError("pdfjs-dist extracted no text (possibly image-only PDF)");
+    // O MESMO motivo do caminho em processo (#4889). Antes desta linha o filho
+    // respondia `{ ok: true, texto: "" }` e o pai lançava o erro sem o terceiro
+    // argumento — ou seja, `motivo` caía no padrão `"falha"`. Quem decide pelo
+    // motivo (`ingest/documento.ts`) classificava PDF escaneado como defeito de
+    // infraestrutura, e o worker de mídia tratava como erro real: cinco
+    // tentativas, aviso na Central e um `event_dead` aberto que esconde a
+    // próxima falha de verdade (índice único da migration 0491).
+    throw new PdfExtractError(
+      "pdfjs-dist extracted no text (possibly image-only PDF)",
+      undefined,
+      "sem_texto",
+    );
   }
   return texto;
 }

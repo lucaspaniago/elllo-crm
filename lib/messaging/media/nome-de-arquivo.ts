@@ -8,6 +8,13 @@
  */
 const INVISIVEIS = /[\u0000-\u001F\u007F-\u009F\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
 
+/**
+ * A mesma classe, exportada para o envio (#4524) — a limpeza é UMA. Uma segunda
+ * cópia da regex no caminho de saída divergiria da de entrada no primeiro
+ * caractere novo que alguém acrescentasse.
+ */
+export const INVISIVEIS_DO_NOME = INVISIVEIS;
+
 /** Teto em caracteres (code points) — o limite usual de nome de arquivo. */
 export const NOME_DE_ARQUIVO_MAX = 255;
 
@@ -18,4 +25,41 @@ export function nomeDeArquivoLimpo(bruto: unknown): string | null {
     .join("")
     .trim();
   return nome ? nome : null;
+}
+
+/** A chave de `messages.metadata` onde a ingestão guarda o nome (#2613). */
+export const CHAVE_DO_NOME_NA_METADATA = "media_filename" as const;
+
+/**
+ * O nome original que a ingestão guardou em `metadata.media_filename`, lido por
+ * VALOR — a mesma guarda de `nomeDeArquivoLimpo`, porque o JSONB é entrada de
+ * fora. `null` quando não há nome: é ele que separa "mostre o nome" de "mostre
+ * o fallback", e inventar um nome aqui contaminaria as duas pontas (o rótulo e
+ * o `Content-Disposition` do download).
+ */
+export function nomeOriginalDaMensagem(metadata: unknown): string | null {
+  if (!metadata || typeof metadata !== "object") return null;
+  return nomeDeArquivoLimpo(
+    (metadata as Record<string, unknown>)[CHAVE_DO_NOME_NA_METADATA],
+  );
+}
+
+/**
+ * O nome que um anexo ENVIADO leva para o WhatsApp (#4457).
+ *
+ * O caminho no bucket é `out-<uuid>.<ext>` — nasce aleatório de propósito, para
+ * dois arquivos de mesmo nome não se sobrescreverem. Usar o basename dele como
+ * `filename` do documento é o que fazia o cliente ver `out-3f9a2b.pdf` no lugar
+ * do nome que a pessoa escolheu.
+ *
+ * O nome original vence sempre que existir; o basename fica só como último
+ * recurso de quem chama a API sem nome (upload por token, que só manda o
+ * `media_storage_path`). É o mesmo caminho que a ingestão faz do outro lado
+ * (`nomeDeArquivoLimpo` antes de gravar e antes de exibir).
+ */
+export function nomeDoAnexoParaEnviar(
+  original: unknown,
+  storagePath: string,
+): string | undefined {
+  return nomeDeArquivoLimpo(original) ?? (storagePath.split("/").pop() || undefined);
 }

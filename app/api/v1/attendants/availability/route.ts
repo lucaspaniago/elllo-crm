@@ -12,6 +12,10 @@
  * ela NÃO entra na elegibilidade nem no plantão: `is_available` continua sendo
  * só a decisão, e a jornada continua decidindo o resto (`estaDePlantao`).
  *
+ * O SETOR de cada atendente (`sector_id`, migration 0801) vem junto: a tabela
+ * da Equipe agrupa e filtra por ele, e uma segunda chamada por linha seria o
+ * N+1 que o roster existe para evitar. `null` = sem setor.
+ *
  * Por que service role + filtro manual de org (doutrina): a RLS de
  * user_organizations restringe manager a ver só a PRÓPRIA linha (só admin vê o
  * roster inteiro), então listar a equipe pelo client user-scoped devolveria 1
@@ -21,14 +25,14 @@
  */
 import { randomUUID } from "node:crypto";
 import type { NextRequest } from "next/server";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { ok, fail } from "@/lib/api/wrappers";
+import { resolveAuthDual, tetoDeEscritaDoToken } from "@/lib/api/auth-dual";
 import { estaPresente } from "@/lib/atendimento/presenca";
 import { isServiceRoleConfigured } from "@/lib/audit";
-import { requireRole } from "@/lib/auth/require-role";
 import { carregarRosterDeAtendimento } from "@/lib/escalacao/atendentes";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { createClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
 
@@ -44,24 +48,60 @@ interface AvailabilityRow {
   last_heartbeat_at: string | null;
 }
 
-export async function GET(_req: NextRequest): Promise<Response> {
+/**
+ * user_id → FILAS da pessoa (migration 9062: N setores por atendente).
+ * Org filtrada à mão: o admin client ignora RLS.
+ */
+async function setoresPorAtendente(
+  client: Pick<SupabaseClient, "from">,
+  organizationId: string,
+): Promise<Map<string, string[]>> {
+  const { data, error } = await client
+    .from("attendant_sector_members")
+    .select("user_id, sector_id")
+    .eq("organization_id", organizationId);
+  if (error) throw new Error(error.message);
+  const porUsuario = new Map<string, string[]>();
+  for (const m of (data ?? []) as Array<{ user_id: string; sector_id: string }>) {
+    const lista = porUsuario.get(m.user_id) ?? [];
+    lista.push(m.sector_id);
+    porUsuario.set(m.user_id, lista);
+  }
+  return porUsuario;
+}
+
+export async function GET(req: NextRequest): Promise<Response> {
   const requestId = randomUUID();
   const agora = new Date();
 
-  const authz = await requireRole("agent", { requestId, resource: "attendant_availability" });
+  const authz = await resolveAuthDual(req, {
+    requestId,
+    resource: "attendant_availability",
+    role: "agent",
+    scope: "config:read",
+    tokenRole: "admin",
+  });
   if (!authz.ok) return authz.response;
-  const { org: activeOrg } = authz;
+  const teto = await tetoDeEscritaDoToken(authz, "attendants_availability", requestId);
+  if (teto) return teto;
+  const orgId = authz.organizationId;
 
   // Dev sem service role: devolve só as linhas de availability (org-wide via RLS
   // própria da tabela), sem roster completo nem nomes.
   if (!isServiceRoleConfigured()) {
-    const supabase = await createClient();
+    const supabase = authz.supabase;
     const { data, error } = await supabase
       .from("attendant_availability")
       .select(SELECT_COLS)
-      .eq("organization_id", activeOrg.orgId);
+      .eq("organization_id", orgId);
     if (error) return fail("internal_error", error.message, 500, { requestId });
     const rows = (data ?? []) as AvailabilityRow[];
+    let setores: Map<string, string[]>;
+    try {
+      setores = await setoresPorAtendente(supabase, orgId);
+    } catch (err) {
+      return fail("internal_error", err instanceof Error ? err.message : "setores", 500, { requestId });
+    }
     return ok(
       rows.map((r) => ({
         ...r,
@@ -69,6 +109,12 @@ export async function GET(_req: NextRequest): Promise<Response> {
         name: null,
         email: null,
         current_load: 0,
+        sector_ids: setores.get(r.user_id) ?? [],
+        // Compat (revisão do mantenedor, 31/10): `sector_id` continua saindo
+        // com o primeiro setor, para quem já lê este campo não perder dado. Ele
+        // só perde a graça quando o N:N acrescenta o segundo — e aí o campo
+        // novo (`sector_ids`) é quem manda.
+        sector_id: (setores.get(r.user_id) ?? [])[0] ?? null,
         // Presença DERIVADA aqui, e não no cliente: o prazo do sinal mora em
         // `lib/atendimento/presenca.ts`, e uma tela que recalculasse a conta
         // sozinha passaria a discordar do servidor no dia em que o prazo
@@ -85,8 +131,12 @@ export async function GET(_req: NextRequest): Promise<Response> {
   // do agente ("quem pode assumir agora?") lê exatamente a mesma coisa. Enquanto
   // a regra morou aqui dentro, o agente escalava para uma fila cega.
   let roster;
+  let setores: Map<string, string[]>;
   try {
-    roster = await carregarRosterDeAtendimento(admin, activeOrg.orgId, agora);
+    [roster, setores] = await Promise.all([
+      carregarRosterDeAtendimento(admin, orgId, agora),
+      setoresPorAtendente(admin, orgId),
+    ]);
   } catch (err) {
     return fail("internal_error", err instanceof Error ? err.message : "roster", 500, {
       requestId,
@@ -104,7 +154,8 @@ export async function GET(_req: NextRequest): Promise<Response> {
       const u = userRes?.user;
       names.set(userId, {
         name: (u?.user_metadata?.full_name as string | undefined) ?? null,
-        email: u?.email ?? null,
+        // E-mail de login só para a sessão: a lista que o token recebe não o leva.
+        email: authz.via === "session" ? (u?.email ?? null) : null,
       });
     }),
   );
@@ -119,6 +170,8 @@ export async function GET(_req: NextRequest): Promise<Response> {
     schedule: m.agenda,
     updated_at: m.atualizadoEm,
     current_load: m.cargaAtual,
+    sector_ids: setores.get(m.userId) ?? [],
+    sector_id: (setores.get(m.userId) ?? [])[0] ?? null,
     // Presença: "tem sinal recente" — nunca "está de plantão". Os dois campos
     // andam juntos de propósito, para a tela poder dizer as duas coisas sem
     // confundi-las (o selo de Status lê o plantão; a linha de presença lê isto).

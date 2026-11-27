@@ -15,7 +15,7 @@ export interface RetentionContext {
   timezone: string;
 }
 
-export type RetentionKind = "protection" | "compliance" | "quality";
+export type RetentionKind = "protection" | "compliance" | "quality" | "handoff";
 
 export interface RetentionCopy {
   kind: RetentionKind;
@@ -27,6 +27,11 @@ const TITLES: Record<RetentionKind, string> = {
   protection: "Resposta segurada pela proteção do número",
   compliance: "Resposta bloqueada por conformidade",
   quality: "Resposta retida para correção",
+  // #3310: família própria porque as outras três mentem aqui. A resposta não foi
+  // segurada por proteção do número, nem bloqueada por conformidade (nada de
+  // LGPD aconteceu), nem retida para correção: o automático está PAUSADO porque
+  // a conversa foi passada para a equipe.
+  handoff: "Resposta pausada: a conversa está com a equipe",
 };
 
 /**
@@ -66,16 +71,35 @@ export function retentionCopy(
         `${t("O limite diário de envios do número foi atingido — proteção contra bloqueio do WhatsApp. Libera de novo amanhã, a partir das")} ${ctx.window_start_hour}h.`,
       );
     case "mass_identical":
+      // #4943: o aviso dizia o que aconteceu e parava aí — quem operava entendia
+      // que precisava DESLIGAR a proteção e não achava onde. A segunda frase é o
+      // próximo passo em linguagem de quem escreve o prompt, e a terceira diz o
+      // que o gate isenta (curtas e links de pagamento), senão o medo de repetir
+      // um link de cobrança faz o operador parar de cobrar.
+      // O mesmo código chega de um passo de follow-up com uma redação só, cujo
+      // texto mora no passo e não no prompt — daí a saída das outras redações.
       return make(
         "protection",
         t(
-          "A mesma mensagem estava se repetindo em massa por este número. O envio foi segurado para variar o texto e não parecer robô para o WhatsApp.",
+          "A mesma mensagem estava se repetindo em massa por este número — o envio foi segurado para não parecer robô para o WhatsApp. Para liberar: no prompt, descreva o objetivo de cada mensagem em vez do texto exato e peça para personalizar com o nome e o contexto do lead; se for um passo de follow-up com texto fixo, acrescente outras redações ao passo. Mensagens curtas e links de pagamento não entram nessa conta.",
         ),
       );
     case "contato_bloqueado":
       return make(
         "compliance",
         t("O contato pediu para não receber mensagens (opt-out). Nada será enviado a ele."),
+      );
+    case "atendimento_com_humano":
+      // #3310: este código é o `force_human` SOZINHO — a conversa foi passada
+      // para a equipe (ou alguém a pausou à mão), e o contato NÃO pediu para
+      // sair. A frase tem de dizer as duas coisas que a equipe precisa: por que
+      // o automático está calado e como trazê-lo de volta — senão sobra o
+      // caminho mais caro, que é ler o cliente vivo como descadastrado.
+      return make(
+        "handoff",
+        t(
+          "O atendimento automático está pausado porque a conversa foi passada para a equipe. Use “Devolver ao automático” para a IA voltar a responder.",
+        ),
       );
     case "lgpd_anonymized":
       return make(

@@ -1,9 +1,11 @@
 "use client";
 import { useMutation, useQueryClient, type InfiniteData } from "@tanstack/react-query";
+import { useRef } from "react";
 import { apiClient } from "@/lib/api/client";
 import { randomId } from "@/lib/random-id";
 import { showApiError } from "@/components/feedback/ApiErrorToast";
 import type { Message } from "@/lib/types/messaging";
+import { TETO_DE_MIDIA_MS } from "@/lib/waha/teto-de-midia";
 
 interface SendArgs {
   conversation_id: string;
@@ -11,6 +13,11 @@ interface SendArgs {
   media_url?: string;
   media_mime?: string;
   media_storage_path?: string;
+  /**
+   * O nome ORIGINAL do anexo (#4457). Sem ele o servidor só conhece o basename
+   * aleatório do bucket, e é esse nome que o cliente veria no WhatsApp.
+   */
+  media_filename?: string;
   media_size_bytes?: number;
   type?: string;
   /**
@@ -31,12 +38,67 @@ interface MessagesPage {
   meta?: { cursor?: string | null; has_more?: boolean };
 }
 
+/** O mesmo envio (mesma conversa, mesmo conteúdo) tem a mesma identidade. */
+const identidadeDoEnvio = (input: SendArgs) => JSON.stringify(input);
+
+/**
+ * Por quanto tempo o mesmo texto depois de um erro ainda é "tentar de novo".
+ * Mais tarde que isto, "ok" ou "Bom dia!" é uma mensagem nova — e o recibo do
+ * servidor vale 24h, então reaproveitar a chave calaria a mensagem nova.
+ */
+const REAPROVEITA_CHAVE_MS = 2 * 60 * 1000;
+
+/**
+ * Quanto o navegador espera um envio COM MÍDIA — acima do teto do servidor.
+ *
+ * O servidor espera o WAHA até `TETO_DE_MIDIA_MS` (vídeo de dezenas de MB, com
+ * `convert`). Com o prazo padrão de escrita do `apiClient` (30s), a tela
+ * desistia antes: um vídeo de ~40 MB saía, a bolha mostrava ✓, e o diálogo
+ * "Enviar anexo" voltava com "Enviar" ativo. Clicar de novo subia o arquivo
+ * outra vez (caminho novo no Storage, logo chave de idempotência nova) e o
+ * cliente recebia o vídeo DUAS vezes — medido na prova de tela do #4422.
+ *
+ * Esperando mais que o servidor, a resposta (enviada ou falhou) sempre chega,
+ * e o diálogo fica em "enviando" até lá. Os 30s de folga cobrem o que a rota faz
+ * antes do envio ao WAHA (resolver o chat, até `TETO_PADRAO_MS`, e o banco).
+ */
+export const PRAZO_DO_ENVIO_DE_MIDIA_MS = TETO_DE_MIDIA_MS + 30_000;
+
 export function useSendMessage() {
   const qc = useQueryClient();
+  /**
+   * A chave de idempotência de cada envio que FALHOU há pouco.
+   *
+   * Depois de um erro de rede o texto volta ao campo; se a pessoa toca Enviar
+   * de novo com o mesmo texto, a chave é a mesma e o servidor devolve o recibo
+   * do primeiro envio em vez de mandar duas vezes (o primeiro pode ter saído).
+   * Texto editado é outra mensagem e ganha outra chave. Só em memória: nada do
+   * atendimento fica guardado no aparelho.
+   */
+  const chaves = useRef(new Map<string, { chave: string; falhouEm: number }>());
 
   return useMutation({
-    mutationFn: async (input: SendArgs) =>
-      apiClient.post<{ data: Message }>("/api/v1/messages", input),
+    mutationFn: async (input: SendArgs) => {
+      const identidade = identidadeDoEnvio(input);
+      const anterior = chaves.current.get(identidade);
+      // Só a chave de um envio que FALHOU há pouco. A de um envio ainda em voo
+      // não: o campo foi limpo no envio, então o mesmo texto de novo é a pessoa
+      // escrevendo outra vez, e não o mesmo toque repetido.
+      const idempotencyKey = anterior && Date.now() - anterior.falhouEm < REAPROVEITA_CHAVE_MS
+        ? anterior.chave
+        : randomId();
+      chaves.current.delete(identidade);
+      try {
+        const comMidia = Boolean(input.media_storage_path || input.media_url);
+        return await apiClient.post<{ data: Message }>("/api/v1/messages", input, {
+          idempotencyKey,
+          ...(comMidia ? { timeoutMs: PRAZO_DO_ENVIO_DE_MIDIA_MS } : {}),
+        });
+      } catch (err) {
+        chaves.current.set(identidade, { chave: idempotencyKey, falhouEm: Date.now() });
+        throw err;
+      }
+    },
     onMutate: async (args) => {
       if (args.media_storage_path || args.media_url || args.type === "contact") return {};
 
@@ -75,6 +137,8 @@ export function useSendMessage() {
         edited_at: null,
         revoked_at: null,
         created_at: new Date().toISOString(),
+        // Sem isto a regra de reenvio não sabe que a linha acabou de nascer.
+        updated_at: new Date().toISOString(),
       };
 
       qc.setQueryData<InfiniteData<MessagesPage>>(queryKey, (old) => {

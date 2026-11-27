@@ -25,6 +25,21 @@ export const TOOLS_FUNIL = declararTools([
     pacotes: ["vender"],
   },
   {
+    name: "crm_count_leads",
+    category: "read",
+    rotulo: "Contar oportunidades do funil",
+    explicacao:
+      "Conta quantas oportunidades de venda existem, por funil, etapa ou situação, sem abrir nenhuma delas: devolve só números.",
+    oQueToca: "Funil de vendas",
+    risco: "seguro",
+    // "reter" e não "vender": "vender" é o pacote padrão do onboarding e cada
+    // capacidade ali sobe a exigência de TODOS os outros pacotes; "organizar" já
+    // está no teto sozinho. A saída é de PACOTE, não de constante (o teto está
+    // sendo movido por outro PR). Medido: "reter" sozinho fecha em 27 de 27.
+    // Trava: tests/unit/pacote-reserva-vaga-da-critica.test.ts.
+    pacotes: ["reter"],
+  },
+  {
     name: "crm_get_lead",
     category: "read",
     rotulo: "Ver uma oportunidade",
@@ -33,6 +48,36 @@ export const TOOLS_FUNIL = declararTools([
     oQueToca: "Funil de vendas",
     risco: "seguro",
     pacotes: ["vender"],
+  },
+  {
+    name: "crm_list_lead_attachments",
+    category: "read",
+    rotulo: "Listar os documentos do negócio",
+    explicacao:
+      "Mostra os arquivos que a equipe anexou numa oportunidade — nome, tamanho e data —, para a IA saber o que já está guardado ali antes de pedir o documento de novo ao cliente.",
+    oQueToca: "Funil de vendas",
+    risco: "seguro",
+    // `reter`, e NÃO `vender` (#4544). Duas capacidades novas no pacote default
+    // do onboarding empurravam o `evoluir` — o segundo pacote que cabe no teto —
+    // de 27 para 29 e obrigavam a subir `TETO_TOOLS_POR_AGENTE`, número que o
+    // #4534 também move. Aqui elas ficam ao lado de
+    // `crm_propose_lead_fields_from_document`, que é o consumidor do id que esta
+    // ferramenta devolve: a leitura do documento e a proposta de campos para o
+    // card são a MESMA jornada. Medido: com elas em `reter`, o onboarding segue
+    // em 22 e o `evoluir` volta a exigir 27.
+    pacotes: ["reter"],
+  },
+  {
+    name: "crm_get_lead_attachment",
+    category: "read",
+    rotulo: "Ler o conteúdo de um documento do negócio",
+    explicacao:
+      "Lê o texto de um arquivo anexado à oportunidade (por exemplo a apólice do seguro ou o voucher da viagem), para a IA encontrar ali dados como número da apólice, localizador e hotel sem pedir tudo de novo ao cliente. Imagem não é lida.",
+    oQueToca: "Funil de vendas",
+    risco: "seguro",
+    // Mesma jornada do `crm_list_lead_attachments` (ver o comentário acima): a
+    // dupla mora em `reter`, com o `crm_propose_lead_fields_from_document`.
+    pacotes: ["reter"],
   },
   {
     name: "crm_list_pipelines",
@@ -49,7 +94,7 @@ export const TOOLS_FUNIL = declararTools([
     category: "read",
     rotulo: "Ver a previsão do funil",
     explicacao:
-      "Mostra quanto deve entrar e quando: os negócios abertos somados por moeda e por mês, com a chance de fechamento que cada etapa tem, e à parte o que ainda não tem data nem chance definida.",
+      "Mostra quanto deve entrar e quando: os negócios abertos por moeda e por mês, com a chance de fechamento que cada etapa tem — e com o valor único (setup) e a recorrência nova (mensalidade) em parcelas SEPARADAS, nunca somadas. À parte, o que ainda não tem data nem chance definida.",
     oQueToca: "Funil de vendas",
     risco: "seguro",
     // Leitura GERENCIAL (quanto entra e quando), não passo de venda: o agente
@@ -99,6 +144,19 @@ export const TOOLS_FUNIL = declararTools([
     // "reter", como `crm_propose_reactivation`: é o cliente que voltou depois
     // de uma perda. Em "vender" ela entraria no agente que nasce no onboarding
     // e estouraria o teto dos outros pacotes (pacote-reserva-vaga-da-critica).
+    pacotes: ["reter"],
+  },
+  {
+    name: "crm_propose_lead_fields_from_document",
+    category: "write",
+    rotulo: "Propor dados de um documento para o card",
+    explicacao:
+      "Separa, de um documento que o agente leu (voucher, bilhete, apólice), os valores dos campos do card do negócio como PROPOSTAS — nada é gravado sem que uma pessoa confirme campo a campo, com o trecho do documento à vista.",
+    oQueToca: "Funil de vendas",
+    risco: "atencao",
+    // Pós-venda (o funil "Experiência do Cliente" da issue): quem atende depois
+    // da compra é o agente de retenção, não o de aquisição — em "vender" ela
+    // entraria no agente que nasce no onboarding (pacote-reserva-vaga-da-critica).
     pacotes: ["reter"],
   },
 ]);

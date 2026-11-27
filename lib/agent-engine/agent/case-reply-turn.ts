@@ -23,6 +23,7 @@ import { withFields } from '../obs/logger';
 import type { JobRow } from '../queue/queue';
 import type { LeadContext } from '../edge/crm/get-lead-context';
 import { ritualBlocks, runAgentTurn, type InboundTurnDeps, type LeadCheckpointRow } from './inbound-turn';
+import { sondarEMissaoLigado } from './abertura/recados-abertos';
 import type { LeadStateRow } from './lead-state';
 
 /**
@@ -100,6 +101,25 @@ async function resolveCaseConversation(
 }
 
 /**
+ * Fork elllo (voz1, 26/11/2026): a instrução do caso CONCLUÍDO. Desligada (padrão), byte a
+ * byte a de sempre. Ligada (org em SONDAR_E_MISSAO_ORGS), pede a resposta com as palavras da
+ * Helô e cobrindo o que mais estava em aberto — "encerre o assunto" fazia a Helô repetir a
+ * nota do dono ("o Lucas me retornou… agradece a sua atenção") e esquecer o resto da mesa
+ * (as camisetas do Calebe).
+ */
+export function instrucaoDoCasoConcluido(caseIdShort: string, note: string, naVozDaHelo: boolean): string {
+  if (!naVozDaHelo) {
+    return `O responsável concluiu o caso #${caseIdShort} com a nota: "${note}". Repasse essa conclusão ao lead de forma natural e encerre o assunto.`;
+  }
+  return (
+    `O responsável concluiu o caso #${caseIdShort} com a nota: "${note}". Conte isso à pessoa com as suas palavras, ` +
+    'sem copiar as da nota nem as desta instrução e sem dizer que alguém "retornou". Cubra tudo o que estava em aberto ' +
+    'na conversa: se a nota não fala de uma parte, diga com franqueza que dessa ele ainda não falou. Se for um não, ' +
+    'seja calorosa, específica e deixe a porta aberta. O agradecimento dele vira seu, em palavras de gente.'
+  );
+}
+
+/**
  * Abertura da re-entrada do caso: instrução determinística do responsável
  * (não interpretação do modelo) no topo do sufixo + o ritual padrão. Exportada
  * PURA para teste — igual a `buildFollowupOpeningMessage`.
@@ -113,12 +133,13 @@ export function buildCaseReplyOpeningMessage(
   context: LeadContext,
   notesIndexBlock: string,
   projeta = false,
+  naVozDaHelo = false,
 ): string {
   const caseIdShort = caseId.slice(0, 8);
   const note = body?.trim() ?? '';
   const instructionBlock =
     action === 'resolved'
-      ? `O responsável concluiu o caso #${caseIdShort} com a nota: "${note}". Repasse essa conclusão ao lead de forma natural e encerre o assunto.`
+      ? instrucaoDoCasoConcluido(caseIdShort, note, naVozDaHelo)
       : `Para avançar no caso #${caseIdShort}, o responsável interno precisa que você obtenha do cliente: "${note}". ` +
         `Pergunte ao lead de forma natural. Assim que tiver a resposta, chame a tool provide_case_update com case_id "${caseId}".`;
   return [
@@ -166,11 +187,14 @@ export function createCaseReplyTurnHandler(deps: InboundTurnDeps) {
       return;
     }
 
+    const naVozDaHelo = sondarEMissaoLigado(tenantId);
     await runAgentTurn(deps, job, pool, ctx, {
       channelSessionId: caseConversation.channelSessionId,
       conversationId: caseConversation.conversationId,
+      // Fork elllo (voz2): a nota do dono no caso concluído vira autorização do que ela repete.
+      ...(naVozDaHelo && action === 'resolved' && payload.body ? { decisaoDoDono: payload.body } : {}),
       buildOpening: ({ previous, leadState, context, notesIndexBlock, projeta }) =>
-        buildCaseReplyOpeningMessage(action, payload.case_id, payload.body, previous, leadState, context, notesIndexBlock, projeta),
+        buildCaseReplyOpeningMessage(action, payload.case_id, payload.body, previous, leadState, context, notesIndexBlock, projeta, naVozDaHelo),
     });
   };
 }

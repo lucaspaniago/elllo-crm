@@ -53,6 +53,7 @@ export function EditorDeSkill({ nome, aberto, aoMudarAberto }: Props) {
 
   const [descricao, setDescricao] = useState("");
   const [keywords, setKeywords] = useState("");
+  const [etiquetas, setEtiquetas] = useState("");
   const [corpo, setCorpo] = useState("");
   const [probe, setProbe] = useState<string[] | undefined>(undefined);
 
@@ -60,7 +61,8 @@ export function EditorDeSkill({ nome, aberto, aoMudarAberto }: Props) {
     const s = skill.data;
     if (!aberto || !s) return;
     setDescricao(s.description);
-    setKeywords(s.matcher.any_keywords.join(", "));
+    setKeywords((s.matcher.any_keywords ?? []).join(", "));
+    setEtiquetas((s.matcher.any_tags ?? []).join(", "));
     setCorpo(s.body);
     setProbe(s.matcher.probe_keywords);
   }, [aberto, skill.data]);
@@ -72,10 +74,7 @@ export function EditorDeSkill({ nome, aberto, aoMudarAberto }: Props) {
 
   function salvarSkill() {
     const anyKeywords = parseKeywords(keywords);
-    if (anyKeywords.length === 0) {
-      toast.error(t("Informe pelo menos uma palavra-chave de ativação."));
-      return;
-    }
+    const anyTags = parseKeywords(etiquetas);
     if (descricao.trim() === "") {
       toast.error(t("A descrição é obrigatória."));
       return;
@@ -94,12 +93,19 @@ export function EditorDeSkill({ nome, aberto, aoMudarAberto }: Props) {
         body: {
           description: descricao.trim(),
           body: corpo,
-          matcher: { any_keywords: anyKeywords, ...(probe ? { probe_keywords: probe } : {}) },
+          matcher: {
+            // Skill sem palavra-chave é legítima (#4458): matcher vazio = fora do roteamento
+            // automático, usada só quando o roteiro a puxa pelo nome. Lista vazia seria
+            // recusada pela API, então o campo simplesmente não vai.
+            ...(anyKeywords.length > 0 ? { any_keywords: anyKeywords } : {}),
+            ...(probe ? { probe_keywords: probe } : {}),
+            ...(anyTags.length > 0 ? { any_tags: anyTags } : {}),
+          },
         },
       },
       {
         onSuccess: () => {
-          toast.success(`Skill "${nome}" ${t("atualizada — já vale para os agentes.")}`);
+          toast.success(`Skill "${nome}" ${t("atualizada — já vale para os agentes que usam esta skill.")}`);
           aoMudarAberto(false);
         },
         onError: (err) => showApiError(err),
@@ -114,7 +120,7 @@ export function EditorDeSkill({ nome, aberto, aoMudarAberto }: Props) {
           <DialogTitle>{t("Editar skill")} “{nome}”</DialogTitle>
           <DialogDescription>
             {t(
-              "Salvar cria uma versão nova (a antiga fica no histórico). O corpo só entra na conversa quando uma das palavras-chave aparece na mensagem do cliente.",
+              "Salvar cria uma versão nova (a antiga fica no histórico). O corpo só entra na conversa quando uma das palavras-chave aparece na mensagem do cliente, ou quando a conversa ou o contato tem uma das etiquetas de ativação.",
             )}
           </DialogDescription>
         </DialogHeader>
@@ -171,7 +177,26 @@ export function EditorDeSkill({ nome, aberto, aoMudarAberto }: Props) {
                 placeholder={t("consulta, horário, preço")}
               />
               <p className="text-xs text-muted-foreground">
-                {t("A skill é carregada quando o cliente escreve uma destas palavras.")}
+                {parseKeywords(keywords).length === 0
+                  ? t(
+                      "Sem palavras-chave, a skill não entra sozinha na conversa — ela só roda quando o roteiro de atendimento a puxa pelo nome.",
+                    )
+                  : t("A skill é carregada quando o cliente escreve uma destas palavras.")}
+              </p>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="skill-tags">{t("Etiquetas que ativam (opcional)")}</Label>
+              <Input
+                id="skill-tags"
+                value={etiquetas}
+                onChange={(e) => setEtiquetas(e.target.value)}
+                placeholder={t("odonto, clínica")}
+              />
+              <p className="text-xs text-muted-foreground">
+                {t(
+                  "Se a conversa ou o contato tiver uma destas etiquetas, a skill entra mesmo sem a palavra-chave.",
+                )}
               </p>
             </div>
 

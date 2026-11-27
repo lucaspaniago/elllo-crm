@@ -1,5 +1,6 @@
 /** Contrato de apresentação; não importa cliente de banco nem configuração do servidor. */
 import type { CatalogEntry, ExtensionConfiguration, ExtensionManifest } from "./manifest";
+import type { PaletaDeTema } from "./tema";
 import type { ExtensionOperationKind, ExtensionOperationStatus } from "./vocabulario";
 
 export interface ExtensionOperationView {
@@ -24,6 +25,11 @@ export interface ExtensionOperationView {
   organizations_affected: number | null;
   created_at: string;
   updated_at: string;
+  /**
+   * Só na resposta de instalar um módulo `connected`: `true` quando a instalação foi gravada mas o
+   * segredo ainda não existe (a gravação falhou). Quem administra gera o primeiro ao girar o segredo.
+   */
+  secret_pending?: boolean;
 }
 
 /** A versão para a qual "Desfazer a última troca" volta. Só quem administra a instalação a vê. */
@@ -48,6 +54,13 @@ export interface InstalledExtensionView {
   /** Revisão do VÍNCULO desta organização (a precondição de configurar). */
   revision: number;
   configuration: ExtensionConfiguration;
+  /**
+   * A paleta que o MANIFESTO desta versão declara em `contributions.theme`.
+   * `null` = a extensão não oferece tema: a tela não mostra o campo, para não
+   * oferecer uma escolha que o host recusaria (o gancho só aplica a paleta que
+   * o manifesto declarou — `temaAplicavel`, `lib/extensions/tema.ts`).
+   */
+  theme_palette: PaletaDeTema | null;
   compatible: boolean;
   compatibility_reason: string | null;
   /** Revisão da INSTALAÇÃO (a precondição de atualizar, desfazer e remover). */
@@ -59,6 +72,26 @@ export interface InstalledExtensionView {
   removed_at: string | null;
   /** O vínculo desta organização foi desligado pela remoção e ainda não foi reativado. */
   deactivated_by_removal_at: string | null;
+  /**
+   * O perfil do manifesto desta versão; `null` quando o pacote gravado não pôde ser lido. A tela só
+   * oferece o interruptor para `connected`: guia declarativo e módulo de dados não têm o que desligar.
+   */
+  profile: ExtensionManifest["profile"] | null;
+  /**
+   * O interruptor da instalação (spec 33, D8): quando o responsável a desligou. `null` = ligada.
+   * Só significa algo para o perfil `connected`; a F1 guarda e mostra, a F2/F4 leem para negar acesso.
+   */
+  disabled_at: string | null;
+  /**
+   * Só para quem administra a instalação e só no perfil `connected`: `true` quando a instalação
+   * ainda não tem segredo. O botão de segredo vira "Gerar segredo". Ausente = não se sabe.
+   */
+  secret_pending?: boolean;
+  /**
+   * As permissões `area.*` que ESTA organização consentiu para o módulo `connected` (spec 33, F3).
+   * Ausente ou vazio = nenhuma área consentida. Só as declaradas no pacote podem estar aqui.
+   */
+  consented_areas?: string[];
 }
 
 export interface RemovedInstallationView {

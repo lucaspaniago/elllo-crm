@@ -38,28 +38,59 @@
  * ajuste, e a divergência seria invisível — os dois "aplicam o plano", só que
  * um deles duplica tarefa.
  */
-import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 
-import { emitLeadActivity } from "@/lib/leads/activity-emitter";
+import type { Db } from "@/lib/db";
 import {
   criarTarefaInterna,
   recusaDeConfiguracao,
-  type AtribuicaoDaTarefa,
   type ContatoDoPedido,
   type LeadDoPedido,
 } from "@/lib/tarefas/criar-tarefa";
+import { insereAtividadeDoLead } from "@/lib/tarefas/atividade";
+import { LIMITES_DO_PLANO } from "@/lib/tarefas/limites-do-plano";
+import {
+  MOTIVOS_SEM_PRAZO,
+  camposDoNegocio,
+  prazoDoPasso as prazoNormalizado,
+  prazoDoPassoSchema,
+  resolverPrazoDoCampo,
+  type MotivoSemPrazo,
+  type PrazoDoPasso,
+} from "@/lib/tarefas/prazo-relativo";
 import { PRIORIDADES_DA_TAREFA, type PrioridadeDaTarefa } from "@/lib/tarefas/tipos";
+import { fusoUtilizavel } from "@/lib/tempo/fusos";
+
+/**
+ * A atribuição de um PASSO de plano — as duas formas que `passoSchema` aceita.
+ *
+ * NÃO é `AtribuicaoDaTarefa` inteira: aquele tipo carrega `{ exato }`, que é o
+ * dono LITERAL da ocorrência de uma série (`#4595`) e nunca é escrito à mão num
+ * plano — `passoSchema` recusa. Alargar este campo para o tipo da tarefa fazia
+ * a tela (`planos/_client.tsx`) ler `usuario_id` numa união onde ele não existe.
+ */
+export type AtribuicaoDoPasso = "dono_do_lead" | { usuario_id: string };
 
 /** Um passo, já normalizado: `ordem` SEMPRE preenchida com a posição final. */
 export interface PassoDePlano {
   ordem: number;
   titulo: string;
   descricao: string | null;
-  /** Dias entre a APLICAÇÃO e o prazo da tarefa — relativo, nunca data solta. */
-  vence_em_dias: number;
+  /**
+   * De ONDE o prazo conta: da aplicação (`dias_a_partir_de_hoje`, o modo de
+   * sempre) ou de um campo de data do card (`campo_de_data`, #4717 item 4).
+   * Relativo sempre — data solta no plano envelhece no dia seguinte.
+   */
+  prazo: PrazoDoPasso;
+  /**
+   * Formato ANTIGO do prazo: N dias a partir da aplicação. Continua aceito na
+   * LEITURA de `settings` gravado antes do #4717 item 4, e o schema normaliza
+   * para `prazo` — quem grava usa `prazo`. A tela lê este campo para abrir um
+   * plano antigo no seletor sem quebrar (`prazoNaTela`).
+   */
+  vence_em_dias?: number;
   prioridade: PrioridadeDaTarefa;
-  atribuir_a: AtribuicaoDaTarefa;
+  atribuir_a: AtribuicaoDoPasso;
 }
 
 export interface PlanoDeTarefas {
@@ -78,22 +109,56 @@ export interface PlanoDeTarefas {
  * leitura de todas as outras — `settings` é JSON escrito por gente, não por
  * schema.
  */
-const passoSchema = z.object({
-  ordem: z.number().int().min(1).max(500).optional(),
-  titulo: z.string().trim().min(1).max(200),
-  descricao: z.string().max(1000).nullish(),
-  vence_em_dias: z.number().int().min(0).max(365),
-  prioridade: z.enum(PRIORIDADES_DA_TAREFA).default("medium"),
-  atribuir_a: z
-    .union([z.literal("dono_do_lead"), z.object({ usuario_id: z.string().uuid() })])
-    .default("dono_do_lead"),
-});
+const passoSchema = z
+  .object({
+    ordem: z.number().int().min(1).max(500).optional(),
+    titulo: z.string().trim().min(1).max(LIMITES_DO_PLANO.tituloDoPasso),
+    descricao: z.string().max(LIMITES_DO_PLANO.descricaoDoPasso).nullish(),
+    /**
+     * O modo de sempre — e o ÚNICO obrigatório até o #4717 item 4.
+     *
+     * Virou opcional porque o passo de campo de data mede o prazo por outro
+     * relógio (a data do card), e exigir `vence_em_dias` junto seria gravar um
+     * número que ninguém lê. Plano antigo continua válido: o campo está lá, e
+     * `prazoDoPasso` o transforma em `{ modo: "dias_a_partir_de_hoje" }`.
+     */
+    vence_em_dias: z.number().int().min(0).max(LIMITES_DO_PLANO.venceEmDias).optional(),
+    /** O prazo relativo a um campo de data do negócio. Ausente = modo de sempre. */
+    prazo: prazoDoPassoSchema.optional(),
+    prioridade: z.enum(PRIORIDADES_DA_TAREFA).default("medium"),
+    atribuir_a: z
+      .union([z.literal("dono_do_lead"), z.object({ usuario_id: z.string().uuid() })])
+      .default("dono_do_lead"),
+  })
+  // Duas recusas, e as duas são de CONFIGURAÇÃO do passo, não do card: o passo
+  // sem prazo nenhum nunca foi aceito, e o modo de campo sem a chave do campo
+  // chegaria à aplicação como "sem prazo para sempre" — indistinguível, na
+  // tela, de um card que só não preencheu o campo.
+  .superRefine((passo, ctx) => {
+    if (passo.prazo?.modo === "campo_de_data" && !passo.prazo.campo) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["prazo", "campo"],
+        message: "passo_sem_campo_de_data",
+      });
+    }
+    if (!passo.prazo && passo.vence_em_dias === undefined) {
+      ctx.addIssue({ code: "custom", path: ["vence_em_dias"], message: "passo_sem_prazo" });
+    }
+    // O negativo só tem sentido contado de uma DATA do card ("7 dias antes da
+    // viagem"). Contado da aplicação, -5 é tarefa que já nasce vencida — o
+    // formato antigo (`vence_em_dias`, mínimo 0) nunca deixou, e a forma nova
+    // não pode abrir pela API o que a tela e o formato antigo recusam.
+    if (passo.prazo?.modo === "dias_a_partir_de_hoje" && passo.prazo.dias < 0) {
+      ctx.addIssue({ code: "custom", path: ["prazo", "dias"], message: "prazo_negativo_sem_campo" });
+    }
+  });
 
 export const planoSchema = z.object({
   id: z.string().trim().min(1).max(64),
-  nome: z.string().trim().min(1).max(120),
-  descricao: z.string().max(300).nullish(),
-  passos: z.array(passoSchema).min(1).max(30),
+  nome: z.string().trim().min(1).max(LIMITES_DO_PLANO.nome),
+  descricao: z.string().max(LIMITES_DO_PLANO.descricao).nullish(),
+  passos: z.array(passoSchema).min(1).max(LIMITES_DO_PLANO.passos),
 });
 
 /**
@@ -106,7 +171,7 @@ export const planoSchema = z.object({
  * seria invisível — os dois "validam o plano", só que um deixa passar o que o
  * outro ignora.
  */
-export const planosSchema = z.array(planoSchema).max(50);
+export const planosSchema = z.array(planoSchema).max(LIMITES_DO_PLANO.planos);
 
 /**
  * Lê `organizations.settings` e devolve SÓ os planos válidos, na ordem em que
@@ -141,14 +206,22 @@ export function lePlanosDoSettings(settings: unknown): PlanoDeTarefas[] {
         id: plano.data.id,
         nome: plano.data.nome,
         descricao: plano.data.descricao ?? null,
-        passos: ordenados.map((passo, indice) => ({
-          ordem: indice + 1,
-          titulo: passo.titulo,
-          descricao: passo.descricao ?? null,
-          vence_em_dias: passo.vence_em_dias,
-          prioridade: passo.prioridade,
-          atribuir_a: passo.atribuir_a,
-        })),
+        passos: ordenados.map((passo, indice) => {
+          const prazo = prazoNormalizado(passo);
+          return {
+            ordem: indice + 1,
+            titulo: passo.titulo,
+            descricao: passo.descricao ?? null,
+            prazo,
+            // O GET de `settings/task-plans` sempre devolveu `vence_em_dias`, e
+            // quem lê a API por fora conta com ele. No modo de sempre ele é o
+            // MESMO número do `prazo`; no de campo de data não há número que o
+            // signifique, e inventar um seria mentir o prazo.
+            ...(prazo.modo === "dias_a_partir_de_hoje" ? { vence_em_dias: prazo.dias } : {}),
+            prioridade: passo.prioridade,
+            atribuir_a: passo.atribuir_a,
+          };
+        }),
       },
     ];
   });
@@ -192,20 +265,31 @@ export interface PedidoDeAplicacao {
  * leu, e a ordem é metade do contrato de um plano.
  */
 export async function aplicarPlanoDeTarefas(
-  db: SupabaseClient,
+  db: Db,
   pedido: PedidoDeAplicacao,
 ): Promise<ResultadoDaAplicacao> {
   const { organizationId, leadId, planoId, origem, requestId, agora } = pedido;
   if (!leadId) return { ok: false, codigo: "sem_alvo" };
 
-  const { data: organizacao, error: erroOrg } = await db
-    .from("organizations")
-    .select("settings")
-    .eq("id", organizationId)
-    .maybeSingle();
-  if (erroOrg) return { ok: false, codigo: "falha", erro: erroOrg.message };
+  let organizacao: { settings?: unknown; timezone?: string | null } | null;
+  try {
+    // O `timezone` vem na MESMA leitura: o prazo de um passo de campo de data é
+    // dia de calendário do tenant (#4717 item 4), e uma segunda ida ao banco
+    // abriria a janela em que o fuso muda entre a leitura e a conta.
+    organizacao = await db.queryOne<{ settings?: unknown; timezone?: string | null }>(
+      `select settings, timezone
+         from organizations
+        where id = $1
+        limit 1`,
+      [organizationId],
+    );
+  } catch (err) {
+    return { ok: false, codigo: "falha", erro: mensagemDoErro(err) };
+  }
 
-  const plano = lePlanosDoSettings((organizacao as { settings?: unknown } | null)?.settings).find(
+  const plano = lePlanosDoSettings(
+    (organizacao as { settings?: unknown } | null)?.settings,
+  ).find(
     (p) => p.id === planoId,
   );
   if (!plano) return { ok: false, codigo: "plano_nao_encontrado" };
@@ -227,26 +311,14 @@ export async function aplicarPlanoDeTarefas(
   // `titulo_vazio`): o código que volta é o MESMO que voltaria antes, só que
   // sem nada gravado. `recusaDeConfiguracao` é a própria regra de
   // `criarTarefaInterna` — as duas portas não podem divergir.
-  const negocio = await db
-    .from("crm_leads")
-    .select("id, title, contact_id, owner_user_id")
-    .eq("id", leadId)
-    .eq("organization_id", organizationId)
-    .maybeSingle();
-  if (negocio.error) return { ok: false, codigo: "falha", erro: negocio.error.message };
-  const lead = negocio.data as LeadDoPedido | null;
+  const negocio = await lerNegocioDoPlano(db, organizationId, leadId);
+  if (negocio.erro) return { ok: false, codigo: "falha", erro: negocio.erro };
+  const lead = negocio.lead;
   if (!lead) return { ok: false, codigo: "sem_alvo" };
 
   const contactId = lead.contact_id ?? null;
-  const contato: ContatoDoPedido | null = contactId
-    ? (((
-        await db
-          .from("contacts")
-          .select("id, name, display_name")
-          .eq("id", contactId)
-          .eq("organization_id", organizationId)
-          .maybeSingle()
-      ).data as ContatoDoPedido | null) ?? null)
+  const contato = contactId
+    ? await lerContatoDoPlano(db, organizationId, contactId)
     : null;
 
   for (const passo of plano.passos) {
@@ -254,37 +326,104 @@ export async function aplicarPlanoDeTarefas(
     if (recusa) return { ok: false, codigo: recusa };
   }
 
+  const fuso = fusoUtilizavel(
+    (organizacao as { timezone?: string | null } | null)?.timezone,
+  );
+  const campos = camposDoNegocio(lead.custom_fields);
   const tarefa_ids: string[] = [];
+  /**
+   * Os passos que nasceram SEM prazo, com o campo que faltou.
+   *
+   * Não é log: vai no `payload` da marca e no `reason` da linha do tempo, que é
+   * a tela onde quem abriu o card lê o que aconteceu. Sem isso, a tarefa sem
+   * prazo é indistinguível de uma tarefa criada sem prazo por escolha — e
+   * ninguém vai olhar o campo do card para descobrir o que faltou.
+   */
+  const semPrazo: Array<{ ordem: number; campo: string; motivo: MotivoSemPrazo }> = [];
   for (const passo of plano.passos) {
-    const resultado = await criarTarefaInterna(db, {
+    const comum = {
       organizationId,
       titulo: passo.titulo,
       descricao: passo.descricao,
-      venceEmDias: passo.vence_em_dias,
       atribuirA: passo.atribuir_a,
       prioridade: passo.prioridade,
       leadId,
       origem,
+      plano: {
+        id: plano.id,
+        passo: passo.ordem,
+        campo: passo.prazo.modo === "campo_de_data" ? passo.prazo.campo : null,
+        dias: passo.prazo.dias,
+      },
       ...(requestId ? { requestId } : {}),
       ...(agora ? { agora } : {}),
-    });
-    if (!resultado.ok) return { ok: false, codigo: resultado.codigo, erro: resultado.erro };
+    };
+
+    // O prazo sai de um relógio ou do outro, nunca dos dois: passo de campo de
+    // data NÃO usa `agora` (é justamente o que o modo antigo não sabia fazer).
+    let resultado: Awaited<ReturnType<typeof criarTarefaInterna>>;
+    if (passo.prazo.modo === "campo_de_data") {
+      const resolvido = await resolverPrazoDoCampo(db, {
+        campo: passo.prazo.campo,
+        dias: passo.prazo.dias,
+        campos,
+        fuso,
+      });
+      if (resolvido.motivo) {
+        semPrazo.push({ ordem: passo.ordem, campo: passo.prazo.campo, motivo: resolvido.motivo });
+      }
+      resultado = await criarTarefaInterna(db, {
+        ...comum,
+        venceEm: resolvido.venceEm,
+        prazoMotivo: resolvido.motivo,
+      });
+    } else {
+      resultado = await criarTarefaInterna(db, { ...comum, venceEmDias: passo.prazo.dias });
+    }
+    // `ja_existe` NÃO é do domínio do plano: ele só nasce do índice único
+    // `(recurrence_source_id, due_date)`, quando o INSERT de uma OCORRÊNCIA de
+    // série é barrado (`criar-tarefa.ts`) — e nenhum passo de plano é ocorrência,
+    // porque `recurrenceSourceId` não é passado acima. Pôr o código em
+    // `CodigoDaAplicacao` prometeria à automação uma recusa que nunca acontece
+    // (e a ação a reportaria como `skipped` sem frase no mapa de motivos). Se
+    // ele chegar aqui, foi gravação recusada: `falha`, com o motivo à vista.
+    if (!resultado.ok) {
+      if (resultado.codigo === "ja_existe") {
+        return {
+          ok: false,
+          codigo: "falha",
+          erro: "ja_existe: o INSERT do passo foi recusado pelo índice de recorrência",
+        };
+      }
+      return { ok: false, codigo: resultado.codigo, erro: resultado.erro };
+    }
     tarefa_ids.push(resultado.tarefa_id);
   }
 
-  const gravada = await emitLeadActivity(db, {
+  const gravada = await insereAtividadeDoLead(db, {
     organizationId,
     leadId,
     type: "task_plan_applied",
     sourceModule: "tarefas",
     sourceId: null,
     actor: { type: "webhook_source", id: origem },
-    reason: `Plano «${plano.nome}» aplicado (${plano.passos.length} tarefas)`,
+    // O motivo de um passo sem prazo entra no MESMO texto que a pessoa lê na
+    // linha do tempo do negócio: campo de data é configuração do funil, não
+    // dado do cliente, e o operador precisa saber QUAL campo preencher para a
+    // tarefa ganhar prazo. O valor do campo NUNCA entra aqui (§9).
+    reason: `Plano «${plano.nome}» aplicado (${plano.passos.length} tarefas)${
+      semPrazo.length > 0
+        ? `; ${semPrazo.length} passo(s) sem prazo: ${semPrazo
+            .map((s) => `«${s.campo}» ${s.motivo === MOTIVOS_SEM_PRAZO.campoInvalido ? "com valor que não é data" : "vazio"}`)
+            .join(", ")}`
+        : ""
+    }`,
     payload: {
       plano_id: plano.id,
       plano_nome: plano.nome,
       passos: plano.passos.length,
       tarefa_ids,
+      ...(semPrazo.length > 0 ? { sem_prazo: semPrazo } : {}),
     },
   });
   // A marca É a idempotência: sem ela, a próxima aplicação duplica o que já
@@ -303,23 +442,81 @@ export async function aplicarPlanoDeTarefas(
  * UM negócio é curta, não vale operador Postgres por causa dela.
  */
 async function jaFoiAplicado(
-  db: SupabaseClient,
+  db: Db,
   organizationId: string,
   leadId: string,
   planoId: string,
 ): Promise<{ ja: boolean; erro?: string }> {
-  const { data, error } = await db
-    .from("crm_lead_activities")
-    .select("payload")
-    .eq("organization_id", organizationId)
-    .eq("lead_id", leadId)
-    .eq("type", "task_plan_applied")
-    .limit(200);
+  let linhas: Array<{ payload?: { plano_id?: unknown } }>;
+  try {
+    linhas = await db.query<{ payload?: { plano_id?: unknown } }>(
+      `select payload
+         from crm_lead_activities
+        where organization_id = $1
+          and lead_id = $2
+          and type = $3
+        limit 200`,
+      [organizationId, leadId, "task_plan_applied"],
+    );
+  } catch (err) {
+    return { ja: false, erro: mensagemDoErro(err) };
+  }
 
-  if (error) return { ja: false, erro: error.message };
-
-  const ja = (data ?? []).some(
-    (linha) => (linha as { payload?: { plano_id?: unknown } }).payload?.plano_id === planoId,
-  );
+  const ja = linhas.some((linha) => linha.payload?.plano_id === planoId);
   return { ja };
+}
+
+/** Mensagem crua do driver — o `erro` que o operador vê no `detail` da ação. */
+function mensagemDoErro(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * O negócio do plano, na organização do pedido.
+ *
+ * Erro de leitura é `falha` (infra) — aqui o PostgREST ANTIGO também
+ * distinguia, ao contrário da leitura tolerante de `criar-tarefa.ts`.
+ */
+async function lerNegocioDoPlano(
+  db: Db,
+  organizationId: string,
+  leadId: string,
+): Promise<{ lead: LeadDoPedido | null; erro?: string }> {
+  try {
+    const lead = await db.queryOne<LeadDoPedido>(
+      `select id, title, contact_id, owner_user_id, custom_fields
+         from crm_leads
+        where id = $1
+          and organization_id = $2
+        limit 1`,
+      [leadId, organizationId],
+    );
+    return { lead };
+  } catch (err) {
+    return { lead: null, erro: mensagemDoErro(err) };
+  }
+}
+
+/**
+ * O contato do negócio. Erro é tolerado (vira `null`), como era com o
+ * `.maybeSingle()` — o contato só serve para interpolar `{{contact.name}}`, e
+ * um contato ilegível recusa o passo por `titulo_vazio`, nunca grava torto.
+ */
+async function lerContatoDoPlano(
+  db: Db,
+  organizationId: string,
+  contactId: string,
+): Promise<ContatoDoPedido | null> {
+  try {
+    return await db.queryOne<ContatoDoPedido>(
+      `select id, name, display_name
+         from contacts
+        where id = $1
+          and organization_id = $2
+        limit 1`,
+      [contactId, organizationId],
+    );
+  } catch {
+    return null;
+  }
 }

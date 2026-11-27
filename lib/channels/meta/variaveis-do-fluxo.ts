@@ -29,6 +29,8 @@
  */
 import { z } from "zod";
 
+import { resolverVariaveis } from "@/lib/variaveis/resolvedor";
+
 import { slotKey } from "./build-components";
 import type { ParamSlot, TemplateContract } from "./template-contract";
 
@@ -46,6 +48,20 @@ export const fonteDeVariavelSchema = z.discriminatedUnion("kind", [
       .min(1)
       .max(60)
       .regex(/^[a-z][a-z0-9_]*$/i, "Use letras, números e underscore"),
+  }),
+  /**
+   * #3687 — um nome do CATÁLOGO, resolvido pelo MESMO resolvedor das telas
+   * (`lib/variaveis/resolvedor.ts`). É ADITIVA: as três origens acima continuam
+   * válidas e resolvem exatamente como antes (o mapa posicional gravado não
+   * muda); esta é a forma nova que o editor oferece em "Variável do sistema".
+   */
+  z.strictObject({
+    kind: z.literal("variavel"),
+    chave: z
+      .string()
+      .min(1)
+      .max(60)
+      .regex(/^[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*$/i, "Use letras, números, underscore e ponto"),
   }),
 ]);
 export type FonteDeVariavel = z.infer<typeof fonteDeVariavelSchema>;
@@ -86,7 +102,8 @@ function nomeParaSaudar(nome: string | null): string | null {
   return nome !== null && /\p{L}/u.test(nome) ? nome : null;
 }
 
-function valorDaFonte(fonte: FonteDeVariavel, dados: DadosParaVariaveis): string | null {
+/** O valor bruto de uma origem para este contato — `null` quando ela está vazia. A campanha reusa. */
+export function valorDaFonte(fonte: FonteDeVariavel, dados: DadosParaVariaveis): string | null {
   switch (fonte.kind) {
     case "contact_name":
       return nomeParaSaudar(dados.nomeDoContato);
@@ -97,6 +114,20 @@ function valorDaFonte(fonte: FonteDeVariavel, dados: DadosParaVariaveis): string
       if (typeof v === "string") return v;
       if (typeof v === "number" && Number.isFinite(v)) return String(v);
       return null;
+    }
+    case "variavel": {
+      // O resolvedor ÚNICO (#3687), com a política do fluxo: sem valor, vazio —
+      // e o passo é recusado com o motivo, como em qualquer variável. O nome já
+      // passou por `nomeParaSaudar`: telefone no lugar do nome não saúda.
+      const resolvido = resolverVariaveis(
+        `{{${fonte.chave}}}`,
+        {
+          nome: nomeParaSaudar(dados.nomeDoContato),
+          camposDoNegocio: dados.camposDoNegocio,
+        },
+        { fonte: "fluxo", quandoVazio: "vazio" },
+      );
+      return resolvido.texto.trim() === "" ? null : resolvido.texto;
     }
   }
 }
@@ -110,6 +141,8 @@ export function descreverFonte(fonte: FonteDeVariavel): string {
       return "primeiro nome do contato";
     case "lead_custom":
       return `campo "${fonte.key}" do negócio`;
+    case "variavel":
+      return `variável \`{{${fonte.chave}}}\``;
   }
 }
 

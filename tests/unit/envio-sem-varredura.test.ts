@@ -46,6 +46,7 @@ function store(prior: "nenhum" | "requested" | "accepted" | "vetoed" | "failed")
     rotate: vi.fn(async () => "ledger-rodado"),
     message: vi.fn(async () => null),
     update: vi.fn(async () => {}),
+    setMediaPath: vi.fn(async () => "unused-in-this-test"),
   };
 }
 
@@ -104,8 +105,12 @@ describe("store.message busca pela PK e só cai no metadata se a PK não achar",
     expect(await pgSendLedger(db).message("org", "k")).toEqual({ id: "k", status: "sent" });
     expect(db.sqls).toHaveLength(1);
     expect(db.sqls[0]).toMatch(/\bid=\$2/);
-    expect(db.sqls[0]).not.toContain("metadata");
-    expect(db.params[0]).toEqual(["org", "k"]);
+    // A busca sem índice (`metadata->>'idempotency_key'`) não acontece. O que lê
+    // `metadata` aqui é só a PROJEÇÃO da natureza da recusa
+    // (`lib/channels/falha-de-envio.ts`), nunca filtro.
+    expect(db.sqls[0]).not.toContain("idempotency_key");
+    expect(db.sqls[0]!.split(/\bwhere\b/i)[1]).not.toContain("metadata");
+    expect(db.params[0]).toEqual(["org", "k", "falha_de_envio"]);
   });
 
   it("pg: PK vazia → reserva pelo metadata (linha anterior à convenção)", async () => {
@@ -129,7 +134,11 @@ describe("store.message busca pela PK e só cai no metadata se a PK não achar",
       return q;
     });
     const sb = { from } as unknown as SupabaseClient;
-    expect(await supabaseSendLedger(sb).message("org", "k")).toEqual({ id: "k", status: "sent" });
+    expect(await supabaseSendLedger(sb).message("org", "k")).toEqual({
+      id: "k",
+      status: "sent",
+      metadata: { falha_de_envio: null },
+    });
     expect(filtros).toEqual([[["organization_id", "org"], ["id", "k"]]]);
   });
 });
@@ -147,7 +156,8 @@ describe("pacing: sem varrer o histórico do número", () => {
     const sql = (db.sqls[0] ?? "").replace(/\s+/g, " ");
     expect(sql).not.toMatch(/filter|max\(/i);
     expect(sql).toContain("order by sent_at desc limit 1");
-    expect(sql).toMatch(/and sent_at >= \$3\) as sent_today/);
+    // Resposta não gasta o teto do dia (9061): a contagem exclui a coluna `resposta`.
+    expect(sql).toMatch(/and sent_at >= \$3 and not resposta\) as sent_today/);
     // Meia-noite de São Paulo = 03:00Z: o início do dia vem do `now` injetado.
     expect(db.params[0]).toEqual(["org", "sess", new Date("2026-10-02T03:00:00Z")]);
   });

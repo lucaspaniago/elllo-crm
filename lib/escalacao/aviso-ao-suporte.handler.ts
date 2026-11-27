@@ -27,18 +27,20 @@ import { origemDoDreno } from "@/lib/event-log/origem-do-dreno";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   EVENTO_CASO_ABERTO,
+  EVENTO_CASO_ATUALIZADO,
   EVENTO_CASO_FECHADO,
   type TransporteDoAviso,
   aplicaAvisoDeCaso,
   createSupabaseAvisoDb,
 } from "@/lib/escalacao/aviso-ao-suporte";
+import { orgsDoAvisoNatural } from "@/lib/escalacao/texto-do-aviso";
 
 export const AVISO_DE_CASO_HANDLER_KEY = "escalacao-aviso-ao-suporte.v1";
 
 export const avisoDeCasoAoSuporteHandler: EventHandler = {
   key: AVISO_DE_CASO_HANDLER_KEY,
   naOrgParada: "pula",
-  events: [EVENTO_CASO_ABERTO, EVENTO_CASO_FECHADO],
+  events: [EVENTO_CASO_ABERTO, EVENTO_CASO_ATUALIZADO, EVENTO_CASO_FECHADO],
   async handle(row): Promise<HandlerResult> {
     try {
       const admin = createAdminClient();
@@ -53,6 +55,7 @@ export const avisoDeCasoAoSuporteHandler: EventHandler = {
           clock: () => new Date(),
           urlPublica: env.NEXT_PUBLIC_APP_URL,
           origemDoDreno,
+          avisoNatural: (orgId) => orgsDoAvisoNatural(env.AVISO_DE_CASO_NATURAL_ORGS).has(orgId),
           audita: (entrada) => {
             // Fire-and-forget, como todo audit do produto: a trilha nunca pode
             // segurar o efeito que ela registra.
@@ -144,18 +147,20 @@ export async function criarTransporteDoAviso(
     async resolveDestino(organizationId, canal, telefone) {
       const ref = await refDoCanal(organizationId, canal.id);
       if (!ref) return null;
-      // O CHECK do banco já garantiu E.164 com `+`. Quem traduz para o endereço
-      // do canal é o adapter — e é por isso que a tradução não mora aqui.
+      // O CHECK do banco já garantiu E.164 com `+` — ou o `chatId` de um grupo
+      // (`…@g.us`, aviso de agendamento). Quem traduz para o endereço do canal
+      // é o adapter — e é por isso que a tradução não mora aqui.
+      const ehGrupo = telefone.endsWith("@g.us");
       return getAdapter(ref.provider as never).resolveRecipient({
-        isGroup: false,
-        groupChatId: null,
+        isGroup: ehGrupo,
+        groupChatId: ehGrupo ? telefone : null,
         phoneNumber: telefone,
         waIdentity: null,
         waLid: null,
       });
     },
 
-    async envia(organizationId, canal, to, body) {
+    async envia(organizationId, canal, to, body, opcoes) {
       const ref = await refDoCanal(organizationId, canal.id);
       if (!ref) throw new Error("canal_sem_referencia_de_transporte");
       // TRANSPORTE DIRETO, fora do `sendMessageHandler`: o aviso NÃO nasce como
@@ -163,6 +168,28 @@ export async function criarTransporteDoAviso(
       // conversa, não tem contato, não entra na timeline de ninguém — e gravá-lo
       // ali criaria uma conversa com o número da própria equipe, que é
       // exatamente o que o corte da ingestão existe para impedir.
+      //
+      // Com modelo (migration 9094), o MESMO texto vai dentro da variável única
+      // do modelo aprovado, numa linha só — a plataforma recusa valor com
+      // quebra de linha. Continua fora de `messages`: quem escolhe o transporte
+      // de modelo é `lib/channels/`, e ele não grava conversa.
+      const modelo = opcoes?.modelo;
+      if (modelo) {
+        const [{ enviarModeloDireto }, { umaLinhaParaOModelo }] = await Promise.all([
+          import("@/lib/channels/modelo-direto"),
+          import("@/lib/escalacao/modelo-do-aviso"),
+        ]);
+        return enviarModeloDireto(admin, {
+          organizationId,
+          channelSessionId: canal.id,
+          provider: ref.provider,
+          sessionRef: ref.sessionRef,
+          to,
+          name: modelo.name,
+          language: modelo.language,
+          values: { [modelo.chave]: umaLinhaParaOModelo(body) },
+        });
+      }
       return getAdapter(ref.provider as never).send({
         organizationId,
         sessionRef: ref.sessionRef,

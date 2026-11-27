@@ -43,8 +43,10 @@ import { camposAlterados } from "@/lib/leads/campos-alterados";
 import {
   camposDoFunil,
   camposPorEscopo,
+  camposPorEscopoDosFunis,
   type EscopoDoCampo,
 } from "@/lib/leads/campos-do-funil";
+import type { CustomFieldDef } from "@/lib/schemas/settings";
 
 /** O que uma definição de campo precisa ter para esta régua existir. */
 export interface DefComPadrao {
@@ -265,13 +267,43 @@ export function camposQueMudaram(
  *
  * A ausência da chave vale `negocio` (`escopoDoCampo`), então toda definição
  * que já existe continua sendo julgada onde sempre foi.
+ *
+ * ⚠️ Devolve a definição INTEIRA (`CustomFieldDef`), não só o que a régua do
+ * `padrao` lê: `padrao`/`mensagem_padrao` são um recorte dela, e a régua da
+ * OPÇÃO do campo de seleção (#3508) lê `options`/`allow_new`/`multiple` daqui.
+ * Duas réguas, UMA leitura de `settings` — o nome ficou do primeiro uso.
  */
 export function defsDoPadraoDoFunil(
   settings: unknown,
   escopo: EscopoDoCampo = "negocio",
-): DefComPadrao[] {
+): CustomFieldDef[] {
   if (!settings || typeof settings !== "object" || Array.isArray(settings)) return [];
   return camposPorEscopo(camposDoFunil(settings as Record<string, unknown>), escopo);
+}
+
+/**
+ * O `settings` de TODOS os funis da organização, na ordem de criação — `null`
+ * quando a leitura falha.
+ *
+ * É a ÚNICA leitura de definições da organização: a régua do PATCH
+ * (`defsDoPadraoDaOrg`) e a do diálogo de contato (`defsDeContatoDaOrg`, #4929)
+ * descem daqui, então não há duas perguntas ao banco nem duas ordens possíveis.
+ */
+async function settingsDeTodosOsFunis(
+  supabase: SupabaseClient,
+  organizationId: string,
+): Promise<unknown[] | null> {
+  try {
+    const { data, error } = await supabase
+      .from("crm_pipelines")
+      .select("settings")
+      .eq("organization_id", organizationId)
+      .order("created_at", { ascending: true });
+    if (error || !Array.isArray(data)) return null;
+    return (data as Array<{ settings?: unknown }>).map((linha) => linha?.settings);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -288,19 +320,28 @@ export async function defsDoPadraoDaOrg(
   organizationId: string,
   escopo: EscopoDoCampo = "negocio",
 ): Promise<DefComPadrao[]> {
-  try {
-    const { data, error } = await supabase
-      .from("crm_pipelines")
-      .select("settings")
-      .eq("organization_id", organizationId)
-      .order("created_at", { ascending: true });
-    if (error || !Array.isArray(data)) return [];
-    return (data as Array<{ settings?: unknown }>).flatMap((linha) =>
-      defsDoPadraoDoFunil(linha?.settings, escopo),
-    );
-  } catch {
-    return [];
-  }
+  const settings = await settingsDeTodosOsFunis(supabase, organizationId);
+  if (!settings) return [];
+  return settings.flatMap((linha) => defsDoPadraoDoFunil(linha, escopo));
+}
+
+/**
+ * As definições de CONTATO de todos os funis, unidas por chave (#4929) — o que o
+ * diálogo de edição do contato tem de mostrar.
+ *
+ * É a MESMA leitura de `defsDoPadraoDaOrg` e a MESMA união que o PATCH julga,
+ * com a diferença de vir inteira (`CustomFieldDef`, com `options`, `required` e
+ * `mostrar_quando`) e sem chave repetida: o formulário desenha um campo por
+ * chave, e a definição que aparece é a primeira da ordem em que o servidor as
+ * julga. Servida por UMA chamada — a lista de contatos não pergunta por funil.
+ */
+export async function defsDeContatoDaOrg(
+  supabase: SupabaseClient,
+  organizationId: string,
+): Promise<CustomFieldDef[]> {
+  const settings = await settingsDeTodosOsFunis(supabase, organizationId);
+  if (!settings) return [];
+  return camposPorEscopoDosFunis(settings, "contato");
 }
 
 /**

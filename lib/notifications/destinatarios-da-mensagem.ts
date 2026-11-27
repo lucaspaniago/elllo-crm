@@ -3,27 +3,36 @@
  *
  * ═══ A regra, em ordem de precedência ═══
  *
- * 1. Conversa COM responsável → SÓ o responsável e os ADMINISTRADORES da
+ * 1. Conversa ATRIBUÍDA a um atendente → SÓ ele e os ADMINISTRADORES da
  *    organização (`user_organizations.role = 'admin'`, vínculo não revogado).
- *    O resto do time não é interrompido por cliente que já tem dono. Esta
- *    regra vem antes de tudo e não lê agente nem plantão.
- * 2. Sem responsável e a IA ATENDENDO → NINGUÉM. "Atendendo" é a conversa
+ *    Esta regra vem antes de tudo e não lê agente nem plantão: conversa
+ *    atribuída já não é da IA (`comandoDaConversa` diz "humano").
+ * 2. Sem atendente e a IA ATENDENDO → NINGUÉM, nem o dono do negócio aberto.
+ *    O dono recebe o negócio cedo (a IA atribui no meio da triagem), e até
+ *    09/11/2026 cada mensagem da triagem ia ao celular dele: num atendimento
+ *    de teste, 4 avisos de "Nova mensagem" antes da passagem, que é quando
+ *    ele de fato precisa agir. "Atendendo" é a conversa
  *    sem silêncio nem trava (`comandoDaConversa(...).quem === 'automatico'`)
  *    E o turno do dreno rodaria nela: agente automático no ar no NÚMERO da
  *    conversa (versão publicada nele, ou roteador ativo nele com fallback ou
- *    membro que execute — os predicados de `haQuemAtendaASessao`) e a
- *    elegibilidade do canal e do contato permitindo. Na dúvida, não cala.
+ *    membro que execute — os predicados de `haQuemAtendaASessao`), o FILTRO DE
+ *    PALAVRAS da versão (`trigger_config.filters.keyword_regex`) aceitando a
+ *    última mensagem recebida ou o agente já tendo respondido neste
+ *    atendimento (a âncora do #3240), e a elegibilidade do canal e do contato
+ *    permitindo. Na dúvida, não cala.
  *    A pessoa é chamada quando a IA passa a conversa: a passagem grava o
  *    silêncio e abre o aviso `handoff` da Central, que vai ao celular por
  *    `central.aviso_criado` (`./push-dos-avisos.ts`). Dali em diante o silêncio
  *    deixa o comando em "aguardando" e as mensagens seguintes caem na regra 3.
- * 3. Sem responsável, com distribuição automática (modo efetivo do canal
+ * 3. Sem atendente, com dono de negócio aberto → o dono e os administradores,
+ *    como na regra 1.
+ * 4. Sem responsável, com distribuição automática (modo efetivo do canal
  *    `round_robin` ou `load`) → quem está DE PLANTÃO (`estaDePlantao`: a chave
  *    `is_available` e a jornada, a mesma conta do roteador, recortada pelos
  *    responsáveis do canal quando ele os tem). Ninguém de plantão → gerentes e
  *    administradores — o mesmo público do aviso que o roteador abre quando
  *    não acha elegível (`fn_routing_unassigned_notice`).
- * 4. Senão (modo manual) → TODOS da organização: alguém precisa pegar a fila.
+ * 5. Senão (modo manual) → TODOS da organização: alguém precisa pegar a fila.
  *
  * ═══ Por que o plantão só vale na distribuição automática ═══
  *
@@ -50,10 +59,15 @@
  * A MESMA função decide o push do servidor (`push.handler.ts`) e o aviso
  * dentro do app (rota `conversations/[id]/aviso-de-mensagem`, lida por
  * `useInboundMessageAlerts`). Grupos (`message.group_received`) e avisos da
- * Central NÃO passam por aqui — continuam indo para a organização inteira.
+ * Central NÃO passam por aqui. A passagem para pessoa usa só
+ * `responsaveisDaConversa`, sem somar os administradores (`./push-dos-avisos.ts`).
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import {
+  corpoTemTexto,
+  lerFiltroDePalavraChave,
+} from "@/lib/agent-engine/agent/palavra-chave-do-gatilho";
 import { agenteAtende, type FatosDoAgente } from "@/lib/ai/agents/no-ar";
 import { decidirElegibilidadeDaConversaViaSupabase } from "@/lib/ai/elegibilidade/consulta-supabase";
 import { ttlDaAutorizacaoMs } from "@/lib/ai/elegibilidade/gate";
@@ -75,9 +89,9 @@ export interface FatosDaAtribuicao {
   donosDeNegocioAberto: ReadonlyArray<string | null>;
   /** user_ids dos administradores da organização com vínculo ativo. */
   admins: ReadonlyArray<string>;
-  /** A IA está atendendo esta conversa (regra 2 do cabeçalho). */
+  /** A IA está atendendo esta conversa (regra 2 do cabeçalho). Só vale sem atendente. */
   iaConduz?: boolean;
-  /** Distribuição automática no canal (regra 3); `null`/ausente = modo manual. */
+  /** Distribuição automática no canal (regra 4); `null`/ausente = modo manual. */
   filaDistribuida?: { dePlantao: ReadonlyArray<string>; gestores: ReadonlyArray<string> } | null;
 }
 
@@ -92,11 +106,14 @@ export function responsaveisDaConversa(
 
 /** Decisão pura, na ordem do cabeçalho. */
 export function destinatariosDaMensagem(fatos: FatosDaAtribuicao): DestinatariosDaMensagem {
+  if (fatos.atribuidoA) {
+    return { tipo: "restrito", userIds: [...new Set([fatos.atribuidoA, ...fatos.admins])] };
+  }
+  if (fatos.iaConduz) return { tipo: "ninguem" };
   const responsaveis = responsaveisDaConversa(fatos);
   if (responsaveis.length > 0) {
     return { tipo: "restrito", userIds: [...new Set([...responsaveis, ...fatos.admins])] };
   }
-  if (fatos.iaConduz) return { tipo: "ninguem" };
   const fila = fatos.filaDistribuida;
   // Lista de gestores vazia não deveria acontecer; se acontecer, a fila avisa
   // todos em vez de sumir.
@@ -147,7 +164,7 @@ export async function carregarDestinatariosDaMensagem(
 ): Promise<DestinatariosDaMensagem | null> {
   const conv = (await (db
     .from("conversations")
-    .select("assigned_to_user_id, contact_id, is_group, status, bot_silenced_until, channel_session_id")
+    .select("assigned_to_user_id, contact_id, is_group, status, bot_silenced_until, channel_session_id, service_started_at")
     .eq("id", conversationId)
     .eq("organization_id", organizationId)
     .maybeSingle() as Resultado<ConversaLida>));
@@ -158,6 +175,11 @@ export async function carregarDestinatariosDaMensagem(
 
   let donos: Array<string | null> = [];
   const contato = contactId ?? conv.data.contact_id;
+  // Sem atendente, a IA vem antes do dono do negócio (regra 2): conversando
+  // com ela, ninguém é avisado, e nem o negócio precisa ser lido.
+  if (!conv.data.assigned_to_user_id && (await iaConduz(db, organizationId, conversationId, conv.data, contato, agora))) {
+    return { tipo: "ninguem" };
+  }
   if (!conv.data.assigned_to_user_id && contato) {
     const leads = await (db
       .from("crm_leads")
@@ -169,10 +191,8 @@ export async function carregarDestinatariosDaMensagem(
     donos = (leads.data ?? []).map((l) => l.owner_user_id);
   }
 
-  // Sem responsável: a IA, depois a fila. Os admins só são lidos quando há
-  // responsável.
+  // Sem responsável: a fila. Os admins só são lidos quando há responsável.
   if (responsaveisDaConversa({ atribuidoA: conv.data.assigned_to_user_id, donosDeNegocioAberto: donos }).length === 0) {
-    if (await iaConduz(db, organizationId, conversationId, conv.data, contato, agora)) return { tipo: "ninguem" };
     return destinatariosDaMensagem({
       atribuidoA: null,
       donosDeNegocioAberto: [],
@@ -202,6 +222,8 @@ interface ConversaLida {
   status: string;
   bot_silenced_until: string | null;
   channel_session_id: string | null;
+  /** Fronteira do atendimento corrente — a âncora do "já engajado" (#3240). */
+  service_started_at?: string | null;
 }
 
 /**
@@ -241,7 +263,7 @@ async function iaConduz(
   const comContato = { ...fatos, force_human: contatoLido?.force_human, is_blocked: contatoLido?.is_blocked };
   if (comandoDaConversa(comContato, agora).comando.quem !== "automatico") return false;
 
-  if (!(await iaAtendeNoNumero(db, organizationId, conv.channel_session_id))) return false;
+  if (!(await iaAtendeNoNumero(db, organizationId, conversationId, conv.channel_session_id, conv.service_started_at ?? null))) return false;
 
   const elegib = await decidirElegibilidadeDaConversaViaSupabase(db as Pick<SupabaseClient, "from">, {
     organizationId,
@@ -257,11 +279,34 @@ async function iaConduz(
  * predicados de `haQuemAtendaASessao` (`lib/ai/agents/quem-atende-a-sessao.ts`),
  * mais `agenteAtende` (pausado não conta) e sem o modo assistido, cujo
  * rascunho espera uma pessoa. Sem número, ou leitura falhando → `false`.
+ *
+ * O FILTRO DE PALAVRAS é mais um predicado, porque é mais um predicado do
+ * TURNO (`inbound-turn.ts`): a versão com `trigger_config.filters.keyword_regex`
+ * que pula a última mensagem recebida encerra o turno sem resposta (#2696) —
+ * e aí a IA NÃO vai atender, calar o aviso deixaria o cliente sem ninguém
+ * (#3353). Duas exceções, na régua de `palavra-chave-do-gatilho.ts`:
+ *
+ *  - Mensagem sem TEXTO (`body` nulo, áudio ainda não transcrito): o dreno
+ *    ADIA o turno até a transcrição (`drain.ts`, "Mídia ainda virando texto:
+ *    ESPERAR") e o filtro julga o texto dela, que o aviso ainda não tem. O
+ *    aviso decide no INSERT, antes: o agente com filtro não conta e o aviso
+ *    segue a regra da fila. Se a transcrição casar, a IA responde e o aviso
+ *    terá sido a mais — a direção da regra é "nunca a menos" (#3353).
+ *  - Agente que JÁ RESPONDEU neste atendimento (a âncora do #3240, régua de
+ *    `agente-ja-respondeu.ts`): com o filtro decidindo só a ENTRADA, o turno
+ *    segue sem filtro e a IA responde a toda mensagem seguinte. Sem esta
+ *    âncora o conserto avisaria o meio da conversa que a IA conduz — o barulho
+ *    que o #3113 tirou.
+ *
+ * A mensagem só é lida quando alguma versão no ar tem filtro: quem não usa o
+ * campo não paga a consulta, nem a da âncora.
  */
 async function iaAtendeNoNumero(
   db: LeitorDeAtribuicao,
   organizationId: string,
+  conversationId: string,
   channelSessionId: string | null,
+  serviceStartedAt: string | null,
 ): Promise<boolean> {
   if (!channelSessionId) return false;
   const agentes = await (db
@@ -275,13 +320,33 @@ async function iaAtendeNoNumero(
 
   const versoes = await (db
     .from("ai_agent_versions")
-    .select("id, channel_session_id")
+    .select("id, channel_session_id, trigger_config")
     .eq("organization_id", organizationId)
     .eq("status", "published")
-    .in("id", noAr.map((a) => a.published_version_id)) as Resultado<Array<{ id: string; channel_session_id: string | null }>>);
+    .in("id", noAr.map((a) => a.published_version_id)) as Resultado<Array<{ id: string; channel_session_id: string | null; trigger_config: unknown }>>);
   if (versoes.error) return false;
   const numeroDaVersao = new Map((versoes.data ?? []).map((v) => [v.id, v.channel_session_id]));
-  const executam = noAr.filter((a) => numeroDaVersao.has(a.published_version_id ?? ""));
+  const filtroDaVersao = new Map((versoes.data ?? []).map((v) => [v.id, lerFiltroDePalavraChave(v.trigger_config)]));
+  const corpo = [...filtroDaVersao.values()].some((f) => f !== null)
+    ? await corpoDaUltimaRecebida(db, organizationId, conversationId)
+    : null;
+  const executam: Array<FatosDoAgente & { id: string; operation_mode: string }> = [];
+  for (const a of noAr) {
+    const versao = a.published_version_id ?? "";
+    if (!numeroDaVersao.has(versao)) continue;
+    const filtro = filtroDaVersao.get(versao) ?? null;
+    // Sem filtro preenchido (regex torta ou campo vazio vira `null`), o
+    // agente entra em tudo, como antes. Com texto que casa, o filtro aceita.
+    if (filtro === null || (typeof corpo === "string" && corpoTemTexto(corpo) && filtro.test(corpo))) {
+      executam.push(a);
+      continue;
+    }
+    // O filtro pulou: a IA só continua respondendo se este agente já falou
+    // neste atendimento — a mesma âncora do portão do turno (#3240).
+    if (await agenteJaRespondeuNoAtendimento(db, organizationId, conversationId, a.id, serviceStartedAt)) {
+      executam.push(a);
+    }
+  }
   if (executam.some((a) => numeroDaVersao.get(a.published_version_id ?? "") === channelSessionId)) return true;
   if (executam.length === 0) return false;
   const idsQueExecutam = new Set(executam.map((a) => a.id));
@@ -301,6 +366,64 @@ async function iaAtendeNoNumero(
     .eq("organization_id", organizationId)
     .in("router_id", roteadores.data.map((r) => r.id)) as Resultado<Array<{ agent_id: string }>>);
   return !membros.error && (membros.data ?? []).some((m) => idsQueExecutam.has(m.agent_id));
+}
+
+/**
+ * O corpo da última mensagem recebida na conversa (por `sent_at`, a mesma
+ * ordem do contexto do turno, `get-lead-context.ts`): em geral, a que o aviso
+ * anuncia. `null` = sem texto (mídia sem legenda) ou sem mensagem;
+ * `undefined` = a leitura falhou — nos dois casos o agente com filtro não
+ * conta, e o aviso segue a regra da fila.
+ */
+async function corpoDaUltimaRecebida(
+  db: LeitorDeAtribuicao,
+  organizationId: string,
+  conversationId: string,
+): Promise<string | null | undefined> {
+  const m = await (db
+    .from("messages")
+    .select("body")
+    .eq("organization_id", organizationId)
+    .eq("conversation_id", conversationId)
+    .eq("direction", "inbound")
+    .order("sent_at", { ascending: false })
+    .limit(1)
+    .maybeSingle() as Resultado<{ body: string | null }>);
+  if (m.error) return undefined;
+  return m.data?.body ?? null;
+}
+
+/**
+ * O agente já enviou algo neste atendimento? A MESMA régua da âncora do
+ * portão do turno (`lib/agent-engine/agent/agente-ja-respondeu.ts`, em SQL
+ * puro para o worker de pg): outbound com `sent_via='ai'`, autoria gravada em
+ * `metadata->>'ai_actor_id'`, envio que não falhou e dentro da fronteira do
+ * atendimento corrente (`service_started_at` nulo conta como dentro).
+ *
+ * Aqui em supabase-js porque a regra só recebe o `LeitorDeAtribuicao` — o
+ * turno usa pool de pg direto. Leitura falhando → `false`: não inventa
+ * engajamento (nunca cala o aviso por conta de uma consulta quebrada).
+ */
+async function agenteJaRespondeuNoAtendimento(
+  db: LeitorDeAtribuicao,
+  organizationId: string,
+  conversationId: string,
+  agentId: string,
+  serviceStartedAt: string | null,
+): Promise<boolean> {
+  const base = db
+    .from("messages")
+    .select("id")
+    .eq("organization_id", organizationId)
+    .eq("conversation_id", conversationId)
+    .eq("direction", "outbound")
+    .eq("sent_via", "ai")
+    .eq("metadata->>ai_actor_id", agentId)
+    .neq("status", "failed");
+  const q = serviceStartedAt ? base.gte("sent_at", serviceStartedAt) : base;
+  const r = await (q.limit(1).maybeSingle() as Resultado<{ id: string }>);
+  if (r.error) return false;
+  return r.data != null;
 }
 
 /**

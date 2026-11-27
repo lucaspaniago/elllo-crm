@@ -268,6 +268,44 @@ describe('graph-schema', () => {
         const result = actionConfigSchema.safeParse({ mode: 'text', body: '' });
         expect(result.success).toBe(false);
       });
+
+      // #4429 — variações do passo. O `body` continua OBRIGATÓRIO e sendo a
+      // primeira redação; `variacoes` são adicionais e opcionais.
+      it('accepts extra redações no mesmo passo', () => {
+        const result = actionConfigSchema.safeParse({
+          mode: 'text',
+          body: 'Oi {{primeiro_nome}}, tudo bem?',
+          variacoes: ['Olá {{primeiro_nome}}! Como você está?', '{{primeiro_nome}}, posso te chamar?'],
+        });
+        expect(result.success).toBe(true);
+        if (result.success && result.data.mode === 'text') {
+          expect(result.data.variacoes).toHaveLength(2);
+        }
+      });
+
+      it('grafo de hoje (sem `variacoes`) continua passando byte a byte', () => {
+        const result = actionConfigSchema.safeParse({ mode: 'text', body: 'Texto único', media_url: 'https://x.test/a.png' });
+        expect(result.success).toBe(true);
+        if (result.success) expect(Object.keys(result.data).sort()).toEqual(['body', 'media_url', 'mode']);
+      });
+
+      it('recusa variação vazia e mais de cinco', () => {
+        expect(actionConfigSchema.safeParse({ mode: 'text', body: 'a', variacoes: ['  '] }).success).toBe(false);
+        expect(
+          actionConfigSchema.safeParse({ mode: 'text', body: 'a', variacoes: ['1', '2', '3', '4', '5', '6'] }).success,
+        ).toBe(false);
+      });
+
+      it('o NÓ publicado aceita o campo — o grafo inteiro não recusa o passo com variações', () => {
+        const node = {
+          id: 'action-1',
+          type: 'action',
+          label: 'Mensagem',
+          position: { x: 0, y: 0 },
+          config: { mode: 'text', body: 'Oi', variacoes: ['Olá'] },
+        };
+        expect(flowNodeSchema.safeParse(node).success).toBe(true);
+      });
     });
 
     describe('ai_message mode', () => {
@@ -627,6 +665,23 @@ describe('graph-schema', () => {
     it('recusa tentativas fora da faixa', () => {
       expect(flowGraphSchema.safeParse(grafoMinimo({ max_tentativas_pergunta: 0 })).success).toBe(false);
       expect(flowGraphSchema.safeParse(grafoMinimo({ max_tentativas_pergunta: 11 })).success).toBe(false);
+    });
+
+    // #2630 — a entrada por etapa do funil: o campo vive AQUI, no grafo, porque
+    // na superfície de atendimento o `trigger_config` é obrigado a `manual`.
+    it('aceita as etapas do funil e recusa lista vazia de item ou acima do teto', () => {
+      const etapa = '11111111-1111-4111-8111-111111111111';
+      const ok = flowGraphSchema.safeParse(grafoMinimo({ etapas_do_funil: [etapa] }));
+      expect(ok.success).toBe(true);
+      if (ok.success) expect(ok.data.settings?.etapas_do_funil).toEqual([etapa]);
+      // Sem o campo, nada muda: o roteiro simplesmente não liga por etapa.
+      expect(flowGraphSchema.safeParse(grafoMinimo({})).success).toBe(true);
+      expect(flowGraphSchema.safeParse(grafoMinimo({ etapas_do_funil: [''] })).success).toBe(false);
+      expect(
+        flowGraphSchema.safeParse(
+          grafoMinimo({ etapas_do_funil: Array.from({ length: 31 }, (_, i) => `etapa-${i}`) }),
+        ).success,
+      ).toBe(false);
     });
   });
 

@@ -156,11 +156,11 @@ normal. A régua de operação é outra, e não mudou. Ela tem três parcelas, e
 são medidas e uma é herdada** — a distinção importa porque a herdada é a que
 costuma ser citada como se fosse nossa:
 
-| parcela | estado | como conferir |
-|---|---|---|
-| 7 contêineres | **medido** | `docker compose -f docker-compose.prod.yml config --services \| wc -l` |
-| `mem_limit` somando 2560m (app 768 + worker 512 + waha 1280) | **medido** | `grep -n 'mem_limit' docker-compose.prod.yml` |
-| ~150 MB por número de WhatsApp | **herdado do upstream WAHA**, nunca medido neste projeto | `docker stats --no-stream` na sua VPS |
+| parcela                                                      | estado                                                   | como conferir                                                          |
+| ------------------------------------------------------------ | -------------------------------------------------------- | ---------------------------------------------------------------------- |
+| 7 contêineres                                                | **medido**                                               | `docker compose -f docker-compose.prod.yml config --services \| wc -l` |
+| `mem_limit` somando 2560m (app 768 + worker 512 + waha 1280) | **medido**                                               | `grep -n 'mem_limit' docker-compose.prod.yml`                          |
+| ~150 MB por número de WhatsApp                               | **herdado do upstream WAHA**, nunca medido neste projeto | `docker stats --no-stream` na sua VPS                                  |
 
 O terceiro número vem de `docs/research/reference-synthesis.md` (síntese do curso
 WAHA, 2026-05), não de uma medição nossa — e circula em sete documentos que se
@@ -208,7 +208,7 @@ Passos no painel:
 3. aponte `DOMAIN`, `NEXT_PUBLIC_APP_URL` e `NEXT_PUBLIC_ADMIN_URL` para esse mesmo
    hostname (`https://…`) e liste-o nos redirects do Supabase Auth;
 4. (opcional) bloqueie `/api/v1/webhooks/waha` também no WAF (`Security > WAF > Custom
-   rules`). Neste modo o 403 que o Caddy dava não existe; quem recusa o que chega pela borda
+rules`). Neste modo o 403 que o Caddy dava não existe; quem recusa o que chega pela borda
    é o próprio app — ver `docs/threat-model.md` §1.1.
 
 Notas:
@@ -217,5 +217,35 @@ Notas:
   `REVERSE_PROXY=cloudflared` nesse modo: as APIs do Supabase dependem do Caddy.
 - A borda da Cloudflare corta HTTP acima de ~100s (504/524). O webhook do WAHA é interno e
   não passa pelo túnel.
+- **Túnel "degraded" com menos de 4 ligações, e o log cheio de `failed to dial to edge with
+  quic`:** o provedor da VPS descarta UDP de saída (porta 7844). O `cloudflared` tenta QUIC
+  primeiro e só depois cai para `http2`, e em cada ligação que cai fica minutos sem
+  reserva. Para confirmar, veja por qual protocolo as ligações registraram:
+  `docker compose -f docker-compose.prod.yml -f docker-compose.cloudflared.yml --env-file .env
+logs cloudflared | grep -oE "protocol=[a-z0-9]+" | sort | uniq -c`. Se só aparece `http2`,
+  ponha `CLOUDFLARED_PROTOCOL=http2` no `.env` e recrie o túnel (`… up -d cloudflared`).
+  Ausente, vale `auto` (o padrão do `cloudflared`). **O valor vai em minúsculas e só aceita
+  `auto`, `http2` ou `quic`:** qualquer outro (`HTTP2`, `h2`) faz o `cloudflared` sair e
+  reiniciar em loop, e o domínio fica fora do ar. Depois de mudar, confirme que as ligações
+  novas vêm com `protocol=http2` e que o `failed to dial ... quic` sumiu do log.
 - Verificação: `docker compose -f docker-compose.prod.yml -f docker-compose.cloudflared.yml
-  --env-file .env config --services` deve listar `cloudflared` e **não** listar `caddy`.
+--env-file .env config --services` deve listar `cloudflared` e **não** listar `caddy`.
+
+## Recuperar uma tentativa pela tela
+
+O botão de força só é oferecido depois de uma falha quando o agente em execução
+anuncia suporte e confirma uma instalação oficial recente. Ele registra um pedido
+restrito, não um comando do navegador. A intenção chega ao próximo heartbeat e
+faz o kit reaplicar a versão derivada da tentativa, inclusive quando a tag já está
+no disco, com backup e conferências preservados.
+
+A confirmação de versão não equivale a uma chamada de voz comprovada. O
+healthcheck da voz mede apenas o listener AudioSocket interno. Contêiner antigo
+sem essa definição precisa receber a imagem publicada nova pelo caminho normal
+de atualização; ele não ganha saúde por mudar apenas o monitor. Quem já usa voz
+preserva o perfil `telefonia`; instalações sem voz não o ativam para satisfazer a
+confirmação. Ausência, divergência ou personalização mantêm a explicação e pedem
+conferência, sem prometer uma execução que o host vai recusar.
+
+O fluxo e os limites de prova estão em
+[`forca-atualizacao-host.md`](../testing/forca-atualizacao-host.md).

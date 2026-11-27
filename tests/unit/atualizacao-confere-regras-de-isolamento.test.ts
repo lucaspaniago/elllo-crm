@@ -1,9 +1,9 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 /**
  * A atualização confere as regras de isolamento antes de dizer "deu certo".
@@ -335,6 +335,19 @@ describe.skipIf(!temAwk)("recriar o que falta: o comando INTEIRO, nunca o nome",
     /** O script sem o pin — a forma SABOTADA, para medir o ambiente. */
     const semPin = (s: string) => s.replace(/\bLC_ALL=\S+ /g, "").replace(/\bLC_COLLATE=\S+ /g, "");
 
+    /**
+     * Se o `comm` reclamou — em QUALQUER idioma, sem citar a mensagem.
+     *
+     * Medido neste host (2026-10-23): `comm (uutils coreutils) 0.10.0` avisa
+     * "comm: o arquivo 1 não está em ordem" até com `LC_ALL=C` e
+     * `LC_MESSAGES=C` — o texto é fixo, não traduz. O GNU avisa "comm: input
+     * is not in sorted order". Citar a frase inglesa faria o caso ficar
+     * VERMELHO com o script CORRETO só porque a máquina roda uutils: o caso
+     * passaria a medir o ambiente de quem roda, não a regra. O que se quer
+     * saber é se houve reclamação — e isso não tem idioma.
+     */
+    const reclamou = (stderr: string): boolean => stderr.trim().length > 0;
+
     function comparar(
       a: string[],
       b: string[],
@@ -342,8 +355,6 @@ describe.skipIf(!temAwk)("recriar o que falta: o comando INTEIRO, nunca o nome",
       comparacao: string,
       locale: string | undefined,
     ): { faltando: string[]; stderr: string } {
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "colacao-"));
-      const err = path.join(dir, "err");
       // A linha REAL do script, com as listas que vierem — nunca uma cópia da
       // régua. `esperadas`/`existentes` são ordenadas antes, como no script.
       const script = [
@@ -352,10 +363,11 @@ describe.skipIf(!temAwk)("recriar o que falta: o comando INTEIRO, nunca o nome",
         comparacao,
         `printf '%s' "$faltando"`,
       ].join("\n");
-      // O locale hostil vai só na ORDENAÇÃO. `LC_ALL` também traduz as
-      // mensagens, e numa máquina em português o `comm` responde "o arquivo 1
-      // não está ordenado" — o caso de sabotagem, que procura "not in sorted
-      // order", ficava vermelho para quem não roda em inglês.
+      // O locale hostil vai só na ORDENAÇÃO: `LC_ALL` também escolhe as
+      // mensagens, então ele é apagado daqui, e `LC_MESSAGES=C` é tentado para
+      // o GNU. Medido neste host, porém, o `comm (uutils coreutils) 0.10.0`
+      // responde em português FIXO até com `LC_MESSAGES=C` — por isso nenhum
+      // caso cita a frase do `comm`: mede-se reclamado vs. calado.
       const env: NodeJS.ProcessEnv = { ...process.env, A: a.join("\n"), B: b.join("\n") };
       const colacao = locale ?? env.LC_ALL;
       delete env.LC_ALL;
@@ -364,20 +376,17 @@ describe.skipIf(!temAwk)("recriar o que falta: o comando INTEIRO, nunca o nome",
         env.LC_CTYPE = colacao;
       }
       env.LC_MESSAGES = "C";
-      try {
-        const out = execFileSync(BASH, ["-c", script], {
-          encoding: "utf8",
-          maxBuffer: 64 * 1024 * 1024,
-          env,
-          stdio: ["ignore", "pipe", fs.openSync(err, "w")],
-        });
-        return {
-          faltando: out.split("\n").map((l) => l.trim()).filter(Boolean),
-          stderr: fs.readFileSync(err, "utf8"),
-        };
-      } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
-      }
+      const resultado = spawnSync(BASH, ["-c", script], {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+        env,
+      });
+      if (resultado.error) throw resultado.error;
+      if (resultado.status !== 0) throw new Error(`Collation check failed: ${resultado.stderr}`);
+      return {
+        faltando: resultado.stdout.split("\n").map((l) => l.trim()).filter(Boolean),
+        stderr: resultado.stderr,
+      };
     }
 
     /** As regras que a conferência ESPERA — a régua awk do próprio script. */
@@ -432,10 +441,21 @@ describe.skipIf(!temAwk)("recriar o que falta: o comando INTEIRO, nunca o nome",
       for (const loc of disponiveis) {
         // Sonda: a mesma comparação SEM o pin, com o locale candidato.
         const r = comparar(esperadas, existentes, "sort -u", semPin(linhaDeComparacao()), loc);
-        if (r.stderr.includes("not in sorted order") || r.faltando.length > 0) return loc;
+        if (reclamou(r.stderr) || r.faltando.length > 0) return loc;
       }
       return undefined;
     }
+
+    let regras: string[];
+    let noBanco: string[];
+    let hostil: string | undefined;
+
+    // Probe the available locales once for both comparisons.
+    beforeAll(() => {
+      regras = esperadas();
+      noBanco = todasAsPoliticasDePublic();
+      hostil = localeHostil(regras, noBanco);
+    }, 60_000);
 
     it("GUARDA DE VACUIDADE: o script tem o pin, e a linha foi achada", () => {
       // Sem este caso, um `match` que devolvesse o fallback sem pin faria os
@@ -460,14 +480,11 @@ describe.skipIf(!temAwk)("recriar o que falta: o comando INTEIRO, nunca o nome",
     });
 
     it("⛔ com o banco ÍNTEGRO, a conferência não acusa nada — em qualquer locale", () => {
-      const regras = esperadas();
-      const noBanco = todasAsPoliticasDePublic();
       expect(regras.length).toBeGreaterThan(50); // o baseline real tem centenas
       // A forma do banco íntegro: tudo que a régua espera ESTÁ lá, e há mais.
       expect(noBanco.length).toBeGreaterThan(regras.length);
       for (const r of regras) expect(noBanco).toContain(r);
 
-      const hostil = localeHostil(regras, noBanco);
       // O ambiente que reproduz o defeito, quando existe. Onde não existe (uma
       // imagem sem locale UTF-8 gerado), o caso do pin segue de pé, e o PR
       // declara o que não foi medido.
@@ -475,7 +492,11 @@ describe.skipIf(!temAwk)("recriar o que falta: o comando INTEIRO, nunca o nome",
 
       for (const loc of locais) {
         const r = comparar(regras, noBanco, ordenacao(), linhaDeComparacao(), loc);
-        expect(r.stderr).not.toContain("not in sorted order");
+        // Com o pin o `comm` fica CALADO: nem a frase inglesa do GNU nem o
+        // português fixo do uutils. Pedir "não contém a frase inglesa" aqui
+        // passaria num host uutils até com o aviso na stderr — escondendo
+        // exatamente o que este caso existe para pegar. Calado é calado.
+        expect(r.stderr).toBe("");
         expect(r.faltando).toEqual([]);
       }
     });
@@ -484,13 +505,12 @@ describe.skipIf(!temAwk)("recriar o que falta: o comando INTEIRO, nunca o nome",
       // A metade que importa: prova que o caso acima sabe ficar vermelho. Se
       // aqui der vazio, este ambiente não exercita o defeito — e o verde do
       // caso anterior não é prova de nada nele.
-      const regras = esperadas();
-      const noBanco = todasAsPoliticasDePublic();
-      const hostil = localeHostil(regras, noBanco);
       if (!hostil) return; // declarado no PR: sem locale hostil, não medido
 
       const r = comparar(regras, noBanco, "sort -u", semPin(linhaDeComparacao()), hostil);
-      expect(r.stderr).toContain("not in sorted order");
+      // O `comm` reclamou — em português aqui (uutils), em inglês no GNU.
+      // Citar a frase de um dos dois amarraria o caso ao ambiente de quem roda.
+      expect(r.stderr.trim()).not.toBe("");
       expect(r.faltando.length).toBeGreaterThan(0);
       // E o que ele acusa existe de verdade no banco — é alarme falso, que é o
       // que dói: a tela manda procurar uma regra que nunca faltou.

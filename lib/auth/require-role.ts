@@ -29,7 +29,12 @@ import type { NextResponse } from "next/server";
 import { fail, type ApiError } from "@/lib/api/wrappers";
 import { audit } from "@/lib/audit";
 import { CODIGO_ORG_DIVERGENTE, HEADER_ORG_DA_ABA } from "@/lib/auth/org-da-aba";
-import { loadAuthUser, mfaEmDivida, orgAtivaSemPortao } from "@/lib/auth/server";
+import { loadAuthUser, mfaEmDivida, mfaEmDividaEstrita, orgAtivaSemPortao } from "@/lib/auth/server";
+import {
+  CODIGO_SENHA_PROVISORIA,
+  MENSAGEM_SENHA_PROVISORIA,
+  senhaProvisoriaPendente,
+} from "@/lib/auth/senha-provisoria";
 import { ROLE_RANK, type ActiveOrg, type AuthUser, type Role } from "@/lib/auth/types";
 import { traduzir } from "@/lib/i18n/dicionario";
 import { STATUS_OPERANTE, ehOperante } from "@/lib/organizacao/operante";
@@ -40,7 +45,7 @@ export type RoleCheck =
   | { ok: false; response: NextResponse<ApiError> };
 
 const MENSAGEM_DE_MFA =
-  "Esta sessão precisa da verificação em duas etapas. Entre novamente com o código do aplicativo.";
+  "Confirme o código do aplicativo de verificação para continuar.";
 
 interface RequireRoleOpts {
   /** Correlaciona a resposta e o audit com o X-Request-Id da rota. */
@@ -74,6 +79,14 @@ function orgSuspensa(user: AuthUser, requestId?: string): NextResponse<ApiError>
   });
 }
 
+/** O 403 da senha provisória — o MESMO em `requireRole` e em `orgAtivaDaApi`. */
+function senhaAindaProvisoria(user: AuthUser, orgId: string, requestId?: string): NextResponse<ApiError> {
+  return fail(CODIGO_SENHA_PROVISORIA, traduzir(MENSAGEM_SENHA_PROVISORIA, user.idioma), 403, {
+    requestId,
+    details: { organization_id: orgId },
+  });
+}
+
 export type OrgDaApi =
   | { ok: true; org: ActiveOrg | null }
   | { ok: false; response: NextResponse<ApiError> };
@@ -90,6 +103,11 @@ export type OrgDaApi =
  */
 export async function orgAtivaDaApi(user: AuthUser | null, requestId?: string): Promise<OrgDaApi> {
   const org = user ? await orgAtivaSemPortao(user) : null;
+  // A rota fora do `requireRole` também não serve a quem ainda deve a troca de
+  // senha (#3876) — a mesma recusa, o mesmo código.
+  if (user && org && senhaProvisoriaPendente(user)) {
+    return { ok: false, response: senhaAindaProvisoria(user, org.orgId, requestId) };
+  }
   if (user && org && !ehOperante(org.org_status)) {
     return { ok: false, response: orgSuspensa(user, requestId) };
   }
@@ -169,6 +187,29 @@ export async function requireRole(min: Role, opts: RequireRoleOpts = {}): Promis
     };
   }
 
+  /**
+   * O GATE DO PRIMEIRO ACESSO (#3876) — AQUI, e não só no layout.
+   *
+   * Quem foi criado por um administrador com senha definida por ele entra com
+   * essa senha, e não pode usar o produto antes de trocá-la. O layout de
+   * `/app` redireciona para a tela de troca, mas layout não roda em rota de
+   * API: com o redirect como única defesa, a sessão de senha provisória
+   * chamaria direto `POST /api/v1/messages`, `.../lgpd/anonymize`, exportação,
+   * cobrança — tudo o que exige uma pessoa que já escolheu a própria senha.
+   *
+   * Fica ANTES do atalho de platform admin e do rank: enquanto a troca não
+   * acontece, não existe leitura nem escrita nesta organização, e a recusa não
+   * depende de papel (o recém-criado pode ser admin da empresa). O código é o
+   * que a tela usa para reconhecer a recusa e levar à troca; `route` de troca
+   * de senha não passa por aqui (Server Action própria).
+   *
+   * Sessão de acompanhamento fica de fora — `senhaProvisoriaPendente` já
+   * ignora `support`.
+   */
+  if (senhaProvisoriaPendente(user)) {
+    return { ok: false, response: senhaAindaProvisoria(user, org.orgId, requestId) };
+  }
+
   // #2335, metade 2 — A ESCRITA NÃO PODE IR PARA UMA ORGANIZAÇÃO DIFERENTE DA
   // QUE A ABA MOSTRA. O cookie `active_org` é um por sessão do NAVEGADOR: com
   // duas abas abertas, alguém troca de organização na primeira e a segunda
@@ -218,7 +259,11 @@ export async function requireRole(min: Role, opts: RequireRoleOpts = {}): Promis
   if (user.is_platform_admin && !user.support && allowPlatformAdmin !== false) {
     if (allowPlatformAdmin === "leitura") return { ok: true, user, org };
     if (user.platform_admin_scope === "full") {
-      if (await mfaEmDivida()) {
+      // O alvo pode vir do path (`organizationId`), não do cookie: onde quem
+      // pede não é admin, é o poder de plataforma que autoriza, e dispositivo
+      // confiável não o abre — só o código provado nesta sessão.
+      const peloPoderDePlataforma = ROLE_RANK[org.role] < ROLE_RANK.admin;
+      if (peloPoderDePlataforma ? await mfaEmDividaEstrita() : await mfaEmDivida()) {
         void audit({
           action: "authz.denied",
           actorUserId: user.id,

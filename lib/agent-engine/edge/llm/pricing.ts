@@ -13,6 +13,9 @@
  * (`lib/agent-engine/env.ts`), e é por isso que `costCents` recebe o TTL em vigor em vez de
  * supor a doutrina.
  *
+ * Preço por MINUTO de áudio (só `whisper-1`, só na OpenAI): `custoDeAudioCents`, pela
+ * duração que a própria OpenAI cobra (`usage.seconds` da transcrição).
+ *
  * Modelo fora da tabela → custo NULL (desconhecido): mais honesto que inventar 0 —
  * o budget soma coalesce(cost_cents, 0), então modelo sem preço não consome teto;
  * quem habilitar um modelo novo para uma org adiciona a linha de preço aqui.
@@ -53,9 +56,12 @@ interface Preco {
   output: number;
   cacheRead: number;
   /** 1.25× a entrada — TTL de 5 minutos. */
-  cacheWrite5m: number;
+  cacheWrite5m?: number;
   /** 2× a entrada — TTL de 1 hora, a doutrina de caching (CLAUDE.md regra 15). */
-  cacheWrite1h: number;
+  cacheWrite1h?: number;
+  /** OpenAI: campos próprios, nunca inferidos do TTL Anthropic 5m/1h. */
+  cacheWrite30m?: number;
+  cacheWrite12h?: number;
 }
 
 /** USD por MILHÃO de tokens, por id EXATO de modelo (o sufixo de data é tolerado). */
@@ -84,16 +90,20 @@ const USD_PER_MTOK: Record<string, Preco> = {
 
   // OpenAI — gpt-4o, gpt-4o-mini e linhas 5.x e 6 do catálogo (issue #1478). Valores da
   // tabela Standard de developers.openai.com/api/docs/pricing, conferida em 23/09/2026
-  // (linha 6 em 11/10/2026).
+  // (linha 6 em 11/10/2026; gpt-6.1-terra em 27/10/2026).
   // Cache de leitura: 0.5× a entrada no gpt-4o; 0.1× nas linhas 5.x e 6, exceto o
-  // gpt-6.1-sol (0.05×); os `-pro` e o snapshot gpt-4o-2024-05-13 não têm desconto
+  // gpt-6.1-sol e o gpt-6.1-terra (0.05×); os `-pro` e o snapshot gpt-4o-2024-05-13 não têm desconto
   // (cacheRead = entrada).
   // Gravação de cache: as linhas 5.6 e 6 cobram 1.25× a entrada; nas demais é 1×.
-  // A OpenAI não distingue TTL na gravação, então 5m e 1h têm o mesmo valor.
-  // Fora da tabela: a faixa de contexto longo (> 272K tokens, preço 2×) da 5.4/5.5/5.6,
-  // e a da linha 6 (2× a entrada e o cache, 1.5× a saída).
+  // Linhas históricas preservadas; Terra6.1 usa tarifas próprias 30m/12h.
+  // Fonte: developers.openai.com/api/docs/guides/prompt-caching, 28/10/2026.
+  // As tarifas abaixo são as de base. A faixa longa dos modelos cobertos fica
+  // em LIMIARES_DE_CONTEXTO_LONGO.
+  // Ainda sem cálculo de faixa longa: os demais modelos com essa tarifa nas
+  // linhas 5.4/5.5/5.6 e 6, incluindo gpt-6.1-sol e gpt-6-astra (catálogo 0646).
   'gpt-6-astra': { input: 10, output: 50, cacheRead: 1, cacheWrite5m: 12.5, cacheWrite1h: 12.5 },
   'gpt-6.1-sol': { input: 2, output: 10, cacheRead: 0.1, cacheWrite5m: 2.5, cacheWrite1h: 2.5 },
+  'gpt-6.1-terra': { input: 1, output: 5, cacheRead: 0.05, cacheWrite30m: 1.25, cacheWrite12h: 2.5 },
   'gpt-6-luna': { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite5m: 0.125, cacheWrite1h: 0.125 },
   'gpt-4o-mini': { input: 0.15, output: 0.6, cacheRead: 0.075, cacheWrite5m: 0.15, cacheWrite1h: 0.15 },
   'gpt-4o': { input: 2.5, output: 10, cacheRead: 1.25, cacheWrite5m: 2.5, cacheWrite1h: 2.5 },
@@ -111,9 +121,21 @@ const USD_PER_MTOK: Record<string, Preco> = {
   'gpt-5.4-nano': { input: 0.2, output: 1.25, cacheRead: 0.02, cacheWrite5m: 0.2, cacheWrite1h: 0.2 },
   'gpt-5.4-pro': { input: 30, output: 180, cacheRead: 30, cacheWrite5m: 30, cacheWrite1h: 30 },
 
-  // Google — os seis Gemini do catálogo curado (migrations 0023 e 0101), com o
+  // Google — os Gemini do catálogo curado (migrations 0023 e 0101), com o
   // preço do `ai_pricing` em vigor (centavos/100). Sem estas linhas o custo de
   // toda org em Google saía NULL e o teto mensal não disparava.
+  //
+  // Os quatro Gemini 2.x abaixo (2.5 Pro, 2.5 Flash, 2.5 Flash-Lite, 2.0 Flash)
+  // são APOSENTADOS: 404 medido em 18/11/2026 com chave real (#4925) — o 2.0
+  // "no longer available", os três 2.5 "no longer available to new users". O
+  // preço deles fica porque instalação antiga e roteador (Requesty serve
+  // `google/gemini-2.5-flash`) ainda os chamam, e custo NULL calado é o defeito
+  // da #3013. O que NÃO pode acontecer é ESCOLHÊ-LOS — quem barra é o sexto
+  // parâmetro de `escolherModeloEconomico`, alimentado por
+  // `modelos-aposentados.ts`. Sem esse barramento o tier econômico os pegava por
+  // serem os mais baratos (10/40) e tomava 404 em todo turno. O econômico do
+  // Google é o `gemini-3.1-flash-lite` (0.25 / 1.50; Standard em
+  // aistudio.google.com/docs/pricing, 18/11/2026).
   // Cache: o caching implícito liga sozinho do 2.5 em diante e o motor monta um
   // prefixo estável para reaproveitá-lo, então num turno típico a maior parte da
   // entrada chega como `cacheReadTokens` (o @ai-sdk/google mapeia
@@ -142,7 +164,17 @@ const USD_PER_MTOK: Record<string, Preco> = {
   // 0.05× a entrada, não o 0.1× do resto do Google. Só cache implícito.
   'gemini-4-argon': { input: 4, output: 20, cacheRead: 0.2, cacheWrite5m: 4, cacheWrite1h: 4 },
   'gemini-3.1-flash-lite': { input: 0.25, output: 1.5, cacheRead: 0.025, cacheWrite5m: 0.25, cacheWrite1h: 0.25 },
-  'gemini-3.5-flash': { input: 1.5, output: 9, cacheRead: 0.15, cacheWrite5m: 1.5, cacheWrite1h: 1.5 },
+  // 3.5 Flash: APOSENTADO em 19/05/2026 e o endpoint NÃO morreu — toda requisição
+  // é roteada ao 3.6 Flash e faturada na tarifa dele (tabela de aposentados de
+  // aistudio.google.com/docs/deprecations, lida em 18/11/2026; a página de preços,
+  // aistudio.google.com/docs/pricing, não tem mais seção do 3.5 Flash). A linha
+  // fica porque este é o DEFAULT do Google no catálogo (`ai_models`, migration
+  // 0101) e instalação antiga continua chamando — custo NULL calado é o defeito da
+  // #3013. Valores iguais aos do 3.6 Flash de propósito: mesmo roteamento, mesma
+  // fatura, mesma promo até 2027-01-01. O 1,50/9,00 que ficava aqui não existe na
+  // página oficial em faixa nenhuma: cobrava 2× a entrada e 2,4× a saída do que o
+  // Google fatura hoje (0,75/3,75).
+  'gemini-3.5-flash': { input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite5m: 1.5, cacheWrite1h: 1.5 },
   // 3.5 Flash-Lite: tarifa Standard de ai.google.dev/gemini-api/docs/pricing
   // (06/10/2026). O armazenamento de cache ($1/MTok/h) não é por chamada.
   'gemini-3.5-flash-lite': { input: 0.3, output: 2.5, cacheRead: 0.03, cacheWrite5m: 0.3, cacheWrite1h: 0.3 },
@@ -181,7 +213,17 @@ export interface TokenUsage {
    * centavo.
    */
   cacheWrite1hTokens?: number;
+  /** OpenAI: parcela explicitamente gravada por 12h; ausente = padrão 30m. */
+  cacheWrite12hTokens?: number;
 }
+
+// Tokens de entrada por requisição, incluindo cache. Catálogos 0646 (Luna) e
+// 9031 (6.1 Terra), e faixa da linha 5.6 na tabela Standard da OpenAI (#5018).
+const LIMIARES_DE_CONTEXTO_LONGO: ReadonlyMap<string, number> = new Map([
+  ['gpt-6.1-terra', 272_000],
+  ['gpt-6-luna', 272_000],
+  ['gpt-5.6-terra', 272_000],
+]);
 
 /**
  * O preço de um id, tolerando o sufixo de data do vendor (`-20250805` ou `-2024-08-06`).
@@ -207,7 +249,9 @@ const PROMO_GEMINI_FLASH_36_38: Preco = {
 
 /**
  * Ids cuja tabela (e `ai_pricing`, PK só em `model`) guarda a tarifa POSTERIOR
- * à promo. Gemini 3.6/3.7/3.8 Flash: "January 1, 2027". Gemini 4 Argon: promo
+ * à promo. Gemini 3.5/3.6/3.7/3.8 Flash: "January 1, 2027" — o 3.5 entra na
+ * lista porque o endpoint dele roteia ao 3.6 Flash e é a tarifa do 3.6 que o
+ * Google fatura (deprecations, lida em 18/11/2026). Gemini 4 Argon: promo
  * "through Nov 30, 2026" e o dobro "from Dec 1, 2026" (página de pricing,
  * lida em 19/10/2026).
  */
@@ -215,6 +259,7 @@ const PROMOCOES: Record<string, { ateMs: number; preco: Preco }> = {
   'gemini-3.8-flash': { ateMs: ATE_GEMINI_FLASH_36_38_MS, preco: PROMO_GEMINI_FLASH_36_38 },
   'gemini-3.7-flash': { ateMs: ATE_GEMINI_FLASH_36_38_MS, preco: PROMO_GEMINI_FLASH_36_38 },
   'gemini-3.6-flash': { ateMs: ATE_GEMINI_FLASH_36_38_MS, preco: PROMO_GEMINI_FLASH_36_38 },
+  'gemini-3.5-flash': { ateMs: ATE_GEMINI_FLASH_36_38_MS, preco: PROMO_GEMINI_FLASH_36_38 },
   'gemini-4-argon': {
     ateMs: Date.parse('2026-12-01T00:00:00.000Z'),
     preco: { input: 2, output: 10, cacheRead: 0.1, cacheWrite5m: 2, cacheWrite1h: 2 },
@@ -227,7 +272,14 @@ function chaveDoModelo(model: string): string | undefined {
   // na MESMA ordem da tolerância do sufixo de data, para um id com prefixo+sufixo
   // (`anthropic/claude-sonnet-5-20250929`) casar também. O id completo segue
   // tentado PRIMEIRO: um id que a tabela conheça com barra vence o recorte.
+  //
+  // O catálogo do OpenRouter escreve a versão com PONTO (`anthropic/claude-haiku-5.5`)
+  // e a tabela indexa com HÍFEN (`claude-haiku-5-5`). Por isso as variantes com o
+  // ponto trocado por hífen entram no FIM: o id exato, o sem data e o sem prefixo
+  // continuam vencendo, e um id que a tabela já conhece COM ponto (`gpt-6.1-terra`)
+  // não é reescrito (issue #1931).
   const semPrefixo = model.includes("/") ? model.slice(model.indexOf("/") + 1) : model;
+  const comHifen = (id: string) => id.replace(/\./g, "-");
   const candidatos = [
     model,
     model.replace(/-\d{8}$/, ""),
@@ -235,6 +287,10 @@ function chaveDoModelo(model: string): string | undefined {
     semPrefixo,
     semPrefixo.replace(/-\d{8}$/, ""),
     semPrefixo.replace(/-\d{4}-\d{2}-\d{2}$/, ""),
+    comHifen(semPrefixo),
+    comHifen(semPrefixo.replace(/-\d{8}$/, "")),
+    comHifen(semPrefixo.replace(/-\d{4}-\d{2}-\d{2}$/, "")),
+    comHifen(model),
   ];
   return candidatos.find((id) => USD_PER_MTOK[id] !== undefined);
 }
@@ -263,7 +319,7 @@ export function temPrecoNoMotor(model: string): boolean {
  *
  * `em` é o instante da chamada. Sem ele, vale agora — é o que grava
  * `llm_calls.cost_cents`. Só os ids de PROMOCOES trocam de tarifa com ele
- * (3.6/3.7/3.8 Flash em 2027-01-01T00:00:00Z, 4 Argon em 2026-12-01T00:00:00Z);
+ * (3.5/3.6/3.7/3.8 Flash em 2027-01-01T00:00:00Z, 4 Argon em 2026-12-01T00:00:00Z);
  * os outros ids ignoram o instante.
  */
 export function costCents(
@@ -277,22 +333,47 @@ export function costCents(
     return null;
   }
   const noCacheInput = Math.max(0, usage.inputTokens - usage.cacheReadTokens - usage.cacheWriteTokens);
+  const limiar = LIMIARES_DE_CONTEXTO_LONGO.get(chaveDoModelo(model) ?? '');
+  const contextoLongo = limiar !== undefined && usage.inputTokens > limiar;
+  const fatorEntrada = contextoLongo ? 2 : 1;
+  const fatorSaida = contextoLongo ? 1.5 : 1;
   const usd =
-    (noCacheInput * p.input +
+    ((noCacheInput * p.input +
       usage.cacheReadTokens * p.cacheRead +
-      custoDaGravacao(p, usage, cacheTtl) +
-      usage.outputTokens * p.output) /
+      custoDaGravacao(p, usage, cacheTtl)) * fatorEntrada +
+      usage.outputTokens * p.output * fatorSaida) /
     1_000_000;
   return usd * 100;
 }
 
+// US$ por minuto, só modelos cobrados por DURAÇÃO e só da OpenAI. Fonte:
+// https://developers.openai.com/api/docs/pricing, linha "Whisper | Transcription |
+// $0.006 / minute", conferida em 31/10/2026. `Map`, e não objeto, para que uma chave do
+// protótipo (`constructor`) nunca case como modelo.
+const USD_POR_MINUTO_DE_AUDIO: ReadonlyMap<string, number> = new Map([['whisper-1', 0.006]]);
+
+/**
+ * Custo em CENTS de uma transcrição cobrada por duração, ou null. Recebe `unknown` porque
+ * o número vem do JSON da resposta: fora do formato (não número, infinito, negativo) ou
+ * modelo sem preço por minuto devolve null, e nunca lança — a chamada já foi paga.
+ */
+export function custoDeAudioCents(model: string, segundos: unknown): number | null {
+  const usd = USD_POR_MINUTO_DE_AUDIO.get(model);
+  if (usd === undefined || typeof segundos !== 'number' || !Number.isFinite(segundos) || segundos < 0) return null;
+  return (segundos / 60) * usd * 100;
+}
+
 /** A gravação de cache em USD × milhão de tokens: dividida por TTL quando o provedor disse. */
 function custoDaGravacao(p: Preco, usage: TokenUsage, cacheTtl: CacheTtl): number {
+  if (p.cacheWrite30m !== undefined && p.cacheWrite12h !== undefined) {
+    const longo = Math.min(Math.max(0, usage.cacheWrite12hTokens ?? 0), usage.cacheWriteTokens);
+    return (usage.cacheWriteTokens - longo) * p.cacheWrite30m + longo * p.cacheWrite12h;
+  }
   if (usage.cacheWrite1hTokens === undefined) {
-    return usage.cacheWriteTokens * (cacheTtl === '5m' ? p.cacheWrite5m : p.cacheWrite1h);
+    return usage.cacheWriteTokens * (cacheTtl === '5m' ? p.cacheWrite5m! : p.cacheWrite1h!);
   }
   const umaHora = Math.min(Math.max(0, usage.cacheWrite1hTokens), usage.cacheWriteTokens);
-  return umaHora * p.cacheWrite1h + (usage.cacheWriteTokens - umaHora) * p.cacheWrite5m;
+  return umaHora * p.cacheWrite1h! + (usage.cacheWriteTokens - umaHora) * p.cacheWrite5m!;
 }
 
 /**
@@ -360,4 +441,126 @@ export function costCentsComVirada(
     '1h',
     em,
   );
+}
+
+/** SDK usage de UMA requisição. O total de um tool loop não determina a faixa. */
+interface UsoDePasso {
+  inputTokens?: number;
+  outputTokens?: number;
+  inputTokenDetails?: { cacheReadTokens?: number; cacheWriteTokens?: number };
+  raw?: unknown;
+}
+
+/**
+ * OpenAI Responses usa implicit cache com TTL padrão 30m. O motor não solicita
+ * 12h nem breakpoints OpenAI: nunca inferir isso do knob Anthropic 5m/1h.
+ * O SDK instalado pode omitir cache_write_tokens na normalização; o usage cru
+ * documentado conserva a informação. Somamos custos por passo, não os contextos.
+ */
+export function custoPorPassosComFaixaLonga(model: string, result: {
+  usage: UsoDePasso;
+  steps?: ReadonlyArray<{ usage?: UsoDePasso }>;
+}): number | undefined {
+  if (!LIMIARES_DE_CONTEXTO_LONGO.has(chaveDoModelo(model) ?? '')) return undefined;
+  const passos = result.steps?.length ? result.steps.map(s => s.usage) : [result.usage];
+  return passos.reduce((total, u) => {
+    const raw = u?.raw as { input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number } } | undefined;
+    return total + (costCents(model, {
+      inputTokens: u?.inputTokens ?? 0,
+      outputTokens: u?.outputTokens ?? 0,
+      cacheReadTokens: raw?.input_tokens_details?.cached_tokens ?? u?.inputTokenDetails?.cacheReadTokens ?? 0,
+      cacheWriteTokens: raw?.input_tokens_details?.cache_write_tokens ?? u?.inputTokenDetails?.cacheWriteTokens ?? 0,
+    }) ?? 0);
+  }, 0);
+}
+
+/**
+ * O custo que a OpenRouter COBROU, em centavos, somado por passo — lido do corpo
+ * cru de cada resposta (`step.response.body`, que o seam só pede na OpenRouter
+ * oficial). `undefined` quando algum passo não traz `usage.cost` numérico e não
+ * negativo, ou é BYOK sem `upstream_inference_cost` numérico e não negativo: aí
+ * vale a tabela, como antes, e nunca um número pela metade. Fora do BYOK,
+ * upstream ausente ou negativo conta 0.
+ *
+ * A regra de BYOK (doc usage-accounting: `cost` é o cobrado na conta da
+ * OpenRouter; `cost_details.upstream_inference_cost`, o cobrado pelo provedor de
+ * origem):
+ *   - `is_byok` true  → cost + upstream (a taxa dela mais a conta da sua chave);
+ *   - `is_byok` false → cost (o upstream já está dentro dele);
+ *   - sem o campo     → max(cost, upstream). O exemplo de Chat Completions da doc
+ *     traz cost 0,95 e upstream 19 sem a flag — 0,95 é 5% de 19, a taxa de BYOK:
+ *     "só cost" gravaria 5% do gasto (e 0 dentro da franquia), e o teto nunca
+ *     fecharia; "somar sempre" dobraria a resposta sem BYOK que traga os dois.
+ *     O max nunca dobra e, no BYOK sem flag, subconta no máximo a taxa.
+ */
+export function custoInformadoPeloOpenRouter(result: {
+  response?: { body?: unknown };
+  steps?: ReadonlyArray<{ response?: { body?: unknown } }>;
+}): number | undefined {
+  const corpos = result.steps?.length ? result.steps.map((s) => s.response?.body) : [result.response?.body];
+  let total = 0;
+  for (const bruto of corpos) {
+    const usage = (corpoComoObjeto(bruto) as { usage?: UsoDaOpenRouter | null } | undefined)?.usage;
+    const cost = usage?.cost;
+    // Custo negativo não é fatura: um número assim abateria o gasto do mês e
+    // furaria o teto. Volta à tabela.
+    if (typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0) return undefined;
+    const upBruto = usage?.cost_details?.upstream_inference_cost;
+    const upValido = typeof upBruto === 'number' && Number.isFinite(upBruto) && upBruto >= 0;
+    // BYOK sem upstream legível: o `cost` é só a taxa dela (0 dentro da franquia),
+    // e gravá-lo sozinho seria a mesma porta do custo negativo. Volta à tabela.
+    if (usage?.is_byok === true && !upValido) return undefined;
+    const up = upValido ? upBruto : 0;
+    total += usage?.is_byok === true ? cost + up : usage?.is_byok === false ? cost : Math.max(cost, up);
+  }
+  return total * 100;
+}
+
+/** Os campos de `usage` que a OpenRouter devolve e o custo lê — tudo `unknown` até conferir. */
+interface UsoDaOpenRouter {
+  cost?: unknown;
+  is_byok?: unknown;
+  cost_details?: { upstream_inference_cost?: unknown } | null;
+}
+
+/** O corpo cru do passo: objeto, ou texto JSON. Qualquer outra coisa não tem custo a ler. */
+export function corpoComoObjeto(bruto: unknown): object | undefined {
+  if (typeof bruto === 'string') {
+    try {
+      const json: unknown = JSON.parse(bruto);
+      return json !== null && typeof json === 'object' ? json : undefined;
+    } catch {
+      // Texto que não é JSON não traz `usage.cost`: o custo volta à tabela.
+      return undefined;
+    }
+  }
+  return bruto !== null && typeof bruto === 'object' ? bruto : undefined;
+}
+
+/**
+ * Síntese de voz (ElevenLabs) é cobrada por CARACTERE, não por token — unidade
+ * diferente de tudo acima, por isso uma função própria em vez de forçar
+ * `TokenUsage`.
+ *
+ * Fonte: https://elevenlabs.io/pricing (conferida 2026-10-29). A página pública
+ * não divulga USD/crédito direto — só plano em USD + créditos/mês — e os
+ * planos NÃO convergem para uma taxa única: Creator (US$11 / 121k créditos)
+ * destoa dos demais, provavelmente por desconto de lançamento/anual, enquanto
+ * Starter, Pro, Scale e Business concordam entre si em ≈US$0,000165/crédito.
+ * É ESSA taxa — a que bate entre quatro planos independentes, não a que destoa
+ * de um — que esta tabela usa. 1 caractere = 1 crédito no modelo padrão
+ * (`eleven_multilingual_v2`); modelos "Flash/Turbo" custam metade do crédito
+ * por caractere, mas este produto não expõe escolha de modelo de voz ainda —
+ * quando expuser, este arquivo precisa de uma linha por modelo, não uma
+ * constante só.
+ *
+ * ⚠️ Preço de API de terceiro muda sem aviso e esta tabela não se atualiza
+ * sozinha — quem revisar a cobrança real de uma instalação deve CONFERIR a
+ * página antes de confiar neste número, não só confiar no código.
+ */
+const USD_POR_CREDITO_ELEVENLABS = 0.000165;
+
+/** Custo em CENTS de sintetizar `caracteres` de texto em voz — nunca null: é a única tarifa que este arquivo conhece para voz hoje. */
+export function custoDeVozCents(caracteres: number): number {
+  return Math.max(0, caracteres) * USD_POR_CREDITO_ELEVENLABS * 100;
 }

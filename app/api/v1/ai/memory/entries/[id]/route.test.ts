@@ -4,7 +4,9 @@ import { NextRequest } from "next/server";
 import { requireRole } from "@/lib/auth/require-role";
 import { audit } from "@/lib/audit";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { createClient } from "@/lib/supabase/server";
 import type { AuthUser } from "@/lib/auth/types";
+import { validateBearerToken } from "@/lib/mcp/auth";
 
 /**
  * Épico Operação Visível (F1, review T4) — PATCH /api/v1/ai/memory/entries/[id]:
@@ -12,11 +14,21 @@ import type { AuthUser } from "@/lib/auth/types";
  *    created_by, mesmo se o body tentar mandar);
  *  - filtra por id E organization_id;
  *  - status fora do enum → 422 validation_failed.
+ *
+ * O handler agora resolve auth por `resolveAuthDual` (sessão OU token).
+ * Na sessão, `createClient()` é usado; no token, `createAdminClient()` e
+ * `validateBearerToken()`. Os testes de sessão mantêm `requireRole` e ganham
+ * `createClient` mockado com o mesmo dublê que `createAdminClient`.
  */
 
 vi.mock("@/lib/auth/require-role", () => ({ requireRole: vi.fn() }));
+vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
 vi.mock("@/lib/audit", () => ({ audit: vi.fn(async () => undefined) }));
+vi.mock("@/lib/mcp/auth", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/mcp/auth")>()),
+  validateBearerToken: vi.fn(),
+}));
 
 const ORG_ID = "22222222-2222-4222-8222-222222222222";
 const USER_ID = "11111111-1111-4111-8111-111111111111";
@@ -27,7 +39,10 @@ interface UpdateState {
   eqCalls: Array<[string, unknown]>;
 }
 
-function makeAdminStub(updateResult: { id: string; status: string } | null, state: UpdateState) {
+function makeAdminStub(
+  updateResult: { id: string; status: string; valid_until?: string | null } | null,
+  state: UpdateState,
+) {
   return {
     from(table: string) {
       if (table !== "org_memory_entries") throw new Error(`unexpected table ${table}`);
@@ -42,6 +57,11 @@ function makeAdminStub(updateResult: { id: string; status: string } | null, stat
         },
         select() {
           return b;
+        },
+        // Leitura de existência da rota (select("id").eq().eq().maybeSingle()):
+        // a entrada existe nesta organização.
+        maybeSingle() {
+          return Promise.resolve({ data: { id: ENTRY_ID }, error: null });
         },
         single() {
           return Promise.resolve({ data: updateResult, error: updateResult ? null : new Error("boom") });
@@ -67,6 +87,10 @@ function mockAuthzOk() {
     user,
     org: { orgId: ORG_ID, name: "Org", role: "manager" },
   });
+  vi.mocked(createClient).mockResolvedValue(
+    makeAdminStub({ id: ENTRY_ID, status: "archived" }, { payload: null, eqCalls: [] }) as never,
+  );
+  vi.mocked(validateBearerToken).mockResolvedValue(null as never);
 }
 
 function patchReq(body: unknown) {
@@ -117,6 +141,46 @@ describe("PATCH /api/v1/ai/memory/entries/[id]", () => {
     expect(vi.mocked(audit)).toHaveBeenCalledWith(
       expect.objectContaining({ action: "ai.org_memory_entry_updated", organizationId: ORG_ID }),
     );
+  });
+
+  it("#2369 — data de validade sozinha atualiza só o prazo (arquivar continua separado)", async () => {
+    mockAuthzOk();
+    const state: UpdateState = { payload: null, eqCalls: [] };
+    vi.mocked(createAdminClient).mockReturnValue(
+      makeAdminStub({ id: ENTRY_ID, status: "active", valid_until: "2026-11-01" }, state) as never,
+    );
+
+    const { PATCH } = await import("./route");
+    const res = await PATCH(patchReq({ valid_until: "2026-11-01" }), ctx());
+
+    expect(res.status).toBe(200);
+    expect(Object.keys(state.payload as object).sort()).toEqual(["updated_at", "valid_until"]);
+    expect(state.payload?.valid_until).toBe("2026-11-01");
+    const body = (await res.json()) as { data: { valid_until: string | null } };
+    expect(body.data.valid_until).toBe("2026-11-01");
+  });
+
+  it("#2369 — `valid_until: null` tira o prazo: o aprendizado volta a valer para sempre", async () => {
+    mockAuthzOk();
+    const state: UpdateState = { payload: null, eqCalls: [] };
+    vi.mocked(createAdminClient).mockReturnValue(
+      makeAdminStub({ id: ENTRY_ID, status: "active", valid_until: null }, state) as never,
+    );
+
+    const { PATCH } = await import("./route");
+    const res = await PATCH(patchReq({ valid_until: null }), ctx());
+
+    expect(res.status).toBe(200);
+    expect(state.payload).toHaveProperty("valid_until", null);
+  });
+
+  it("#2369 — corpo sem status nem prazo → 422 (não é um PATCH vazio silencioso)", async () => {
+    mockAuthzOk();
+    const { PATCH } = await import("./route");
+    const res = await PATCH(patchReq({}), ctx());
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("validation_failed");
   });
 
   it("status fora do enum → 422 validation_failed", async () => {

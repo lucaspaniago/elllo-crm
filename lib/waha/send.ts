@@ -31,6 +31,12 @@ export interface MarcarConversaComoLidaInput {
   organizationId: string;
   sessionName: string;
   chatId: string;
+  /**
+   * As mensagens recebidas que a resposta lê (`OutboundEnvelope.readExternalIds`,
+   * #5015), já recortadas ao chat desta resposta. Sem ids, marca a conversa
+   * inteira, como antes.
+   */
+  messageIds?: readonly string[];
 }
 
 export interface ResolveWahaChatIdInput {
@@ -49,6 +55,12 @@ export interface ResolveWahaChatIdInput {
    * precisava valer. Ler o lid daqui é o que faz a ordem abaixo significar algo.
    */
   waLid?: string | null | undefined;
+  /**
+   * Chat da última mensagem RECEBIDA na conversa, só quando a ficha tem telefone
+   * extra (`lib/waha/ultima-recebida.ts`). Vence o `wa_lid`: a pessoa escreveu por
+   * este número e é por ele que a resposta volta.
+   */
+  ultimoRecebidoChatId?: string | null | undefined;
 }
 
 /**
@@ -72,6 +84,9 @@ export interface ResolveWahaChatIdInput {
  */
 export function resolveWahaChatId(input: ResolveWahaChatIdInput): string | null {
   if (input.isGroup && input.groupChatId) return input.groupChatId;
+  // Ficha com telefone extra: a resposta volta pelo número que a pessoa escreveu
+  // (o `wa_lid` é do principal, e responder por ele mandaria ao número errado).
+  if (input.ultimoRecebidoChatId) return input.ultimoRecebidoChatId;
   // `wa_lid` primeiro; `wa_identity` só como retaguarda para chamador que ainda
   // não lê a coluna nova (e que, por definição, é de contato sem telefone).
   if (input.waLid) return `${input.waLid}@lid`;
@@ -118,7 +133,7 @@ export async function marcarConversaComoLida(
   const client = getWahaClient();
   if (!client) return false;
   try {
-    await client.sendSeen(input.sessionName, input.chatId);
+    await client.sendSeen(input.sessionName, input.chatId, input.messageIds);
     return true;
   } catch (erro) {
     logger.warn("waha: conversa não marcada como lida (a resposta já saiu)", {

@@ -33,7 +33,7 @@ caminho único e vira o modo avançado; o padrão passa a ser a receita pronta
 |---|---|---|
 | C1 | O dialeto real de cada família. ACF e JetEngine mudam entre versões: nomes de `meta_key`, formato de relacionamento (ID solto vs. serializado), tabelas próprias de relação. **NÃO MEDIDO**. | Integração contra cópia real de WP+ACF e WP+JetEngine (versões fixadas): roda cada receita e confere linhas, fotos e taxonomias. Receita que não passou aqui não é liberada. |
 | C2 | Quanto custa uma resposta de receita em tokens (linhas × colunas × fotos). **NÃO MEDIDO** — INFERIDO que 3–4 imóveis com foto estouram o contexto se vierem inteiros. | Mede tokens por resposta em cada receita e fixa o teto de itens e de bytes por item a partir do medido. |
-| C3 | O que o envio aceita por imagem via URL (tipo, tamanho, tempo). **NÃO MEDIDO**. | Envio real pelo adapter com as URLs das receitas (jpg/png/webp, até o teto da D7); registra aceito/recusado e o tempo. |
+| C3 | O que o envio aceita por imagem via URL (tipo, tamanho, tempo). **MEDIDO em 10/11/2026** no número conectado por QR Code: jpg, png e webp aceitos, do pequeno a 99,7% do teto (ver "C3 medido" na R4). O canal oficial da Meta segue sem medir. | Envio real pelo adapter com as URLs das receitas (jpg/png/webp, até o teto da D7); registra aceito/recusado e o tempo. |
 | C4 | Quantos itens por turno não irritam (2? 3?). O braço "4" está fora: exigiria mudar o knob de envios. **NÃO MEDIDO**. | Prova em par com gente de verdade: 2 e 3 itens; registra qual volume gerou resposta vs. silêncio. O desenho da prova resolve antes o orçamento de envios (I4 da revisão): a prova mede irritação, não o teto. |
 | C5 | Por quanto tempo o rastro da execução guarda o resultado da receita e com que redação. **NÃO MEDIDO**. | Lê `lib/ai/runtime/serialize.ts:53-66` + retenção configurada; o achado vira regra explícita na D8. |
 | C6 | Se URL de foto pode virar SSRF (foto apontando para IP interno). **NÃO MEDIDO**. | Teste com URL de foto para host interno: o envio deve recusar antes do fetch. |
@@ -44,12 +44,12 @@ caminho único e vira o modo avançado; o padrão passa a ser a receita pronta
 | # | Tema | Decisão |
 |---|---|---|
 | D1 | Escopo da fase | Receitas prontas por família (padrão) + VIEW na origem (avançado) + foto por URL validada (proposta; a confirmação fica para o PR da parte que envia a foto) + ida ao funil via `crm_create_lead`. Sem SQL livre em v1. |
-| D2 | Famílias da v1 | `woocommerce` (produtos/pedidos), `acf-imoveis`, `jetengine-imoveis`, `tabela-direta` (tabelas planas, coluna = dado). Sistema artesanal com relacionamento próprio: sem receita — cai no avançado (VIEW). |
+| D2 | Famílias da v1 | `woocommerce` (produtos/pedidos), `wordpress` (o **conteúdo de qualquer tipo de post** — imóveis, veículos, cursos, cardápio; ACF ou JetEngine modo padrão), `tabela-direta` (tabelas planas, coluna = dado; o JetEngine CCT é um **modelo** desta receita, não uma receita à parte). Sistema artesanal com relacionamento próprio: sem receita — cai no avançado (VIEW). |
 | D3 | Onde a receita mora | Template + schema de parâmetros no **código** (versionado, revisado, sai no `update.sh`). A **instância** (receita X + parâmetros preenchidos na tela) é gravada no nosso Postgres, na linha da conexão (`jsonb`, RLS por org — mesma mecânica das `sources` da Spec 23 D3/Fatia 2a). Proposta de coluna nova segue a tripla (migration com `-- manifest:`, apêndice idempotente no `baseline.sql` com `add column if not exists`, colunas novas no FIM de qualquer lista de view, `revoke`/`grant` reemitidos se `_safe` mudar, sem linha no `MANIFEST.md`, `pnpm checar:colisao-de-migration`); tabela própria só pela função provisionadora da ADR-0002 — decisão do mantenedor. Precedente das `sources`: a coluna `receitas` fica **fora** da view `_safe` e das listas `COLUNAS_SEGURAS` (só contagem exposta); o array só é lido pelo servidor com `organization_id` no filtro. |
 | D4 | Execução | Template + parâmetros validados (Zod) → placeholders ligados, nunca concatenação. Validador SELECT-only + tabelas permitidas antes de rodar. As tabelas do JOIN da receita passam pela mesma lista de fontes liberadas da Spec 23 D7, no mesmo ponto único de aplicação (`tabelaLiberada`/`colunasLiberadas`/`aplicarAoCatalogo` em `lib/external-db/fontes.ts`, aplicados em `criarDialetoPostgres`, `lib/external-db/dialeto.ts`): tabela fora da lista → `fonte_nao_liberada`; a receita nunca furta a lista. Execução na armadura do dialeto: transação só-leitura + timeouts (`lib/external-db/conexao.ts:127-147`, CONFIRMADO) e tetos (`max_rows`/`max_filters`/`max_response_bytes` em `lib/external-db/credenciais.ts`, truncagem de célula em `lib/external-db/leitura.ts:23`, teto de bytes da tool — CONFIRMADO). Nada da origem é persistido como entidade: o resultado volta ao turno e o que fica é o rastro da execução sob as regras da D8; auditoria sem valores (padrão de `dados-externos.ts:17-22`, CONFIRMADO). |
 | D5 | ACF vs. JetEngine | Receitas separadas por família; o sistema **sugere** pela heurística (tabelas existentes + amostra de `meta_key`), a palavra final é do admin na tela. A heurística roda só no caminho de preview do admin (só-leitura); em empate (ambos presentes, restos de `meta_key` legados), sugere as duas e o admin escolhe. Nenhuma receita é liberada sem o C1 verde naquela família/versão. |
 | D6 | Fluxo WhatsApp → funil | Até o teto do C4 (proposta inicial: **2** — o teto de envios por turno é 3, `DEFAULT_MAX_SENDS_PER_TURN` em `lib/agent-engine/agent/inbound-turn.ts`, CONFIRMADO, e cada item consome um envio; 4 itens exigem mudar o knob, fora da v1), um item por mensagem `send_message` (foto + legenda; diverge do padrão interno de N fotos numa mensagem em `lib/agent-engine/agent/fotos-do-produto.ts:100-111` — aqui um item = um interesse mapeável; o atrito com o anti-ban entra na prova). Interesse explícito → `crm_create_lead` (`lib/mcp/tools/leads.ts:236-260`, CONFIRMADO: `pipeline_id` + `stage_id` obrigatórios). Contrato PROPOSTO (decisão do mantenedor): `source: "external"`, referência em formato único `<familia>:<id>` (ex.: `acf:4821`) na `description` + nota no lead; funil/etapa de destino = padrão configurado na instância da receita (sem padrão, aviso na Central em vez de lead — item 4 do checklist); interesse repetido no mesmo item atualiza em vez de duplicar (regra de dedup por contato+referência, a desenhar na R5). |
-| D7 | Foto por URL | Guarda canônica de fetch externo: `assertUrlDeMidiaSegura` (`lib/messaging/media/url-de-midia-externa.ts:34`, CONFIRMADO — textual + destino resolvido, com exceção do Storage assinado) + teto de tamanho + timeout do C3; C6 é o gate. Sem igualdade de host (banco `localhost`/contêiner vs. fotos no domínio/CDN — igualdade mataria o caso do leigo); sem a guarda canônica, sem envio. Falha de mídia nunca derruba o texto (manda sem foto e registra). Legenda herda `LIMITE_DA_LEGENDA = 1024` (`lib/agent-engine/agent/fotos-do-produto.ts:23-24`, CONFIRMADO): estouro sai como texto antes da foto. WhatsApp não tem "card": foto com legenda é o formato. |
+| D7 | Foto por URL | Guarda canônica de fetch externo: `assertUrlDeMidiaSegura` (`lib/messaging/media/url-de-midia-externa.ts:34`, CONFIRMADO — textual + destino resolvido, com exceção do Storage assinado) + teto de tamanho + timeout do C3; C6 é o gate. Sem igualdade de host (banco `localhost`/contêiner vs. fotos no domínio/CDN — igualdade mataria o caso do leigo); sem a guarda canônica, sem envio. Falha de mídia nunca derruba o texto (manda sem foto e registra). Legenda herda `LIMITE_DA_LEGENDA = 1024` (`lib/agent-engine/agent/fotos-do-produto.ts:23-24`, CONFIRMADO): estouro sai como texto antes da foto. WhatsApp não tem "card": foto com legenda é o formato. Revisada na R4: ver "Revisões à D7 e ao fora de escopo". |
 | D8 | LGPD/rastro | O resultado da receita passa pelo rastro da execução (`ai_agent_runs.tool_calls`, redação por chave + corte — ponto levantado na triagem da #2527). A spec fixa: o que é redigido, o corte por campo e a retenção — explícitos antes da primeira fatia. |
 
 ## Regra de escopo da D8 (escrita na R1)
@@ -90,14 +90,14 @@ Spec 23:
 ## O fluxo do apartamento (caso de aceite)
 
 1. Cliente no WhatsApp: "quero apê de 2 quartos na Asa Norte até 600 mil".
-2. Agente executa a instância `acf-imoveis` (ou `jetengine-imoveis`) da conexão com esses filtros, ao vivo, só-leitura.
+2. Agente executa a instância `wordpress-conteudo` da conexão com esses filtros, ao vivo, só-leitura.
 3. Responde até 2 mensagens, uma por imóvel: foto + legenda (endereço, preço, quartos).
 4. Cliente: "tenho interesse nesse segundo" → `crm_create_lead` (`source: "external"`, `acf:4821` na descrição + nota, funil/etapa padrão da instância) → atendimento segue no funil.
 5. Mesmo roteiro vale para produto (WooCommerce) e carro (tabela direta).
 
 ## Superfície (proposta)
 
-- `lib/external-db/receitas/<familia>.ts` (novo): template, schema de parâmetros, tabelas permitidas (incluindo as de taxonomia da família: `wp_terms`/`wp_term_taxonomy`/`wp_term_relationships` no WordPress, taxonomias do Woo onde couber — o ponto meta-vs-taxonomia decidido no C1 de cada família; v1 sem taxonomia sai com a limitação escrita), campo de foto, teto.
+- `lib/external-db/receitas/<familia>.ts` (novo): template, schema de parâmetros, tabelas permitidas (incluindo as de taxonomia da família: `wp_terms`/`wp_term_taxonomy`/`wp_term_relationships` no WordPress, taxonomias do Woo onde couber — o ponto meta-vs-taxonomia decidido no C1 de cada família; a R2 do WordPress já resolve o ponto: a categoria entra na receita, e o administrador escolhe se o dado vem de campo ou de categoria), campo de foto, teto.
 - Coluna `receitas jsonb` em `external_db_connections` (tripla) + validação Zod central (nunca path solto na UI — anti-pattern 6 do `CLAUDE.md`).
 - Tool do agente `crm_consultar_receita` (descobrir instâncias + executar com params) + entrada no catálogo com `modulo: "banco_externo"` (defeito 1 da triagem da #2527 não se repete).
 - `send_message` ganha `imagem_url` (opcional, sob as regras da D7); `produto_codigo` (catálogo interno, `inbound-turn.ts`, CONFIRMADO) continua como está.
@@ -106,7 +106,7 @@ Spec 23:
 ## Fora de escopo
 
 - Escrita no banco externo; SQL livre digitado pelo admin (futuro, com revisão e allowlist de tabelas).
-- Sync contínuo para entidades do CRM; cópia de mídia para o nosso Storage.
+- Sync contínuo para entidades do CRM; cópia de mídia em lote para o nosso Storage. A foto de um envio é guardada na conversa desde a R4 (ver "Revisões à D7 e ao fora de escopo").
 - MariaDB; WP-REST/senha de aplicação (família HTTP futura, como na 23).
 - Sistema artesanal com relacionamento próprio (modo avançado cobre).
 
@@ -122,8 +122,8 @@ Spec 23:
 | Fatia | O que entrega |
 |---|---|
 | R1 | Receita `woocommerce` + instância + tool (sem foto, sem funil; exige a regra de escopo da D8 escrita) |
-| R2 | Receita `acf-imoveis` (exige C1 ACF verde) |
-| R3 | Receita `jetengine-imoveis` (exige C1 JetEngine verde) + `tabela-direta` |
+| R2 | Receita `wordpress-conteudo` (o conteúdo de QUALQUER tipo de post; exige C1 verde — medido em 21/10/2026) |
+| R3 | Receita `jetengine-imoveis` (Custom Content Types) + `tabela-direta` |
 | R4 | `imagem_url` no envio (exige C3/C6 verdes) |
 | R5 | Ida ao funil (D6: contrato, padrão de destino, dedup) + e2e do apartamento |
 | R6 | Runbook do leigo (a regra de escopo da D8 já entrou antes da R1) |
@@ -171,3 +171,499 @@ A fatia R1 (receita `woocommerce` + instância + tool) entrega:
 - e2e: `tests/e2e/banco-externo-receitas.spec.ts` registrada em `SPECS_PARTE_1` do `.github/workflows/e2e.yml` (não rodada aqui — veredito do CI)
 
 Destino: núcleo, dentro do módulo de banco externo, que nasce desligado (revisão 1 da Spec 25, aceita pelo mantenedor).
+
+## R2 entregue: o conteúdo do WordPress, de qualquer nicho
+
+A fatia R2 entrega a receita **`wordpress-conteudo`** — o conteúdo de um site
+WordPress, de **qualquer tipo de post** — mais o modelo "Imóveis" e a tela que
+monta a configuração.
+
+### A decisão do dono (21/10/2026): a receita deixa de ser de UM nicho
+
+**O que foi medido.** Num WordPress real — **ACF 6.8.10** (gratuito) +
+**JetEngine 3.5.8**, MySQL **8.0.45** —, o cadastro típico de uma imobiliária
+(16 imóveis) guarda **bairro e cidade só como CATEGORIA**: a taxonomia
+hierárquica `localizacao` (Cidade › Bairro), mais `tipo_imovel` e
+`finalidade`. O preço, o aluguel, os quartos e a situação são campos
+(`meta_key`).
+
+**O que a receita anterior devolvia: ZERO imóveis.** Quatro causas, todas
+medidas:
+
+| # | Causa | Efeito |
+|---|---|---|
+| 1 | o bairro era junção **obrigatória** e só vinha de `meta_key` | nenhum imóvel tinha o campo → a lista vinha vazia |
+| 2 | o preço era junção **obrigatória** | imóvel só de aluguel (sem preço de venda) sumia |
+| 3 | a situação **não era filtrada** | imóvel vendido era oferecido ao cliente |
+| 4 | tipo e finalidade **não eram lidos** | a busca por "casa" ou "para venda" não filtrava |
+
+**A decisão.** A receita vira **"Conteúdo do WordPress (qualquer tipo de
+post)"**, e o administrador é quem diz o tipo de post, quais campos o site
+guarda e de onde vem cada um. Três razões, todas escritas:
+
+1. **Um site de veículos, de cursos ou de cardápio guarda os dados do mesmo
+   jeito** (tipo de post + `wp_postmeta` + categorias) e não conseguia usar a
+   receita: os campos de imobiliária estavam fixos no código.
+2. **Uma receita de um nicho só tende a ser EXTENSÃO, não núcleo**
+   (`docs/doctrine/extensoes.md`). O núcleo continua útil com zero extensões.
+3. **O "Imóveis" continua existindo — como MODELO**: uma configuração que
+   pré-preenche a tela (um clique), sem código de nicho na receita.
+
+**O que a R2 preserva** (medido em 21/10/2026: 10 buscas certas em cada
+cadastro realista, pelo motor e pela tela — Pré-visualizar): o LEFT JOIN por
+campo (nenhum campo é obrigatório — o imóvel só de aluguel não tem preço de
+venda), o `precoNumero`, a regra de nível filho/raiz, a finalidade por
+**igualdade**, o "esconder", o `group_concat` (um imóvel com dois termos na
+mesma taxonomia sai UMA vez), as tabelas de termo liberadas só quando há
+categoria mapeada, e o campo apagado = chave removida.
+
+### O contrato novo da receita `wordpress-conteudo`
+
+**Fixos (o admin, na tela)** — `.strict()`, tudo validado por regex:
+
+```
+prefixo: string (default "wp_")
+post_type: string
+campos: Array<{
+  chave: /^[a-z][a-z0-9_]{0,31}$/,
+  rotulo: string (1..40),
+  meta_key: /^[A-Za-z0-9_\-]{1,64}$/,
+  tipo: "texto" | "numero" | "preco",
+  filtro: "nenhum" | "contem" | "minimo" | "maximo"
+}> (1..15)
+categorias: Array<{
+  chave: /^[a-z][a-z0-9_]{0,31}$/,
+  rotulo: string (1..40),
+  taxonomia: /^[a-z0-9_-]{1,32}$/,
+  nivel: "qualquer" | "filho" | "raiz" (default "qualquer"),
+  filtro: "nenhum" | "contem" | "igual"
+}> (0..6)
+esconder?: { meta_key: (regex), valores: string[] (1..10) }
+```
+
+Regras do Zod, com mensagem legível em português:
+
+- a **chave** é única entre campos e categorias, e diferente de `id`,
+  `titulo` e `link` — a saída já usa esses nomes;
+- a **chave nasce do rótulo** (sem acento, minúscula, `_`): quem opera não
+  digita a chave. Ela continua editável no "avançado" da tela, e um rótulo
+  repetido não vira o mesmo dado duas vezes (`preco`, `preco_2`);
+- filtro **`contém` só em `tipo: "texto"`**; **`mínimo`/`máximo` só em
+  `numero`/`preco`** — um número não casa por pedaço de texto, e um texto não
+  tem "mínimo";
+- a **categoria** casa por `contém` (o pedaço do texto) ou por **`igual`**
+  (o nome OU o slug, por igualdade — é o comportamento atual da finalidade);
+- `esconder`: o `not exists` sobre o campo, com os valores a esconder.
+
+**Busca (o agente)** — `.strict()`: `{ filtros?: Record<string, string|number>, limite?: 1..5 }`.
+O teto continua 5.
+
+O **conjunto de chaves depende da instância**, e essa é a parte nova:
+
+- um filtro que a instância **não tem** é **ERRO legível**
+  (`ErroDeFiltroDesconhecido`), nunca silêncio: devolver a lista inteira
+  como se o filtro tivesse sido aplicado entrega ao cliente o que ele pediu
+  para **não** ver;
+- um filtro que a instância tem mas **não filtra** (o dado está mapeado sem
+  filtro) também é erro — pelo mesmo motivo;
+- o valor tem de ser do **tipo que o filtro pede**: número para `mínimo` e
+  `máximo`, texto para `contém` e `igual`.
+
+**Saída**: `id, titulo, <cada campo pela chave>, <cada categoria pela chave>,
+link`. Sem foto (a `imagem_url` é a R4, como na R1).
+
+**Os filtros que a instância aceita** entram na listagem da tool
+`crm_consultar_receita`, derivados dos fixos: "filtros disponíveis: ano (Ano,
+mínimo); marca (Marca, contém)". Sem essa linha, o agente chuta o nome do
+filtro — e erra.
+
+### O modelo "Imóveis" (só dados)
+
+`lib/external-db/receitas/modelos-wordpress.ts` — o MODELO é **configuração**,
+não código: ele pré-preenche a tela e nada mais. O "Em branco" é o outro
+modelo (sem tipo de post sugerido: o site de cada pessoa o chama do jeito que
+chama).
+
+- **campos**: `codigo` (Código, texto, nenhum), `preco` (Preço de venda, preço,
+  máximo), `aluguel` (Aluguel, preço, máximo), `condominio` (Condomínio, preço,
+  nenhum), `quartos` (Quartos, número, mínimo), `suites` (Suítes, número,
+  mínimo), `banheiros` (Banheiros, número, nenhum), `vagas` (Vagas, número,
+  mínimo), `area` (Área, número, mínimo);
+- **categorias**: `bairro` (Bairro, `localizacao`, filho, contém), `cidade`
+  (Cidade, `localizacao`, raiz, contém), `tipo` (Tipo, `tipo_imovel`, qualquer,
+  contém), `finalidade` (Finalidade, `finalidade`, qualquer, igual);
+- **esconder**: `status_imovel` → vendido, alugado.
+
+Os `meta_key` e as taxonomias são **sugestão**: o site de cada pessoa nomeia as
+coisas do jeito dela, e o administrador ajusta na tela.
+
+### A tela
+
+`app/app/integracao-dados/[id]/_components/ReceitasProntas.tsx`:
+
+- **"Adicionar receita" ESCOLHE a receita** (rótulo + descrição curta). O
+  defeito era "adicionar" pegar a primeira da lista e criar sempre o
+  WooCommerce. Editar uma instância salva **não** troca a receita — e a
+  receita pode ter **várias** instâncias na mesma conexão (imóveis e veículos
+  no mesmo site), então a lista não esconde mais as receitas já cadastradas;
+- para a `wordpress-conteudo`: "Tipo de post", "Começar de um modelo"
+  (Imóveis e Em branco — trocar só com confirmação se já houver algo
+  digitado), a lista editável de **campos** (rótulo, campo no site, tipo,
+  filtro; adicionar e remover) e a de **categorias** (rótulo, categoria no
+  site, nível, filtro), e "Esconder itens" (campo + valores);
+- a chave nasce do rótulo e é editável no "avançado";
+- o 422 mostra o rótulo legível do caminho que falhou — agora com o **índice
+  da linha** ("campos.1.chave"), para a tela saber qual dado corrigir.
+
+### O que a R2 entrega (arquivos)
+
+- `lib/external-db/receitas/wordpress-conteudo.ts` — a receita: o SQL, o Zod
+  dos fixos e da busca, a validação dos filtros contra a instância e a
+  descrição dos filtros;
+- `lib/external-db/receitas/modelos-wordpress.ts` — o modelo "Imóveis" e o
+  "Em branco" (só dados);
+- `lib/external-db/receitas/erros.ts` — `ErroDeFiltroDesconhecido`;
+- `lib/external-db/receitas/taxonomia.ts` — deixa de conhecer o conjunto fixo
+  de categorias (a categoria passa a ser uma LISTA, com a chave e a taxonomia
+  de cada uma);
+- `lib/external-db/receitas/tipos.ts` — a família `wordpress` e o
+  `descreverFiltros`;
+- `lib/external-db/receitas/registro.ts` — a receita entra no registro;
+- `lib/external-db/receitas/instancias.ts` — o motivo do Zod no 422 passa a
+  trazer o índice da linha;
+- `lib/mcp/tools/receitas-externas.ts` — a listagem mostra os filtros de cada
+  instância, e um filtro inválido volta como erro legível;
+- `app/app/integracao-dados/[id]/_components/ReceitasProntas.tsx` — a tela;
+- `lib/i18n/dicionario.ts` — os textos novos em espanhol;
+- Testes: `wordpress-conteudo.unit.test.ts` (o SQL de imóveis **E** de
+  veículos, o Zod, os filtros, os erros), `instancias.unit.test.ts` (o caminho
+  com índice), `receitas-externas-listagem.test.ts` (os filtros na listagem),
+  `ReceitasProntas.wordpress.test.tsx` (a tela nova) e
+  `tests/mysql/receita-wordpress-conteudo.test.ts` (MySQL 8 de verdade: a
+  imobiliária e a loja de veículos, nos DOIS formatos — ACF com o par
+  `_campo` e JetEngine no modo padrão com outro `post_type`);
+- `.changes/banco-externo-receitas-wordpress-conteudo.md`.
+
+Destino: núcleo, dentro do módulo de banco externo, que nasce desligado.
+
+### A medição de 21/10/2026 (a que sustenta o contrato)
+
+> **C1 (ACF) medido em 21/10/2026** contra WordPress 6.x + **ACF 6.8.10 (gratuito)** + MySQL **8.0.45**,
+> tipo de post `imovel` e campos criados pela API do próprio ACF (`acf_import_post_type`,
+> `acf_import_field_group`) e valores gravados com `update_field()` — o mesmo caminho da tela.
+> Gravação real: cada campo vira o par `wp_postmeta` (`preco` = `650000`, `_preco` = `field_preco`), campo
+> `number` guarda o número puro, `select` guarda a chave (`venda`). A receita do código foi executada pelo
+> caminho de produção (`montar` → `validarConsultaDeReceita` → `executarReceitaMysql`) com um usuário MySQL
+> com `SELECT` só em `wp_posts` e `wp_postmeta`, TLS `require`. 8 casos, todos com o resultado esperado:
+> sem filtro (5 publicados; o rascunho não aparece), bairro `centro` (acha `Centro` e `centro`),
+> `quartos_min` 3, `preco_max` 500000, cidade `votorantim`, bairro com `_` e `%` literais, bairro `_`
+> sozinho (não vira curinga: 1 linha), `limite` 2. O ACF Pro não é necessário: a receita só lê campos
+> simples.
+
+> **JetEngine no modo padrão (tipo de post, CPT) medido no mesmo dia**, JetEngine 3.5.8: tipo de post
+> `imovel_jet` e 6 campos criados pela tela do JetEngine; um imóvel salvo pela tela de edição do WordPress
+> grava cada campo como linha simples em `wp_postmeta` (`preco` = `520000`, `imagem` = `17`, o id do anexo),
+> igual ao ACF menos o par `_campo`. A mesma receita, com `post_type` = `imovel_jet`, acertou os mesmos 8
+> casos (4 publicados, rascunho escondido). Por isso o rótulo é "Conteúdo do WordPress (qualquer tipo de
+> post)": o id `wordpress-conteudo` cobre os dois. A receita `jetengine-imoveis` (R3) passa a ser só para
+> Custom Content Types (CCT). Não medido: a opção "Custom Meta Storage (Beta)" do JetEngine, que guarda os
+> campos numa tabela própria. Para a R4: no JetEngine a foto costuma ficar num campo de mídia próprio (id
+> do anexo), não na imagem destacada — o campo da foto precisa ser escolhido pelo admin.
+
+> **A C1 da CATEGORIA (21/10/2026)** foi medida no mesmo ambiente: as três tabelas de termo do WordPress
+> (`wp_terms`, `wp_term_taxonomy`, `wp_term_relationships`) com a taxonomia `localizacao` hierárquica
+> (Sorocaba › Centro; Votorantim › Centro). Com o bairro e a cidade lidos de CATEGORY, a receita acha o
+> imóvel pelo bairro (`exists` sobre `term_relationships`), pelo nível (bairro = termo que tem termo
+> acima; cidade = termo que não tem), e pela finalidade (nome **ou** slug do termo — a medição de 21/10
+> casou por pedaço de texto; a entrega casa por **igualdade**, e a diferença está na limitação abaixo). O
+> imóvel com DOIS termos na mesma taxonomia sai **uma** vez, com os dois nomes na mesma célula (`group_concat`).
+
+**Limitações declaradas (medidas, não estimadas):**
+
+- o filtro de um dado **não mapeado** não se aplica: a busca devolve o que tem,
+  e o mapeamento incompleto é decisão do administrador (o Zod recusa a
+  duplicidade de fonte, não a ausência);
+- `link` vem de `wp_posts.guid`, que o WordPress **não** atualiza quando o site
+  muda de domínio: o link do conteúdo continua apontando para o domínio antigo;
+- `meta_key` repetido no mesmo post (base migrada) **repete o conteúdo** na
+  lista: a receita faz uma junção por campo e não deduplica o post;
+- a finalidade por categoria casa por **igualdade** do nome ou do slug: o termo
+  tem de se chamar exatamente "Venda"/"Aluguel" (ou ter o slug "venda"/"aluguel").
+  Um termo "Venda e Aluguel" **não** é "venda" nem "aluguel" — e nem "Locação".
+  É de propósito: casar por pedaço de texto fazia o termo "Venda e Aluguel"
+  entrar nas duas buscas, e o cliente recebia imóvel de finalidade errada.
+
+O que a R2 **não** traz (e continua nas fatias seguintes): foto/`imagem_url`
+(R4), JetEngine CCT e tabela direta (R3), ida ao funil e sugestão automática
+de campos (R5), runbook do leigo (R6).
+
+## R3 entregue: tabela direta (qualquer tabela plana) + modelo JetEngine CCT
+
+A receita `tabela-direta` lê uma tabela plana do banco externo: uma linha =
+um item, uma coluna = um dado. O administrador diz a tabela, a coluna do id,
+a coluna do título, e mapeia cada dado (rótulo → coluna, tipo texto/número/
+preço, filtro nenhum/contém/mínimo/máximo/igual). É o MESMO editor de
+"Campos" da R2 (`CampoMapeado`, mesmas chaves reservadas, `chaveDoRotulo`/
+`chaveUnica`, teto de itens 5), sem JOIN, sem taxonomia, sem categoria, sem
+foto (é a R4). Opcional: "só mostrar quando <coluna> = <valor>" (ex.: `
+cct_status = publish`) e "esconder quando <coluna> in <valores>" (ex.: `
+situacao = vendido`).
+
+O JetEngine CCT virou **modelo** desta receita ("JetEngine — tipo de conteúdo
+próprio (CCT)"): preenche a tabela `<prefixo>jet_cct_<slug>`, o id `_ID`, a
+coluna do título `titulo`, "só publicados" `cct_status = publish` e os campos
+de imóveis. Não existe mais a receita `jetengine-imoveis` separada com campos
+fixos: o CCT é um modelo da tabela-direta, e o modelo "Em branco" também
+existe.
+
+### O que mudou
+- `lib/external-db/receitas/tipos.ts` — família `tabela-direta` adicionada a `FamiliaReceita`.
+- `lib/external-db/receitas/tabela-direta.ts` — `RECEITA_TABELA_DIRETA` (id `tabela-direta`, família `tabela-direta`): Zod dos fixos e da busca, `tabelas()` = só a tabela informada, `colunas()` = as colunas mapeadas (trava das fontes/colunas liberadas — D4), `montar()` com `?` sempre, identificadores com `quotarIdentificadorMysql`, apelido de saída quotado, preço com `precoNumero`, filtro desconhecido = erro (mesmo padrão de `validarFiltrosDaBusca` da R2).
+- `lib/external-db/receitas/modelos-tabela-direta.ts` — modelo JetEngine CCT (imóveis) e "Em branco".
+- `lib/external-db/receitas/registro.ts` — a receita `tabela-direta` registrada no mapa de receitas.
+- `app/app/integracao-dados/[id]/_components/ReceitasProntas.tsx` — "Adicionar receita" oferece as três receitas; editor da tabela direta com os mesmos componentes/estilo de Campos da R2 + tabela, coluna do id, coluna do título, "só mostrar quando" e "esconder quando"; modelo aplica com 1 clique e pergunta antes de apagar o que já foi digitado.
+- `lib/i18n/dicionario.ts` — novas frases com tradução `es` (sem repetir chave).
+- `lib/mcp/tools/receitas-externas.ts` e catálogo — a receita nova aparece com os filtros que a instância declarou (`descreverFiltrosDaInstanciaTabelaDireta`). D8 continua: o rastro só guarda contagem.
+- `lib/external-db/receitas/tabela-direta.unit.test.ts` — unit (SQL, `?` = valores, quoting, filtro desconhecido, validador com e sem a tabela liberada, coluna não liberada recusada).
+- `app/app/integracao-dados/[id]/_components/ReceitasProntas.tabela-direta.test.tsx` — tela (escolher receita, modelo CCT, editar, PUT).
+- `tests/mysql/receita-tabela-direta.test.ts` — MySQL 8 de verdade: tabela CCT real (`_ID`, `cct_status`, `titulo`, `preco`, `quartos`, `bairro`, `cidade`, `area`, ...) e outra tabela de nicho diferente (`carros`); prova filtros, "só publicados", "esconder" e que bairro/cidade/quartos saem na linha.
+
+### O que NÃO entra nesta fatia
+- Foto/`imagem_url`: é a R4.
+- Ida ao funil e sugestão automática de campos: é a R5.
+- Runbook do leigo: é a R6.
+
+Destino: núcleo, dentro do módulo de banco externo, que nasce desligado.
+
+## R4 entregue: `imagem_url` no envio do agente
+
+O `send_message` ganha `imagem_url` (URL https de uma imagem jpg, png ou webp
+que uma ferramenta de dados devolveu no mesmo turno). O CRM
+baixa a imagem com a própria rede, confere, guarda no Storage da conversa e
+manda ao canal só o `storagePath`, como a foto do catálogo. O gateway de
+mensageria nunca recebe a URL da fonte. Sai pela mesma cadeia `before_send`
+do texto (pacing, LGPD, opt-out, teto de envios do turno).
+
+### Revisões à D7 e ao fora de escopo (aceitas na triagem em 22/10/2026)
+
+Três, explícitas, lidas na triagem do PR #3276 e confirmadas na de 06/11/2026.
+Não há decisão do dono sobre elas; o que este texto atribuía a ele não tinha rastro.
+
+1. **Cópia da foto para o Storage.** O fora de escopo excluía "cópia de mídia para o
+   nosso Storage". A R4 guarda a foto de um envio na conversa e manda ao canal só o
+   `storagePath`, para a URL da fonte não chegar ao gateway. Sincronizar ou copiar
+   mídia em lote segue fora de escopo.
+2. **A guarda do fetch.** A D7 cita `assertUrlDeMidiaSegura`, e a R4 não a chama: usa
+   as duas peças por baixo dela, `assertSafeOutboundUrl` e `ipEhEspecial`. Aquela
+   função valida o destino e não devolve o IP, e o download precisa conectar ao IP que
+   validou. A exceção do Storage assinado não se aplica aqui.
+3. **"Falha de mídia nunca derruba o texto" vale até a guarda.** Falha no download, na
+   conferência ou na guarda deixa a mensagem só com texto. Com a foto guardada, o corpo
+   vira legenda (`enviarComFotos`) e não há recuo para texto: se o canal recusar, o
+   desfecho é `failed`, o retorno traz `envio_falhou` e o texto não sai naquele envio.
+   A foto do catálogo se comporta igual. É esse caminho que o C3 mede.
+
+### O que mudou
+- `lib/agent-engine/agent/baixar-imagem-segura.ts` (novo) — `baixarImagemSegura`:
+  forma e extensão (`formatoDeImagemPorUrl`), guarda textual de saída
+  (`assertSafeOutboundUrl`), DNS resolvido UMA vez e recusa se qualquer endereço
+  for especial (`ipEhEspecial`), conexão SOMENTE ao IP validado pela opção
+  `lookup` do `node:https` (hostname da URL segue sendo o do SNI e do Host),
+  nunca segue redirect (qualquer 3xx é `redirect_recusado`), só status 200,
+  teto de 5 MB lido em pedaços (para ao passar, `imagem_grande_demais`),
+  timeout total de 8 s, content-type igual ao MIME da extensão e bytes mágicos
+  conferidos (`conteudo_nao_e_imagem`). `guardarImagemNaConversa` grava em
+  `whatsapp-media/<tenant>/<conversa>/externa-<hash>.<ext>` (nome pelo conteúdo;
+  409 é sucesso) e recusa caminho fora da conversa (`isMediaPathOwnedBy`).
+- `lib/agent-engine/agent/imagem-por-url.ts` — `formatoDeImagemPorUrl` (também
+  usado pela prévia), `descreverSemQuery` (o log leva host + caminho, nunca a
+  query) e `criarProcedenciaDeImagens` (ver "Procedência da URL").
+- `lib/agent-engine/agent/inbound-turn.ts` — schema de `send_message` com
+  `imagem_url`; `produto_codigo` + `imagem_url` juntos devolvem
+  `imagem_e_produto_juntos` e liberam a reserva do `dupTrava`; download e guarda
+  rodam antes da cadeia e fora da prévia; falha em qualquer um dos dois deixa a
+  mensagem só com texto e o retorno traz `foto_recusada`; o resultado traz `foto_enviada`.
+  O `tenantId` que vai ao caminho é o do turno.
+- `lib/agent-engine/agent/preview.ts` — na prévia NADA é buscado, baixado nem
+  guardado; só o formato e a procedência são conferidos (sem rede) e o retorno traz
+  `foto_enviada: false` e `foto_prevista`.
+- `lib/agent-engine/agent/fotos-do-produto.ts` — sem mudança (volta ao original).
+- Testes: `lib/agent-engine/agent/baixar-imagem-segura.test.ts`,
+  `lib/agent-engine/agent/imagem-por-url.test.ts`,
+  `lib/agent-engine/agent/preview-imagem-por-url.test.ts`,
+  `tests/unit/send-message-manda-imagem-por-url.test.ts`.
+
+### O que NÃO entra nesta fatia
+- As receitas prontas de WordPress e WooCommerce ainda não devolvem URL de foto.
+  Resolver anexo → URL é fatia à parte. Uma coluna de foto mapeada na receita de
+  tabela direta, ou lida por `crm_query_external_data`, já alcança `imagem_url`.
+- Célula com vários endereços (galeria separada por vírgula ou `|`) não autoriza
+  nenhum deles: a foto é recusada. Separar a lista é da mesma fatia.
+- Foto do catálogo (`produto_codigo`) continua como estava.
+- Modo assistido: o rascunho guarda só o texto, então a foto não vai junto. A do
+  catálogo também não; `foto_prevista` diz o que o envio real faria.
+- Rastro: `ai_agent_runs.tool_calls` guarda `imagem_url` inteira, com a query.
+  `descreverSemQuery` cobre só o log, e essa tabela não tem expurgo por tempo.
+- Nenhuma migration, tela ou variável de ambiente nova.
+
+### C3 medido em 10/11/2026
+Seis envios reais, um por formato e tamanho, num número de teste nosso conectado por
+QR Code (WAHA 2026.7.2), para o próprio número. O código é o do head `b572115882` do
+PR #3276, chamado direto, sem o modelo e sem o handler de mensagens:
+`baixarImagemSegura` → `guardarImagemNaConversa` → URL assinada de 600 s (a mesma do
+handler) → `wahaAdapter.send` com `wahaSendPlanFor('image')`. As imagens são neutras
+(gradiente com ruído), servidas por https público (túnel da Cloudflare) a partir da
+máquina de testes, com o content-type de cada formato.
+
+| Caso | Bytes | Download pelo CRM | Guarda no Storage | Canal (o gateway baixa e o WhatsApp aceita) | Total | Desfecho |
+|---|---|---|---|---|---|---|
+| jpg pequena (800×600) | 115.039 | 105 ms | 20 ms | 1.701 ms | 1.832 ms | aceita |
+| png pequena (800×600) | 875.052 | 226 ms | 38 ms | 1.489 ms | 1.758 ms | aceita |
+| webp pequena (800×600) | 99.084 | 88 ms | 23 ms | 1.066 ms | 1.183 ms | aceita |
+| jpg grande (3132×2349) | 5.227.303 | 1.241 ms | 62 ms | 3.569 ms | 4.883 ms | aceita |
+| png grande (1613×1210) | 5.189.292 | 1.625 ms | 46 ms | 2.338 ms | 4.014 ms | aceita |
+| webp grande (3216×2412) | 5.186.192 | 1.278 ms | 51 ms | 2.850 ms | 4.184 ms | aceita |
+
+- **Nenhuma recusa.** A maior foto tem 99,7% do teto de 5 MB (5.242.880 bytes).
+- **"Aceita"** quer dizer: o gateway devolveu o id da mensagem, e o WhatsApp confirmou o
+  recebimento no servidor (ack `SERVER`) já na primeira consulta, 3 s depois do envio.
+  Os seis ficaram registrados como `imageMessage` com o tipo original (`image/jpeg`,
+  `image/png`, `image/webp`): o webp sai como foto, não como figurinha.
+- O gateway baixou cada URL assinada uma vez, inteira (log do servidor de teste).
+- O pior total foi 4,9 s, abaixo do timeout de download (8 s), que vale só para a ida
+  à fonte. O tempo do canal depende da rede entre o gateway e o Storage; aqui eles
+  estavam em máquinas diferentes, ligadas pela internet.
+
+### NÃO MEDIDO
+- C3 no canal oficial da Meta: a medição acima cobre só o número conectado por QR Code.
+- Entrega no aparelho de outra pessoa (ack `DEVICE`): o destinatário foi o próprio
+  número, que não gera esse recibo.
+- C4: volume de itens por turno com fotos (continua na prova com gente).
+- Que o `lookup` fixado funciona com outros CDNs (TLS e SNI): medido contra
+  `www.gstatic.com` e, na medição do C3, contra a Cloudflare (`trycloudflare.com`),
+  em download real, sem pool (`agent: false`).
+- Se o gateway bloqueia algo que o CRM já baixou: não sabemos, porque o gateway
+  não recebe mais a URL.
+
+### Procedência da URL
+O `send_message` só busca uma `imagem_url` que seja, igual, o valor inteiro de um
+campo do resultado de `crm_consultar_receita` ou `crm_query_external_data` no mesmo
+turno. Endereço no meio de um texto não conta. Fora disso nada é baixado: a mensagem
+sai só com o texto e o retorno traz `foto_recusada: url_fora_dos_resultados`. A prévia
+confere a mesma regra e avisa (`imagem_recusada`). Resultado de outra ferramenta não
+conta, porque pode repetir o que o contato escreveu, e endereço que já estava nos
+argumentos da chamada também não. `crm_search_products` fica de fora porque devolve
+só a contagem de `fotos`; a foto do catálogo sai por `produto_codigo`.
+Sem padrão novo para ninguém: o campo nasce com a guarda, e nenhuma instalação
+usava `imagem_url` antes dela.
+
+A guarda confere de onde o endereço veio; destino e conteúdo seguem conferidos pelo
+download. O que uma tabela externa guarda é dado da organização, e ela responde por ele.
+
+## R5a entregue: o negócio com a referência do item
+
+`crm_create_lead` ganha `referencia_externa` (`<receita>:<id>`, ex.:
+`wordpress-conteudo:4821`, montada pelo modelo a partir do resultado de
+`crm_consultar_receita`). Esta é a primeira metade da R5 (D6); a segunda é a
+escolha do funil/etapa padrão na instância da receita + aviso na Central.
+
+### O que mudou
+- `lib/leads/referencia-externa.ts` (novo) — a forma fechada da referência
+  (`REFERENCIA_EXTERNA`), a chave em `source_metadata` (`referencia_externa`) e
+  `descricaoComReferencia` (a linha vai no fim da descrição; o teto de 2000 corta
+  o texto do agente, nunca a referência).
+- `lib/mcp/tools/leads.ts` — com `referencia_externa` e `contact_id`, a ferramenta
+  procura antes um negócio ABERTO do mesmo contato, no mesmo funil, com a mesma
+  referência (organização filtrada à mão). Achou: não cria, devolve
+  `{ lead, ja_existia: true }` e deixa uma nota (`note`) na timeline. Não achou:
+  cria com a referência na descrição e em `source_metadata`.
+- Teste: `tests/unit/lead-com-referencia-externa.test.ts`.
+
+### Decisões que divergem da proposta da D6 (para o mantenedor confirmar no PR)
+- **`source` continua `ai_agent`** (não `external`): a origem do negócio segue
+  dizendo QUEM criou; QUAL item foi escolhido vai em `source_metadata`. Trocar a
+  origem mudaria os relatórios por origem de quem já usa.
+- **Dedup por consulta, não pelo índice único** `uniq_crm_leads_org_source_external`:
+  o índice é por organização (dois clientes no mesmo item colidiriam), vale para
+  negócio encerrado (bloquearia um interesse novo depois de perdido) e a violação
+  hoje vira 500 no `createLeadHandler`. A consulta é por contato + funil + aberto.
+  Sem migration.
+
+### NÃO MEDIDO
+- A corrida de dois turnos simultâneos do MESMO cliente no mesmo item: hoje o que
+  protege é a fila de um turno por conversa (`one_per_conversation`), sem trava no
+  banco.
+- O agente de verdade chamando a ferramenta com a referência (só testes com
+  Supabase simulado); fica para o e2e do apartamento, na R5b.
+
+## R5b entregue: o destino do interesse na receita
+
+A instância da receita ganha `destino_do_interesse` (`{ pipeline_id, stage_id }`,
+opcional) — a segunda metade da R5 (D6). A tela da receita mostra "Para onde vai
+o interesse do cliente" (funil e etapa); `crm_consultar_receita` devolve, junto
+das linhas, o bloco `interesse` que ensina o agente.
+
+### O que mudou
+- `lib/external-db/receitas/destino-do-interesse.ts` (novo) — o schema fechado
+  dos dois ids e `orientacaoDeInteresse`: com destino válido entrega ids, nomes e o
+  molde `<receita>:<id do item>` para o `crm_create_lead` (R5a); sem destino, ou
+  com o funil arquivado depois, manda o agente NÃO abrir negócio e chamar
+  `crm_request_human_handoff`.
+- `lib/external-db/receitas/destino-no-banco.ts` (novo) — confere no banco, com a
+  organização de quem chama, que funil e etapa existem, estão ativos, a etapa é do
+  funil e não é de ganho nem de perda.
+- `app/api/v1/external-db/connections/[id]/recipes/route.ts` — o PUT recusa (422)
+  destino inválido antes de gravar.
+- `lib/mcp/tools/receitas-externas.ts` — o resultado do `executar` traz `interesse`.
+- `app/app/integracao-dados/[id]/_components/DestinoDoInteresse.tsx` (novo) e
+  `ReceitasProntas.tsx` — os dois seletores, com o aviso do que acontece sem escolha.
+- Sem migration: a instância mora no `jsonb` `receitas`.
+
+### Decisão: o aviso de "sem funil" é o handoff que já existe
+A D6 pedia "aviso na Central em vez de lead". Um tipo novo de aviso exigiria
+migration + baseline + vocabulário (`agent_inbox_items_kind_check`). Em vez disso o
+agente chama `crm_request_human_handoff`, que já abre o item na Central com o
+resumo da conversa pronto (`buildHandoffSummary`). O laço se fecha sem tipo novo.
+
+### NÃO MEDIDO
+- O funil de destino estar entre os funis liberados AO AGENTE
+  (`lib/leads/escopo-de-funil.ts`): se não estiver, o `crm_create_lead` é recusado
+  com a mensagem do escopo e o modelo a recebe; a tela não avisa isso hoje.
+- O agente de verdade, pelo WhatsApp, seguindo a orientação (pergunta → itens →
+  interesse → negócio com a referência): é o caso de aceite do apartamento, medido
+  no espelho depois deste PR.
+- A pré-visualização da receita não mostra o bloco `interesse`.
+
+### Medido no espelho (22/10/2026): o código do item precisa ir na conversa
+A LIMA consultou o banco e mostrou 3 imóveis reais pelo WhatsApp, mas quando o cliente disse
+"tenho interesse nesse" ela NÃO abriu o negócio (duas tentativas): o resultado da consulta não
+acompanha a conversa, então no turno seguinte ela não tinha o id do item; consultou de novo com
+filtro inventado, desistiu e escreveu "registrei seu interesse" sem registrar. A orientação do
+bloco `interesse` agora manda escrever "cód. <id>" junto de cada item mostrado (a conversa passa a
+carregar o código) e só afirmar o registro depois que `crm_create_lead` responder com sucesso.
+Mesmo assim, numa imobiliária montada do zero no espelho (atendente com prompt próprio, funil
+"Interessados", sem as habilidades do estúdio), o agente mostrou o imóvel com o código, o cliente
+disse "tenho interesse" e ele escreveu "registrei" SEM chamar `crm_create_lead`: no turno do
+interesse faltavam também o funil e a etapa (estavam no resultado da consulta, que não acompanha a
+conversa). Por isso o R5c: `crm_create_lead` aceita só a `referencia_externa` e o SISTEMA acha o
+funil e a etapa na receita da organização (`lib/external-db/receitas/destino-pela-referencia.ts`).
+O escopo de funil do agente continua valendo: ele julga o funil já resolvido. Receita sem destino, ou
+com dois destinos diferentes, recusa e manda passar para a equipe — o sistema não adivinha.
+Com o funil resolvido pelo sistema o agente AINDA escreveu "interesse registrado" sem chamar a ferramenta:
+a orientação mora no resultado da consulta, que não acompanha a conversa. O ensino passou a ser um
+bloco residente do prompt, a cada turno, no molde dos blocos da agenda
+(`blocosDeInteresseExternoResidentes`, só com as duas ferramentas ligadas).
+Medido de novo no espelho com esta mudança: ver o resultado no PR.
+
+### Medido numa instalação fresca (10/11/2026): o agente inventa o código do item
+Em 2 de 2 turnos reais (gpt-4o-mini), o agente chamou `crm_create_lead` com um código que não
+existia no seed (`:1234`, e depois o número de exemplo que a descrição da ferramenta trazia), e
+com o destino configurado o negócio nasceu apontando para um item inexistente. Duas mudanças:
+- `lib/external-db/receitas/item-da-referencia.ts` (novo) — com `referencia_externa`, com ou sem
+  funil informado, `completarDestinoDoNegocio` consulta o item pelo id nas instâncias ativas da
+  receita na organização (o `montar` de cada receita aceita `idDoItem`, e a busca segue as regras
+  da listagem: só publicado, sem os escondidos). Não achou: `item_inexistente`, o negócio não
+  nasce e o gate `registro_sem_efeito` lê a escrita como falha. Banco de origem fora:
+  `indisponivel`, e o agente passa para a equipe.
+- Os textos que o modelo lê (descrição de `referencia_externa` e a recusa de formato) não trazem
+  mais número de exemplo.

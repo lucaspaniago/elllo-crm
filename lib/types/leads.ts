@@ -1,3 +1,4 @@
+import type { AnexosDoCampoNoCard } from "@/lib/kanban/anexos-no-card";
 import type { ScoreBand } from "@/lib/kanban/score-band";
 import type { ResumoDasTarefas } from "@/lib/tarefas/tipos";
 
@@ -43,7 +44,22 @@ export interface Lead {
   status: LeadStatus;
   lost_reason: string | null;
   position_in_stage: number;
+  /**
+   * O VALOR ÚNICO do contrato — setup, implantação, matrícula (fatia 1 da
+   * #3602). Continua sendo a MESMA coluna de sempre: negócio que só preenche
+   * este campo fica idêntico ao que era antes da recorrência existir.
+   */
   value_cents: number | null;
+  /**
+   * A MENSALIDADE (fatia 1 da #3602), separada do valor único de propósito.
+   * Somar os dois num número só é o defeito que a issue descreve: ninguém
+   * sabe quanto entra todo mês e o contrato perde o tamanho real.
+   */
+  recurring_value_cents?: number | null;
+  /** Periodicidade da recorrência — a v1 conhece `monthly` (`valor-recorrente.ts`). */
+  recurring_period?: "monthly" | null;
+  /** Duração em meses; `null` = sem prazo (diferente de "12 meses"). */
+  recurring_months?: number | null;
   currency: string | null;
   owner_user_id: string | null;
   /** 0070: quem é dono do negócio — humano, agente de IA, ou ninguém. */
@@ -52,6 +68,16 @@ export interface Lead {
   owner_agent_id: string | null;
   /** Derivado (não é coluna): quem é o agente dono — ver LeadOwnerAgent. */
   owner_agent?: LeadOwnerAgent | null;
+  /**
+   * Derivado (não é coluna): o NOME do responsável humano, resolvido no
+   * servidor por quadro, nunca por card (`lib/kanban/nome-do-dono.ts`).
+   * `null` = olhei e não há nome utilizável; ausente = não resolvido (sem
+   * service role, ou resposta de mutação). Os dois caem no rótulo anterior.
+   * Só o nome: nunca e-mail ou `user_metadata` (LGPD).
+   */
+  owner_user_name?: string | null;
+  /** Derivado: `true` quando o responsável humano não está mais na equipe. */
+  owner_user_removed?: boolean;
   /**
    * Derivado (não é coluna): a próxima ação que o agente propôs para o CONTATO,
    * já roteada para o negócio ativo dele. Ver lib/leads/next-action.ts — só
@@ -112,7 +138,7 @@ export interface Lead {
    * Derivado (não é coluna): os marcadores do CONTATO deste negócio.
    *
    * O produto tem DUAS caixas de marcador e elas não são a mesma: `tags`, acima,
-   * é do negócio e se escreve em "Editar lead"; esta é da pessoa, e se escreve
+   * é do negócio e se escreve em "Editar negócio"; esta é da pessoa, e se escreve
    * no Inbox e na ficha — é a que a campanha lê. O quadro precisa das duas para
    * o filtro não mentir, e por não ser coluna ela é opcional: um negócio sem
    * contato (criado à mão ou por webhook) simplesmente não tem.
@@ -130,6 +156,21 @@ export interface Lead {
   contact_email?: string;
   contact_links?: Array<{ tipo: string; href: string }>;
   /**
+   * Derivado (não é coluna): o contato tem foto de perfil guardada
+   * (`contacts.avatar_storage_path`, mantida pelo cron `contact-avatars`). O
+   * caminho do arquivo NÃO sai no payload — o card pede a imagem a
+   * `/api/v1/contacts/[id]/avatar`, a mesma rota da lista do Inbox. Ausente
+   * quando não há foto ou o contato foi anonimizado (LGPD).
+   */
+  contact_has_avatar?: true;
+  /**
+   * Derivado (não é coluna), SÓ para token de módulo sem a área `contatos`: o nome do contato, lido para o
+   * filtro de texto livre (`lib/modulo/redigir-contato.ts`) e anulado em seguida. Sessão e módulo com
+   * `contatos` nunca recebem estes campos.
+   */
+  contact_name?: string;
+  contact_display_name?: string;
+  /**
    * Derivado (não é coluna): os marcadores das CONVERSAS do contato deste
    * negócio — a terceira caixa, "Tags da conversa" no painel do Inbox, onde a
    * IA também escreve. União de TODAS as conversas do contato, não só da mais
@@ -144,6 +185,17 @@ export interface Lead {
    * `lib/kanban/tarefas-no-quadro.ts`.
    */
   tarefas?: ResumoDasTarefas;
+  /**
+   * Derivado (não é coluna): o que os campos `file` do funil TÊM neste negócio
+   * — o bloco que o card desenha sem abrir o dossiê (#2829, fatia 1).
+   *
+   * Um item por campo DECLARADO no funil, inclusive os vazios (`total: 0`): o
+   * operador criou o campo e precisa ver que falta documento. Ausente por
+   * inteiro quando o funil não declara nenhum campo `file` — o payload do quadro
+   * não engorda para quem não usa o recurso. Ver
+   * `lib/kanban/anexos-no-card.ts`.
+   */
+  anexos?: AnexosDoCampoNoCard[];
   created_at: string;
   updated_at: string;
   created_by_user_id: string | null;

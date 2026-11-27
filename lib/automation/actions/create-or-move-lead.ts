@@ -10,20 +10,28 @@ import { originFromAutomationEvent } from "@/lib/atendimento/origem-automacao";
  * eventos derivados (anti-loop profundidade 1: regra→ação→handler→evento).
  */
 import { registerAction } from "@/lib/automation/actions";
+import { marcaHerdadaDoEvento } from "@/lib/automation/parada-no-assistido";
 import { mensagemDeErro } from "@/lib/automation/actions/erro-legivel";
+import { ApiError } from "@/lib/api/types";
 import { nomeDoContato } from "@/lib/contacts/rotulo-do-contato";
 import type { ActionCtx, ActionResultDetail } from "@/lib/automation/types";
 import type { HandlerCtx } from "@/lib/api/handlers/types";
 import { createLeadHandler, moveLeadHandler } from "@/app/api/v1/leads/_handler";
 import {
   escolheEtapaDeDestino,
-  montaPayloadDoClone,
   type EtapaDoFunil,
   type OrigemParaClonar,
 } from "@/lib/leads/clonar-para-funil";
+import { criarCloneNoFunil } from "@/lib/leads/clone-com-anexos";
+// A cópia dos anexos do card de origem — a MESMA dos outros dois caminhos de
+// troca de funil, e idempotente de propósito (#4544).
+import { copiarAnexosDoClone } from "@/lib/leads/anexos-do-clone";
 // MESMA transferência do roteador de intenção (#2155): duas implementações de
 // "trocar de funil" divergiriam na primeira mudança de uma delas.
 import { COLUNAS_DA_ORIGEM, transfereParaOFunil } from "@/lib/leads/transfere-para-o-funil";
+// O degrau compartilhado com a captação por webhook (#3101): "o negócio aberto
+// do contato neste funil" é UMA pergunta, com um dono só.
+import { negocioAbertoDoContato } from "@/lib/leads/negocio-aberto-do-contato";
 
 /** O que a linha do tempo diz de quem levou o card — o roteador de intenção diz outra coisa. */
 const RAZAO_DA_AUTOMACAO = "Levado para outro funil pela automação";
@@ -34,10 +42,27 @@ async function execute(ctx: ActionCtx, config: Record<string, unknown>): Promise
   if (!pipelineId || !stageId) {
     return { type: "create_or_move_lead", status: "failed", error: "missing_config" };
   }
+  // ── O MOTIVO DA PERDA (#4297) ──────────────────────────────────────────────
+  //
+  // Quando a etapa de destino fecha o negócio como perdido, o `moveLeadHandler`
+  // exige o motivo (issue #917) — e até aqui a ação não tinha o que informar,
+  // então TODA regra que apontava para a etapa de perda falhava. O motivo vem
+  // da config da regra (`Motivo da perda`), e é o MESMO valor que o arrasto
+  // grava: canônico do produto ou um dos motivos cadastrados no funil.
+  //
+  // Regra ANTIGA (gravada antes do campo) chega aqui com `""`: nada é
+  // inventado, o handler recusa e o recibo mostra `lost_reason_required`. Um
+  // motivo default silencioso aqui seria pior que a falha — encheria o relatório
+  // de perdas com uma causa que ninguém escolheu.
+  const motivoDaPerda = typeof config.lost_reason === "string" ? config.lost_reason.trim() : "";
 
   const handlerCtx: HandlerCtx = {
     organization_id: ctx.organizationId,
-    actor: { type: "webhook_source", id: ctx.ruleId },
+    // Doc 301 = B: a regra que rodou por causa da IA no assistido passa a marca
+    // adiante — o card que ela move dispara o gatilho de etapa e, se a etapa
+    // fecha o negócio, `lead.won`/`lead.lost`; sem a marca, o que fala com o
+    // cliente nesses caminhos saía sem aprovação.
+    actor: { type: "webhook_source", id: ctx.ruleId, ...marcaHerdadaDoEvento(ctx.event) },
     requestId: `rule:${ctx.ruleId}`,
   };
   // A LINHA INTEIRA do negócio, como `buildContext` a lê (`select *` de
@@ -99,7 +124,14 @@ async function execute(ctx: ActionCtx, config: Record<string, unknown>): Promise
           return {
             type: "create_or_move_lead",
             status: "success",
-            detail: { transferido: String(transferencia.clone.id ?? ""), origem: lead.id },
+            detail: {
+              transferido: String(transferencia.clone.id ?? ""),
+              origem: lead.id,
+              anexos: transferencia.anexos.copiados,
+              ...(transferencia.anexos.falhas > 0
+                ? { anexos_com_falha: transferencia.anexos.falhas }
+                : {}),
+            },
           };
         }
 
@@ -201,24 +233,78 @@ async function execute(ctx: ActionCtx, config: Record<string, unknown>): Promise
           if (continuacao) {
             // As ações seguintes da regra enxergam a MESMA continuação que
             // enxergaram da primeira vez.
+            //
+            // ── A CÓPIA DOS ANEXOS É REPETIDA AQUI (#4544) ────────────────────
+            //
+            // "A continuação já existe" não quer dizer "os anexos já vieram":
+            // uma falha de Storage na primeira execução deixava o voucher fora
+            // do card para SEMPRE, porque este ramo respondia `ja_existia` e
+            // nunca voltava a tentar. `copiarAnexosDoClone` é idempotente — a
+            // linha nova carrega `clonado_do_attachment_id` e o índice único
+            // parcial recusa o par repetido —, então repetir no card que já
+            // existe conserta o que faltou sem duplicar o que já está lá. O
+            // custo é uma leitura por execução; o benefício é o pós-venda não
+            // ficar sem o documento porque o bucket piscou uma vez.
+            //
+            // ── E SÓ NUM CARD COM O MESMO DONO DA ORIGEM ─────────────────────
+            //
+            // Aqui o card de destino NÃO foi criado por esta execução: ele foi
+            // achado por `source_metadata.clonado_de`, e a cópia roda com o
+            // cliente de serviço. Quem enxerga um negócio (e os anexos dele, que
+            // seguem o negócio pai) é decidido pela organização e pelo
+            // `owner_user_id` — `crm_leads_select` não olha mais nada. Com o
+            // MESMO dono, quem vê o destino já via a origem, e a cópia não
+            // entrega documento a ninguém novo. Dono diferente (a continuação
+            // foi reatribuída, ou nasceu sem dono porque o da origem não podia
+            // mais ser dono): a reposição fica de fora e o recibo diz por quê;
+            // a cópia da criação, que é da própria ação, segue intacta.
+            const idDaContinuacao = String((continuacao as { id?: unknown }).id ?? "");
+            const donoDaContinuacao = (continuacao as { owner_user_id?: string | null }).owner_user_id ?? null;
+            const mesmoDono = donoDaContinuacao === (lead.owner_user_id ?? null);
+            const anexos = mesmoDono
+              ? await copiarAnexosDoClone(ctx.admin, {
+                  organizationId: ctx.organizationId,
+                  origemLeadId: lead.id,
+                  destinoLeadId: idDaContinuacao,
+                })
+              : null;
             publicaNoContexto(ctx, continuacao as Record<string, unknown>, contactId);
             return {
               type: "create_or_move_lead",
               status: "success",
-              detail: { ja_existia: String((continuacao as { id?: unknown }).id ?? ""), origem: lead.id },
+              detail: {
+                ja_existia: idDaContinuacao,
+                origem: lead.id,
+                ...(anexos
+                  ? {
+                      anexos: anexos.copiados,
+                      anexos_que_ja_estavam: anexos.jaEstavam,
+                      ...(anexos.falhas > 0 ? { anexos_com_falha: anexos.falhas } : {}),
+                    }
+                  : { anexos_nao_repostos: "dono_diferente" }),
+              },
             };
           }
 
-          const criado = await createLeadHandler(ctx.admin, handlerCtx, {
-            ...montaPayloadDoClone(lead, destino.etapa),
-            retomado_de_lead_id: null,
+          // O card novo nasce COM os anexos da origem (#4544). Os documentos da
+          // venda (voucher, apólice, bilhete) ficam no card de Vendas, e o
+          // pós-venda abria o card de Experiência sem eles: a cópia é do passo
+          // único dos caminhos de troca de funil, e o `anexos` do retorno conta
+          // o que veio (o que falhou não interrompe a continuação).
+          const { clone: criado, anexos } = await criarCloneNoFunil(ctx.admin, handlerCtx, lead, destino.etapa, {
+            ajustes: { retomado_de_lead_id: null },
           });
           // O card novo é o negócio que as ações seguintes da regra enxergam.
           publicaNoContexto(ctx, criado, contactId);
           return {
             type: "create_or_move_lead",
             status: "success",
-            detail: { criado: String(criado.id ?? ""), origem: lead.id },
+            detail: {
+              criado: String(criado.id ?? ""),
+              origem: lead.id,
+              anexos: anexos.copiados,
+              ...(anexos.falhas > 0 ? { anexos_com_falha: anexos.falhas } : {}),
+            },
           };
         }
         return { type: "create_or_move_lead", status: "failed", error: "cross_pipeline_move_not_allowed" };
@@ -242,7 +328,10 @@ async function execute(ctx: ActionCtx, config: Record<string, unknown>): Promise
           error: "continuacao_exige_outro_funil",
         };
       }
-      const movido = await moveLeadHandler(ctx.admin, handlerCtx, lead.id, { to_stage_id: stageId });
+      const movido = await moveLeadHandler(ctx.admin, handlerCtx, lead.id, {
+        to_stage_id: stageId,
+        ...(motivoDaPerda ? { lost_reason: motivoDaPerda } : {}),
+      });
       publicaNoContexto(ctx, movido, contactId);
       return { type: "create_or_move_lead", status: "success", detail: { moved: lead.id } };
     }
@@ -252,11 +341,14 @@ async function execute(ctx: ActionCtx, config: Record<string, unknown>): Promise
       // ganhava um negócio novo a cada vez que a regra rodava (#958). O negócio
       // procurado é o ABERTO no funil de destino — negócio de outro funil segue
       // fora, pela mesma regra que recusa mover entre funis.
-      const existente = await negocioAbertoDoContato(ctx, contact.id, pipelineId);
+      const existente = await negocioAbertoDoContato(ctx.admin, ctx.organizationId, contact.id, pipelineId);
       if (existente) {
-        const movido = await moveLeadHandler(ctx.admin, handlerCtx, existente, { to_stage_id: stageId });
+        const movido = await moveLeadHandler(ctx.admin, handlerCtx, existente.id, {
+          to_stage_id: stageId,
+          ...(motivoDaPerda ? { lost_reason: motivoDaPerda } : {}),
+        });
         publicaNoContexto(ctx, movido, contact.id);
-        return { type: "create_or_move_lead", status: "success", detail: { moved: existente } };
+        return { type: "create_or_move_lead", status: "success", detail: { moved: existente.id } };
       }
 
       // ── O CONTATO COM NEGÓCIO ABERTO EM OUTRO FUNIL: A REGRA TRANSFERE ───────
@@ -303,36 +395,38 @@ async function execute(ctx: ActionCtx, config: Record<string, unknown>): Promise
     return {
       type: "create_or_move_lead",
       status: "failed",
-      error: mensagemDeErro(err),
+      error: codigoDaRecusa(err),
     };
   }
 }
 
 /**
- * O negócio ABERTO do contato neste funil, se houver um.
+ * O CÓDIGO da recusa quando o erro é uma recusa de negócio — nunca o texto.
  *
- * Só o funil de destino. O negócio do contato em OUTRO funil não é movido de
- * etapa (mover entre funis é recusado logo acima) — ele é o caso de
- * `negocioAbertoEmOutroFunil`, que transfere. Falha de leitura devolve `null`.
+ * ─── O defeito que isto fecha (#4297) ───────────────────────────────────────
+ *
+ * Os handlers de `/api/v1/leads` recusam com `ApiError` (422
+ * `lost_reason_required`, `lost_reason_invalid`, `required_fields_missing`, …).
+ * O `catch` desta ação devolvia `mensagemDeErro(err)` — a FRASE. O recibo
+ * (`resultadoParaRecibo`) não reconhece frase como código, então trocava tudo
+ * por `internal_error`: a aba Atividade dizia "erro interno" para uma recusa de
+ * negócio que o operador consegue resolver abrindo a regra.
+ *
+ * `ApiError.code` é vocabulário fechado do produto (`ApiErrorCodes`, em
+ * `lib/api/errors.ts` — o mesmo que a rota devolve no corpo), e o recibo já
+ * aceita qualquer membro dele: `erroTecnicoConhecido` testa
+ * `Object.hasOwn(ApiErrorCodes, valor)` (`resultado-para-recibo.ts`). Ou seja,
+ * esta linha não abre porta para texto livre E o recibo não precisou de entrada
+ * nova — o que faltava era devolver o CÓDIGO em vez da frase.
+ *
+ * Erro que NÃO é `ApiError` (PostgREST cru, `Error` de biblioteca, qualquer
+ * objeto) continua indo pelo `mensagemDeErro`: ali o texto é a única pista, e o
+ * recibo o troca pelo código fixo como sempre fez.
  */
-async function negocioAbertoDoContato(
-  ctx: ActionCtx,
-  contactId: string,
-  pipelineId: string,
-): Promise<string | null> {
-  const { data } = await ctx.admin
-    .from("crm_leads")
-    .select("id")
-    .eq("organization_id", ctx.organizationId)
-    .eq("contact_id", contactId)
-    .eq("pipeline_id", pipelineId)
-    .eq("status", "open")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  return (data as { id?: string } | null)?.id ?? null;
+function codigoDaRecusa(err: unknown): string {
+  if (err instanceof ApiError) return err.code;
+  return mensagemDeErro(err);
 }
-
 
 /**
  * O negócio ABERTO do contato em qualquer OUTRO funil, se houver um.

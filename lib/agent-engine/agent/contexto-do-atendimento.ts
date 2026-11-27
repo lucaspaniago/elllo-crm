@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Queryable } from '../queue/queue';
+import { ehCategoriaDoDossie, rotuloDaLinha } from './dossie';
 import { resolveActiveLeadForContact, type LeadCandidate } from '@/lib/leads/active-lead';
 import { formatCents } from '@/lib/money';
 import { fusoValido, FUSO_PADRAO } from '@/lib/tempo/fusos';
@@ -149,7 +150,9 @@ export function normalizarFontesDoAtendimento(f: FontesDoAtendimento, tenantId: 
     }
   }
   const notas = f.notas.filter(pertence);
-  for (const n of notas.slice(0,8)) adicionar('perfil', n, 'memoria_do_agente', 'contato_sem_beneficiario_inferido', 'recorded', { titulo: n.headline, texto: n.body, autoridade: 'memoria_auxiliar_nao_verificada' });
+  // Fork elllo (9005): a nota leva do que fala e quem contou; a do Lucas, o aviso de que é só contexto.
+  for (const n of notas.slice(0,8)) adicionar('perfil', n, 'memoria_do_agente', 'contato_sem_beneficiario_inferido', 'recorded', { titulo: n.headline, texto: n.body, autoridade: 'memoria_auxiliar_nao_verificada',
+    ...(typeof n.fonte === 'string' ? { dossie: rotuloDaLinha({ categoria: ehCategoriaDoDossie(n.categoria) ? n.categoria : 'fato', fonte: n.fonte === 'pessoa' || n.fonte === 'helo' ? n.fonte : 'lucas', liberada: n.liberada === true }) } : {}) });
   const auxiliares = (f.auxiliares ?? []).filter(m => m.organization_id === tenantId);
   for (const m of auxiliares.slice(0,8)) adicionar('perfil', m, 'memoria_org', 'organizacao', 'recorded', { texto:m.body,autoridade:'fonte_auxiliar_nao_aprovacao_individual_ou_recibo' });
   encontrados.perfil += Math.max(0,notas.length-8) + Math.max(0,auxiliares.length-8);
@@ -207,7 +210,7 @@ export async function carregarContextoDoAtendimento(db: Queryable, ids: { tenant
   ) select
     (select jsonb_build_object('id',id,'organization_id',organization_id,'birthdate',birthdate,'tags',tags,'updated_at',updated_at) from contacts where organization_id=$1 and id=$2) as contato,
     (select coalesce(jsonb_agg(x),'[]') from (select l.id,l.organization_id,l.contact_id,l.pipeline_id,l.title,l.description,l.status,l.source,l.custom_fields,l.created_at,l.updated_at,l.last_activity_at,p.settings->'fields' as field_definitions from crm_leads l join crm_pipelines p on p.id=l.pipeline_id and p.organization_id=l.organization_id where l.organization_id=$1 and l.contact_id=$2 order by l.updated_at desc,l.id limit 9) x) as negocios,
-    (select coalesce(jsonb_agg(x),'[]') from (select id,organization_id,contact_id,headline,body,created_at,updated_at from lead_notes where organization_id=$1 and contact_id=$2 order by created_at desc,id limit 9) x) as notas,
+    (select coalesce(jsonb_agg(x),'[]') from (select id,organization_id,contact_id,headline,body,categoria,fonte,liberada,created_at,updated_at from lead_notes where organization_id=$1 and contact_id=$2 order by created_at desc,id limit 9) x) as notas,
     (select coalesce(jsonb_agg(x),'[]') from (select a.id,a.organization_id,a.contact_id,a.lead_id,a.type,a.payload,a.reason,a.actor_kind,a.performed_by_user_id,a.performed_at,s.next_action_seq as current_action_seq from crm_lead_activities a join crm_leads l on l.id=a.lead_id and l.organization_id=a.organization_id and l.contact_id=a.contact_id left join lead_state s on s.organization_id=a.organization_id and s.contact_id=a.contact_id where a.organization_id=$1 and a.contact_id=$2 and a.type in ('next_action_approved','next_action_dismissed','note_added') order by a.performed_at desc,a.id limit 9) x) as atividades,
     (select coalesce(jsonb_agg(x),'[]') from (select id,organization_id,contact_id,lead_id,titulo,status,decided_at,decision_reason,created_at,updated_at from crm_proposals where organization_id=$1 and contact_id=$2 and (conversation_id=$3 or conversation_id is null) and status<>'rascunho' order by updated_at desc,id limit 9) x) as propostas,
     (select coalesce(jsonb_agg(x),'[]') from (select a.id,a.organization_id,a.contact_id,a.title,a.status,a.starts_at,a.ends_at,a.time_zone,a.cancelled_at,a.created_at,a.updated_at,
@@ -220,7 +223,7 @@ export async function carregarContextoDoAtendimento(db: Queryable, ids: { tenant
       where a.organization_id=$1 and a.contact_id=$2 and a.conversation_id=$3 and not a.service_block order by a.updated_at desc,a.id limit 9) x) as agenda,
     (select coalesce(jsonb_agg(x),'[]') from (select id,organization_id,contact_id,next_run_at,enabled,cancelled_at,payload->>'promise' as promise,payload->>'reason' as reason,created_at,updated_at from cron_jobs where organization_id=$1 and contact_id=$2 and job_kind='followup_turn' and payload->>'conversation_id'=$3::text order by updated_at desc,id limit 9) x) as retornos,
     (select coalesce(jsonb_agg(x),'[]') from (select ac.id,ac.organization_id,c.contact_id,ac.status,
-      (select body from agent_case_events where organization_id=$1 and case_id=ac.id and kind='human_replied' and human_action='need_lead_info' and actor_kind='human' and actor_user_id is not null order by created_at desc,id limit 1) as human_ask,
+      case when public.fn_caso_na_fronteira_atual($1,ac.id) then (select body from agent_case_events where organization_id=$1 and case_id=ac.id and kind='human_replied' and human_action='need_lead_info' and actor_kind='human' and actor_user_id is not null order by created_at desc,id limit 1) end as human_ask,
       (select body from agent_case_events where organization_id=$1 and case_id=ac.id and kind='lead_provided' and actor_kind='lead' order by created_at desc,id limit 1) as lead_update,
       ac.created_at,ac.updated_at from agent_cases ac join conversations c on c.id=ac.conversation_id and c.organization_id=ac.organization_id where ac.organization_id=$1 and c.contact_id=$2 and c.id=$3 and ac.status in ('awaiting_lead','awaiting_human') order by ac.updated_at desc,ac.id limit 9) x) as caso,
     (select jsonb_build_object('id',j.id,'organization_id',j.organization_id,'contact_id',j.contact_id,'kind',j.kind,'status',j.status,'created_at',j.created_at,
@@ -242,7 +245,17 @@ export async function carregarContextoDoAtendimento(db: Queryable, ids: { tenant
       from catalog_products where organization_id=$1 and codigo=any($7::text[])) as produtos,
     (select coalesce(jsonb_agg(x),'[]') from (
       select 'documento' as id,p.organization_id,v.content as body,v.created_at from org_memory_pointers p join org_memory_versions v on v.id=p.version_id and v.organization_id=p.organization_id where p.organization_id=$1
-      union all select e.id::text,e.organization_id,e.title || E'\n' || e.body,e.created_at from org_memory_entries e where e.organization_id=$1 and e.status='active' order by created_at desc limit 9) x) as auxiliares,
+      union all select e.id::text,e.organization_id,e.title || E'\n' || e.body,e.created_at from org_memory_entries e
+        where e.organization_id=$1 and e.status='active'
+          -- #2369 — aprendizado com prazo: vencido não é contexto. "Hoje" no fuso
+          -- da organização (o JOIN com pg_timezone_names recusa IANA inválido sem
+          -- levantar erro; sem fuso aproveitável cai no padrão do produto, que é o
+          -- mesmo FUSO_PADRAO de fusoUtilizavel). Data de calendário: vale até o
+          -- fim do último dia, como o valid_until de proposta.
+          and (e.valid_until is null or e.valid_until >= (now() at time zone coalesce(
+                (select o.timezone from organizations o join pg_timezone_names z on z.name=o.timezone where o.id=$1),
+                'America/Sao_Paulo'))::date)
+        order by created_at desc limit 9) x) as auxiliares,
     (select jsonb_build_object('jev',settings->'jev','timezone',timezone,
       'promise_table',(select version_id from promise_table_pointers where organization_id=$1),
       'bindings',(select jsonb_agg(jsonb_build_object('purpose',purpose,'provider',provider,'model',model_id,'credential',credential_id,'enabled',is_enabled,'base',base_url) order by purpose) from ai_purpose_bindings where organization_id=$1 and purpose in ('promise_semantic','human_return_confirmation')),

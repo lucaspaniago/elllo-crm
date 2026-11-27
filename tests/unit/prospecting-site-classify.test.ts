@@ -8,6 +8,8 @@ import {
   hostDeSite,
   MINIMO_CHARS_PAGINA_REAL,
   montarChecklist,
+  pontuarCompletudeDoSite,
+  vereditoPuro,
 } from "@/lib/prospecting/site-classify";
 
 describe("site-classify", () => {
@@ -52,27 +54,48 @@ describe("site-classify", () => {
       <link rel="icon" href="/f.ico"></head><body>
       <a href="https://wa.me/551199">zap</a><a href="tel:+551199">tel</a>
       <a href="mailto:a@b.com">mail</a><a href="https://instagram.com/x">ig</a>
-      <address>Rua X</address><img><img><img></body></html>`;
+      <address>Rua X</address><a href="https://maps.google.com/?q=x">Mapa</a><img><img><img></body></html>`;
     const checklist = montarChecklist(html);
     expect(checklist.falta).toEqual([]);
+    expect(checklist.tem).toContain("endereco");
     expect(checklist.tem).toContain("mapa");
+    const semEnderecoOuMapa = montarChecklist("<html><body>sem endereço</body></html>");
+    expect(semEnderecoOuMapa.falta).toContain("endereco");
+    expect(semEnderecoOuMapa.falta).toContain("mapa");
     expect(montarChecklist("<html><body>oi</body></html>").tem).toEqual([]);
+  });
+
+  it("pontua completude por itens encontrados, sem inferir intenção de compra", () => {
+    const score = pontuarCompletudeDoSite({
+      tem: ["tel", "mailto", "titulo", "description", "favicon"],
+      falta: ["whatsapp", "social", "endereco", "mapa", "fotos"],
+    });
+    expect(score).toEqual({ valor: 50, presentes: 5, total: 10 });
+    const semSite = vereditoPuro(null, "2026-10-28T12:00:00.000Z");
+    expect(pontuarCompletudeDoSite(semSite?.checklist)).toEqual({ valor: 0, presentes: 0, total: 10 });
   });
 
   it("página mínima válida cai em quase-vazia (limiar pinado)", () => {
     expect("<html><body>oi</body></html>".trim().length).toBeLessThan(MINIMO_CHARS_PAGINA_REAL);
   });
 
-  it("deriva a classe na ordem: agregador > sem-site > rede > http > problemas > ok", () => {
+  it("deriva a classe na ordem: agregador > sem-site > não medido > http > problemas medidos > ok", () => {
     const base = { agregador: false, semSite: false, urlFinal: "https://x.com", problemas: [] as string[] };
     expect(derivarClasse({ ...base, agregador: true, semSite: true })).toBe("agregador");
     expect(derivarClasse({ ...base, semSite: true })).toBe("sem-site");
     expect(derivarClasse({ ...base, erro: { tipo: "dns" } })).toBe("fora-do-ar");
-    expect(derivarClasse({ ...base, erro: { tipo: "transitoria" } })).toBe("fora-do-ar");
+    // Dúvida de rede não é veredito de mérito: não medido (#3723).
+    expect(derivarClasse({ ...base, erro: { tipo: "transitoria" } })).toBe("nao-medido");
     expect(derivarClasse({ ...base, erro: { tipo: "ssl", codigo: "CERT_HAS_EXPIRED" } })).toBe("ssl-invalido");
     expect(derivarClasse({ ...base, erro: { tipo: "http", status: 404 } })).toBe("site-ruim");
+    // 403/401/406/429/451/503 são o nosso acesso barrado, não defeito do site.
+    for (const status of [401, 403, 406, 429, 451, 503]) {
+      expect(derivarClasse({ ...base, erro: { tipo: "http", status } })).toBe("nao-medido");
+    }
     expect(derivarClasse({ ...base, urlFinal: "http://x.com/" })).toBe("site-ruim");
     expect(derivarClasse({ ...base, problemas: ["nao-mobile"] })).toBe("site-ruim");
+    // Item de checklist é melhoria: sozinho não faz de um site bom um site ruim.
+    expect(derivarClasse({ ...base, problemas: ["falta-tel", "falta-titulo"] })).toBe("site-ok");
     expect(derivarClasse(base)).toBe("site-ok");
   });
 
@@ -86,8 +109,9 @@ describe("site-classify", () => {
   it("todo código emitido pertence ao vocabulário fechado", async () => {
     const { derivarClasse } = await import("@/lib/prospecting/site-classify");
     const conhecidos = new Set([
-      "sem-https", "ssl-invalido", "fora-do-ar", "dns-morto", "nao-mobile", "lento",
+      "sem-https", "http-sem-redirecionar", "ssl-invalido", "fora-do-ar", "dns-morto", "nao-mobile", "lento",
       "quase-vazia", "conteudo-misto", "sem-atualizacao",
+      "medicao-bloqueada", "medicao-instavel", "nao-medido",
       "whatsapp", "tel", "mailto", "social", "mapa", "fotos", "titulo", "description", "favicon",
     ]);
     const amostras: Array<Parameters<typeof derivarClasse>[0]> = [
@@ -101,7 +125,7 @@ describe("site-classify", () => {
       { agregador: false, semSite: false, urlFinal: "https://x/", problemas: [] },
     ];
     for (const a of amostras) {
-      expect(["agregador", "sem-site", "site-ok", "site-ruim", "ssl-invalido", "fora-do-ar"]).toContain(
+      expect(["agregador", "sem-site", "site-ok", "site-ruim", "ssl-invalido", "fora-do-ar", "nao-medido"]).toContain(
         derivarClasse(a),
       );
       for (const p of a.problemas) {

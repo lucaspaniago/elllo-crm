@@ -21,7 +21,8 @@
  *   3. se o terceiro NÃO documenta nada, a lacuna entra com motivo escrito.
  *      Número não medido não vira teto: vira lacuna declarada.
  */
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -82,7 +83,7 @@ const FRONTEIRAS: Fronteira[] = [
       "https://supabase.com/docs/guides/storage/uploads/file-limits — seção «File name restrictions»",
     lacuna:
       "a mesma página documenta o alfabeto do nome de arquivo e não documenta teto de comprimento da chave. Forma entra no teste; número, não.",
-    medir: () => [ORG, VERSAO, "minha skill", "SKILL.md", "assets", "referencia.md"],
+    medir: () => [ORG, VERSAO, "minha skill", "SKILL.md", "assets", "referencia.md", "externa-0123456789abcdef.jpg"],
   },
   {
     id: "api.idempotency-key",
@@ -146,10 +147,10 @@ function varrer(dir: string, achados: string[] = []): string[] {
   return achados;
 }
 
-function caminhosCom(padrao: RegExp): string[] {
-  return DIRS_DE_CODIGO.flatMap((d) => varrer(join(RAIZ, d)))
+function caminhosCom(padrao: RegExp, raiz = RAIZ): string[] {
+  return DIRS_DE_CODIGO.flatMap((d) => varrer(join(raiz, d)))
     .filter((c) => padrao.test(readFileSync(c, "utf8")))
-    .map((c) => c.slice(RAIZ.length + 1).replaceAll("\\", "/"));
+    .map((c) => c.slice(raiz.length + 1).replaceAll("\\", "/"));
 }
 
 /**
@@ -161,7 +162,17 @@ function caminhosCom(padrao: RegExp): string[] {
 const SITES: { arquivo: string; fronteira: string; papel?: "gerador" | "validador" }[] = [
   // Storage — a chave do objeto sai daqui e vira objeto lá.
   { arquivo: "workers/lgpd-export-worker.ts", fronteira: "storage.chave-de-objeto" },
+  // O atestado de anonimização (#2342): a chave é `{org}/{pedido}/atestado.pdf`
+  // — o primeiro pedaço é o UUID da org que o banco gera, o segundo é o id do
+  // pedido já validado como uuid pela rota, e o sufixo é fixo. Nada de texto
+  // digitado por ninguém entra na chave.
+  { arquivo: "lib/lgpd/emitir-atestado.ts", fronteira: "storage.chave-de-objeto" },
   { arquivo: "workers/media-persist-worker.ts", fronteira: "storage.chave-de-objeto" },
+  // Spec 25 R4: a imagem que o agente manda por `imagem_url` é baixada pelo CRM e gravada em
+  // `${tenant}/${conversa}/externa-<16 hex do conteúdo>.jpg|png|webp`. Os dois ids vêm do turno
+  // e são conferidos como segmento simples (sem `/`, `\`, `.` nem `..`) antes de montar a chave;
+  // o nome sai do hash dos bytes e a extensão de uma lista de três.
+  { arquivo: "lib/agent-engine/agent/baixar-imagem-segura.ts", fronteira: "storage.chave-de-objeto" },
   { arquivo: "lib/ai/skills/install.ts", fronteira: "storage.chave-de-objeto" },
   // Herança de arquivos do pacote no save textual (#2047): a chave é montada
   // com os MESMOS pedaços do install — org (uuid do JWT), name (vem da
@@ -170,23 +181,46 @@ const SITES: { arquivo: string; fronteira: string; papel?: "gerador" | "validado
   // package.ts. Nada de texto digitado pelo operador entra na chave.
   { arquivo: "lib/ai/skills/package-files.ts", fronteira: "storage.chave-de-objeto" },
   { arquivo: "app/api/v1/products/[id]/fotos/route.ts", fronteira: "storage.chave-de-objeto" },
+  // Fork elllo (acervo1): a foto da peça do acervo, MESMA chave do produto
+  // (`<org>/<id da peça = id do produto>/<uuid>.jpg|png`): org do token, id e nome gerados
+  // pelo servidor (randomUUID), extensão pela ASSINATURA dos bytes.
+  { arquivo: "app/api/v1/acervo/route.ts", fronteira: "storage.chave-de-objeto" },
   // #2526: a imagem que o operador carrega na Resposta rápida. O caminho é gerado
   // aqui (`${orgId}/templates/${templateId}/uuid.jpg|png`) — a forma é a mesma do
   // registro acima: UUID v4 de alfabeto ASCII + `.jpg`/`.png` conhecido pela
   // ASSINATURA dos bytes, nunca pelo content-type que o cliente diz.
   { arquivo: "app/api/v1/message-templates/[id]/midias/route.ts", fronteira: "storage.chave-de-objeto" },
+  { arquivo: "app/api/v1/products/[id]/ai-presentation/audio/route.ts", fronteira: "storage.chave-de-objeto" },
   { arquivo: "app/api/v1/cron/contact-avatars/route.ts", fronteira: "storage.chave-de-objeto" },
-  { arquivo: "app/api/v1/channels/partner/templates/media/route.ts", fronteira: "storage.chave-de-objeto" },
+  // #3635: o upload do cabeçalho saiu da rota do parceiro para `lib/` quando o
+  // canal oficial direto passou a gerenciar modelo pela tela — a lógica é a
+  // mesma, e as duas rotas (`partner/templates/media` e `templates/media`) são só
+  // o handler. A chave é a de antes: `{org}/templates/{uuid}.{jpg|png}`, com a
+  // extensão vinda da ASSINATURA dos bytes.
+  { arquivo: "lib/channels/templates-midia.ts", fronteira: "storage.chave-de-objeto" },
+  // A nota de voz do agente (`uploadDeVoz`): `{org}/{conversa}/voz-agente-{jobId}-{seq}.mp3`
+  // — org e conversa do turno, jobId uuid da fila, seq inteiro do turno. Nada de
+  // texto do cliente nem do modelo entra na chave.
+  { arquivo: "lib/agent-engine/agent/inbound-turn.ts", fronteira: "storage.chave-de-objeto" },
   { arquivo: "app/api/v1/settings/sons/route.ts", fronteira: "storage.chave-de-objeto" },
   { arquivo: "app/api/v1/marca/logo/route.ts", fronteira: "storage.chave-de-objeto" },
   { arquivo: "app/api/v1/conversations/[id]/media/route.ts", fronteira: "storage.chave-de-objeto" },
   // O anexo da nota interna (#1863, F3): MESMO molde de chave da rota irmã
   // (`{org}/{conversa}/note-{uuid}.{ext}`), bucket próprio `internal-media`.
   { arquivo: "app/api/v1/conversations/[id]/notes/media/route.ts", fronteira: "storage.chave-de-objeto" },
+  // O anexo de lead (#2829): anexo em campo customizado do lead, bucket `internal-media`.
+  { arquivo: "app/api/v1/leads/[id]/attachments/route.ts", fronteira: "storage.chave-de-objeto" },
   { arquivo: "app/api/v1/ai/knowledge/sources/upload/route.ts", fronteira: "storage.chave-de-objeto" },
   { arquivo: "app/api/v1/ai/knowledge/sources/route.ts", fronteira: "storage.chave-de-objeto" },
+  { arquivo: "app/api/v1/ai/knowledge/sources/[id]/texto/route.ts", fronteira: "storage.chave-de-objeto" },
   // O PDF da proposta comercial (#1832): `<org>/<proposta>.pdf`, dois uuids.
   { arquivo: "lib/propostas/storage.ts", fronteira: "storage.chave-de-objeto" },
+  // A foto do produto por URL na planilha (#3587, fatia 1): a chave é
+  // `<org>/<produto>/<uuid>.<ext>` — os mesmos pedaços que a tela grava. O uuid
+  // nasce aqui (`randomUUID`), a extensão vem do tipo farejado nos BYTES (não
+  // do nome nem da URL) e o `org`/`produto` são uuids já resolvidos. Nenhum
+  // texto da planilha entra na chave — a URL do cliente só escolhe o conteúdo.
+  { arquivo: "lib/catalogo/fotos-por-url.ts", fronteira: "storage.chave-de-objeto" },
   // Chave de idempotência: os geradores (manda UUID) e os validadores (exige UUID).
   { arquivo: "app/onboarding/connect-whatsapp/_client.tsx", fronteira: "api.idempotency-key", papel: "gerador" },
   { arquivo: "components/extensions/ExtensionsManager.tsx", fronteira: "api.idempotency-key", papel: "gerador" },
@@ -197,10 +231,14 @@ const SITES: { arquivo: string; fronteira: string; papel?: "gerador" | "validado
   { arquivo: "lib/api/client.ts", fronteira: "api.idempotency-key", papel: "gerador" },
   { arquivo: "lib/api/idempotency.ts", fronteira: "api.idempotency-key", papel: "validador" },
   { arquivo: "lib/extensions/http.ts", fronteira: "api.idempotency-key", papel: "validador" },
+  { arquivo: "app/api/v1/agencia/clientes/route.ts", fronteira: "api.idempotency-key", papel: "validador" },
   { arquivo: "app/api/v1/admin/tenants/route.ts", fronteira: "api.idempotency-key", papel: "validador" },
   { arquivo: "app/api/v1/channel-sessions/route.ts", fronteira: "api.idempotency-key", papel: "validador" },
   { arquivo: "app/api/v1/lgpd/requests/[id]/approve/route.ts", fronteira: "api.idempotency-key", papel: "validador" },
   { arquivo: "app/api/v1/onboarding/whatsapp/session/route.ts", fronteira: "api.idempotency-key", papel: "validador" },
+  // Módulo `amigo` (#4227): a tela gera a chave e a rota de operações a valida.
+  { arquivo: "app/app/integrations/amigo/_api.ts", fronteira: "api.idempotency-key", papel: "gerador" },
+  { arquivo: "app/api/v1/integrations/amigo/execute/route.ts", fronteira: "api.idempotency-key", papel: "validador" },
 ];
 
 describe("todo identificador que cruza fronteira cabe no que o terceiro aceita", () => {
@@ -313,6 +351,25 @@ describe("nenhum identificador sem destino declarado", () => {
 });
 
 describe("a varredura é de classe: site novo de fronteira reprova", () => {
+  it.each(["app/api/novo/route.ts", "scripts/operacao.ts", "scripts/provas/nova.ts"])(
+    "encontra upload novo em %s; bancada em tests fica fora do código de produção",
+    (arquivo) => {
+      const raiz = mkdtempSync(join(tmpdir(), "fronteiras-de-producao-"));
+      try {
+        for (const dir of [...DIRS_DE_CODIGO, "tests/provas"]) mkdirSync(join(raiz, dir), { recursive: true });
+        mkdirSync(join(raiz, arquivo, ".."), { recursive: true });
+        writeFileSync(join(raiz, arquivo), "armazenamento.upload('chave', bytes);\n");
+        writeFileSync(join(raiz, "tests/provas/bancada.ts"), "armazenamento.upload('fixture', bytes);\n");
+        // Nem retirar scripts da varredura, nem ignorar scripts/provas passa.
+        // O site novo permanece fora do catálogo e seria recusado pelo gate.
+        expect(caminhosCom(/\.upload\(/, raiz)).toEqual([arquivo]);
+        expect(SITES.some((s) => s.arquivo === arquivo)).toBe(false);
+      } finally {
+        rmSync(raiz, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("todo `.upload(` do código de produção está registrado, e na fronteira certa", () => {
     const achados = caminhosCom(/\.upload\(/);
     const registrados = SITES.filter((s) => s.fronteira === "storage.chave-de-objeto").map((s) => s.arquivo);

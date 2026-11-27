@@ -123,6 +123,12 @@ const schema = z.object({
   /** Optional dedicated secret for cron endpoints (S-06.07 onwards). */
   INTERNAL_CRON_SECRET: z.string().optional().default(""),
   /**
+   * Módulo `amigo` (#4227): troca a origem da API do Amigo por ESTE computador,
+   * para a prova de tela com receptor de mentira. Só `http(s)://127.0.0.1|localhost`
+   * vale; qualquer outro valor é ignorado (`origemDoAmigo`, lib/amigo/transport.ts).
+   */
+  AMIGO_API_ORIGIN_LOCAL: z.string().optional().default(""),
+  /**
    * Segredo do DONO DA INSTALAÇÃO para `POST /api/v1/tenants/provision` (um
    * sistema externo cria organizações). Vazio por padrão = a rota não existe
    * (404); com menos de 32 caracteres também fica desligada.
@@ -229,6 +235,21 @@ const schema = z.object({
   // devolve 401 em toda chamada — por isso `getWacallsClient()` exige os dois.
   WACALLS_API_TOKEN: z.string().optional().default(""),
 
+  // ─── Prospecção: engine de scraping self-hosted (local-http, #2942) ───────
+  //
+  // Mesmo desenho de WACALLS_API_BASE_URL: NUNCA `required()`. Vazio = a
+  // instalação não oferece o engine de scraping self-hosted, e a organização
+  // que escolher `local-http` em `settings.prospecting.provider` cai no erro
+  // FECHADO de sempre ("Informe a URL do engine de busca local.").
+  //
+  // A URL é da INSTALAÇÃO — e não da organização, como a #2942 propôs: é isso
+  // que faz a liberação de destino interno valer (`lib/automation/
+  // destinos-internos-autorizados.ts`, regra 2 — endereço escolhido por uma
+  // organização nunca alcança a rede de dentro). Quem lê é
+  // `baseDoEngineDaInstalacao()` em `lib/prospecting/provedor-local-http.ts`,
+  // que ainda passa o endereço pela régua de saída antes de chamar o engine.
+  PROSPECTING_LOCAL_HTTP_URL: z.string().optional().default(""),
+
   // ─── Videochamada (Jitsi Meet, #2440) — OPCIONAL, DESLIGADA POR PADRÃO ───
   //
   // Mesmo desenho de WACALLS_API_BASE_URL: NUNCA `required()`. Vazio = a
@@ -275,6 +296,15 @@ const schema = z.object({
   // é `canalGraphParceiroLigado()` em `lib/channels/graph-parceiro/credentials.ts`.
   DATAFY_ENABLED: z.string().optional().default(""),
 
+  // ─── Número oficial com um clique (migration 9093) — OPCIONAL ───
+  //
+  // Chave da conta do provedor parceiro DA INSTALAÇÃO. Vazia = a tela de
+  // Conexões oferece só a conexão por chave própria, como antes. É semente: a
+  // tela Painel › Configuração vence este valor. Quem lê é `chaveDaInstalacao()`
+  // em `lib/channels/zernio/credentials.ts`, pelo resolvedor da instalação, a
+  // cada chamada — nunca por `env.`, para a troca na tela valer na hora.
+  ZERNIO_PLATFORM_API_KEY: z.string().optional().default(""),
+
   // Upstash Redis
   UPSTASH_REDIS_REST_URL: required("UPSTASH_REDIS_REST_URL"),
   UPSTASH_REDIS_REST_TOKEN: required("UPSTASH_REDIS_REST_TOKEN"),
@@ -302,6 +332,10 @@ const schema = z.object({
   // e NUNCA `z.enum` (motivo mais abaixo, em AGENT_DISPATCH_CONSUMER): quem valida
   // a grafia é o boot do worker, em `lib/agent-engine/env.ts`.
   OPENAI_REASONING_EFFORT: z.string().optional().default(""),
+  // Cache de prompt nos Claude pela OpenRouter (ligado por padrão; `off` desliga).
+  // `z.string()` pelo mesmo motivo do knob acima: quem valida a grafia é o boot
+  // do worker, e quem lê em runtime é `createDefaultRegistry`, via process.env.
+  OPENROUTER_PROMPT_CACHE: z.string().optional().default(""),
   // Transcrição de áudio num serviço COMPATÍVEL com o da OpenAI (Groq, um
   // Whisper próprio): a chave vale só para `/audio/transcriptions` — a conversa
   // com o cliente e a leitura de imagem continuam no provedor do ponto.
@@ -316,6 +350,18 @@ const schema = z.object({
   // da OpenAI da organização — assim como `TRANSCRIPTION_MODEL`. Leitura
   // tolerante em `idiomasDaTranscricao` (grafia errada não derruba o worker).
   TRANSCRIPTION_LANGUAGES: z.string().optional().default(""),
+  // Foto só passa pela visão (paga) quando alguém da empresa vai ler a
+  // descrição. `defer` (padrão) liga a trava: numa empresa sem leitor — nenhum
+  // agente com "ver as fotos" ligado (ai_agent_versions.image_vision_enabled),
+  // nenhuma integração (token, anúncio, modo external, venda pelo canal,
+  // inscrição de follow-up sem agente), nenhum caso aberto de agente fora do ar
+  // — a foto é guardada sem descrição, e o dreno ou o cron
+  // `media-leitura-adiada` a descrevem quando aparecer quem leia. `always` é a
+  // válvula do operador: descreve toda foto e reabre as
+  // adiadas. Só `always` desliga — vazio ou grafia torta ficam no padrão. Quem
+  // lê é `adiarSemLeitorLigado`, em lib/messaging/media/leitura-adiada.ts.
+  // `z.string()` e nunca `z.enum`, pelo motivo de AI_BUDGET_ENFORCEMENT abaixo.
+  MEDIA_VISION_WITHOUT_READER: z.string().optional().default("defer"),
   // Endereço da API do Jev (TypeSafe AI). Vazio é ausente: vale
   // https://api.typesafe.ai. Existe para o dublê do e2e — a CHAVE nunca vem
   // daqui, é por organização (BYOK). Quem lê é `baseDaApiDoJev()`, em
@@ -439,6 +485,7 @@ const schema = z.object({
    * e são o piso de rollback. Todas `optional().default()`: `.env` antigo não
    * quebra ao atualizar.
    */
+  CADENCIA_LIMITE_EMAILS_POR_DIA: z.coerce.number().int().min(1).max(10_000).optional().default(60),
   SMTP_HOST: z.string().optional().default(""),
   SMTP_PORT: z.coerce.number().int().min(1).max(65535).optional().default(587),
   SMTP_SECURITY: z.enum(["starttls", "tls", "none"]).optional().default("starttls"),
@@ -661,6 +708,21 @@ const schema = z.object({
    */
   VAPID_PUBLIC_KEY: z.string().optional().default(""),
   VAPID_PRIVATE_KEY: z.string().optional().default(""),
+
+  /**
+   * Chave PRIVADA (PEM PKCS#8, curva P-256) com que o host assina o JWT de contexto do módulo
+   * conectado (spec 33, F3). Vazio = recurso desligado: a rota de contexto responde 503 e o módulo
+   * fica com teto `agent` e sem pessoa. Instalação fresca não precisa dela. Nunca vai a log.
+   */
+  MODULE_JWT_PRIVATE_KEY: z.string().optional().default(""),
+
+  /**
+   * Fork elllo: as organizações (uuids separados por vírgula) que recebem o aviso de caso em
+   * LINGUAGEM NATURAL — um balão escrito para o dono e um com o link, sem as linhas
+   * RESPONDER/PERGUNTAR (o comando digitado continua aceito). Vazio = o aviso de sempre.
+   * Lido por `lib/escalacao/aviso-ao-suporte.handler.ts`; a volta é tirar a org daqui.
+   */
+  AVISO_DE_CASO_NATURAL_ORGS: z.string().optional().default(""),
 });
 
 let parsed = schema.safeParse(process.env);

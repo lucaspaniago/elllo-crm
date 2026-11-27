@@ -24,6 +24,7 @@ import { useT } from "@/hooks/i18n/useT";
  * "Editar conteúdo" para quem cadastrou um documento e abria o editor de FAQ
  * vazio — um controle que promete conteúdo que aquele material não tem.
  */
+import Link from "next/link";
 import { useState } from "react";
 import {
   BookOpen,
@@ -40,10 +41,12 @@ import { Button } from "@/components/ui/button";
 import { SourceStatusBadge, deriveBadgeStatus } from "@/components/ai/SourceStatusBadge";
 import { TrechosDoMaterialDialog } from "@/components/ai/TrechosDoMaterialDialog";
 import { EditarFaqDialog } from "@/components/ai/EditarFaqDialog";
+import { EditarTextoDialog } from "@/components/ai/EditarTextoDialog";
 import {
   TIPO_DE_FONTE_POR_ID,
   canonizarTipoDeFonte,
   ePerguntaEResposta,
+  veioDeTextoColado,
 } from "@/lib/ai/rag/tipos-de-fonte";
 import type { SourceRow } from "@/hooks/ai/useKnowledgeSources";
 
@@ -58,6 +61,13 @@ interface Props {
   source: SourceRow;
   /** Nomes dos assistentes que consultam este material. */
   usadoPor: string[];
+  /**
+   * Endereço da LEITURA do material (`/app/ai/knowledge/sources/[id]`).
+   *
+   * Opcional de propósito: o cartão é usado em telas que não são o acervo, e
+   * controle que não leva a lugar nenhum gasta a confiança de quem clicou.
+   */
+  href?: string;
   onReindex: () => void;
   onArquivar: () => void;
   onMudou: () => void;
@@ -85,6 +95,7 @@ function formatRelative(
 export function KnowledgeSourceCard({
   source,
   usadoPor,
+  href,
   onReindex,
   onArquivar,
   onMudou,
@@ -94,6 +105,7 @@ export function KnowledgeSourceCard({
   const tagDoIdioma = useTagDeIdioma();
   const [vendoTrechos, setVendoTrechos] = useState(false);
   const [editando, setEditando] = useState(false);
+  const [editandoTexto, setEditandoTexto] = useState(false);
 
   const tipo = canonizarTipoDeFonte(source.source_type) ?? "faq";
   const meta = TIPO_DE_FONTE_POR_ID.get(tipo);
@@ -111,7 +123,21 @@ export function KnowledgeSourceCard({
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-2">
             <Icon className="h-5 w-5 shrink-0 text-accent" aria-hidden />
-            <CardTitle className="text-base">{source.name}</CardTitle>
+            <CardTitle className="text-base">
+              {/* O nome é a porta mais óbvia para ler o material: quem olha a
+                  grade clica no título antes de procurar um botão. */}
+              {href ? (
+                <Link
+                  href={href}
+                  className="hover:text-accent focus-visible:underline"
+                  data-testid={`material-abrir-nome-${source.id}`}
+                >
+                  {source.name}
+                </Link>
+              ) : (
+                source.name
+              )}
+            </CardTitle>
           </div>
           <SourceStatusBadge source={source} />
         </div>
@@ -168,6 +194,18 @@ export function KnowledgeSourceCard({
           {isReindexing ? t("Preparando…") : t("Preparar de novo")}
         </Button>
 
+        {/* ABRIR O MATERIAL — ler o que está guardado nele. Fica ANTES de "Ver o
+            que ele aprendeu" porque a pergunta da tela é "o que tem neste
+            material?", e os trechos do índice respondem outra pergunta. */}
+        {href ? (
+          <Button variant="ghost" size="sm" asChild>
+            <Link href={href} data-testid={`material-abrir-${source.id}`}>
+              <FileText className="mr-2 h-3.5 w-3.5" aria-hidden />
+              {t("Ler o material")}
+            </Link>
+          </Button>
+        ) : null}
+
         {temTrechos ? (
           <>
             <Button
@@ -210,6 +248,30 @@ export function KnowledgeSourceCard({
                 nome={source.name}
                 aberto
                 onFechar={() => setEditando(false)}
+                onSalvo={onMudou}
+              />
+            ) : null}
+          </>
+        ) : null}
+
+        {/* Documento criado COLANDO texto (#4596): o texto é um `.md` guardado e
+            dá para regravar. Arquivo enviado (PDF etc.) não tem esta ação. */}
+        {veioDeTextoColado(source.source_type, source.source_metadata) && !arquivado ? (
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setEditandoTexto(true)}
+              data-testid={`material-editar-texto-${source.id}`}
+            >
+              {t("Editar texto")}
+            </Button>
+            {editandoTexto ? (
+              <EditarTextoDialog
+                sourceId={source.id}
+                nome={source.name}
+                aberto
+                onFechar={() => setEditandoTexto(false)}
                 onSalvo={onMudou}
               />
             ) : null}

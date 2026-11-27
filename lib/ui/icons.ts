@@ -34,6 +34,8 @@ export {
   Clock,
   // marca da instalação (o revendedor troca nome e cor do produto)
   Palette,
+  // aparência da organização (template visual, Configurações › Aparência)
+  PaintBrush,
   // anúncios (Análise → Meta Ads). Megaphone e não outro ChartX: os dois
   // vizinhos do grupo já são gráficos (ChartBar em Desempenho, ChartLineUp em
   // Evolução da IA), e um terceiro gráfico deixaria as três linhas do menu
@@ -46,6 +48,9 @@ export {
   Dot,
   // actions
   ArrowBendUpLeft,
+  // encaminhar (#2835): a seta espelhada do "Responder" — mesma família,
+  // mesmo peso, para os dois gestos da bolha lerem como par.
+  ArrowBendUpRight,
   // videochamada (#2440): ícone de câmera, não Video (que no Phosphor é a
   // janela de player) — junto do Phone do DialButton, a família é a mesma.
   VideoCamera,
@@ -56,6 +61,10 @@ export {
   EnvelopeSimple,
   PaperPlaneTilt,
   Smiley,
+  Fire,
+  Voicemail,
+  Waveform,
+  XCircle,
   Check,
   Checks,
   X,
@@ -97,6 +106,7 @@ export {
   WhatsappLogo,
   InstagramLogo,
   MessengerLogo,
+  TelegramLogo,
   Phone,
   PhoneIncoming,
   PhoneOutgoing,
@@ -119,6 +129,8 @@ export {
   GitBranch,
   Flag,
   TreeStructure,
+  // reordenar por arrastar e soltar (#3244): a alça da lista de respostas rápidas
+  DotsSixVertical as DragHandle,
   // misc
   DotsThree,
   CaretDown,
@@ -152,6 +164,14 @@ export {
   GoogleLogo,
   MapPin,
   ArrowsOutSimple,
+  // Construtor de cadências — mesma família da interface.
+  Hourglass, Lightning, Minus, StopCircle, CheckSquare, ArrowLeft,
   // /admin/modulos: módulo opcional com tabela própria (ADR-0002)
   Stack,
+  // atalhos do card (#3487): carrinho do app de pedidos e o link genérico.
+  // `LinkSimple` entra apelidado de `LinkIcon` porque `Link` é o do `next/link`
+  // em quase toda tela — dois identificadores iguais no mesmo import seriam
+  // erro de compilação na primeira tela que precisasse dos dois.
+  ShoppingCart,
+  LinkSimple as LinkIcon,
 } from "@phosphor-icons/react/dist/ssr";

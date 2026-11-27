@@ -2,14 +2,22 @@
 
 import { useT } from "@/hooks/i18n/useT";
 
-import { useSyncExternalStore } from "react";
+import { useState, useSyncExternalStore } from "react";
 
 import { Card } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { useNotificationPermission } from "@/hooks/notifications/useNotificationPermission";
-import { encerrarPushDesteAparelho, syncPushSubscription } from "@/lib/notifications/push_client";
+import {
+  ehMotivoDoAparelho,
+  encerrarPushDesteAparelho,
+  pushNaoEntrega,
+  syncPushSubscription,
+  type ResultadoDaInscricao,
+} from "@/lib/notifications/push_client";
 import {
   NOTIFY_UI_CATEGORIES,
+  SO_NO_CELULAR,
+  algumPushLigado,
   assinarPrefs,
   getPrefsSnapshot,
   getPrefsSnapshotDoServidor,
@@ -26,6 +34,8 @@ const LABELS: Record<NotifyCategory, string> = {
   lead_lost: "Lead perdido",
   mention: "Você foi mencionado",
   call_inbound: "Ligação recebida",
+  handoff: "A IA passou uma conversa para a equipe",
+  stage_alert: "Negócio entrou numa etapa que avisa",
 };
 
 export function NotificationPrefsClient() {
@@ -34,6 +44,52 @@ export function NotificationPrefsClient() {
   const prefs = useSyncExternalStore(assinarPrefs, getPrefsSnapshot, getPrefsSnapshotDoServidor);
   const denied = permission === "denied";
   const unsupported = permission === "unsupported";
+  // A inscrição que não pegou (issues #3116 e #3164). `null` = nada a dizer.
+  const [recusaDoPush, setRecusaDoPush] = useState<ResultadoDaInscricao | null>(null);
+  // A linha cujo interruptor produziu a recusa: a frase aparece embaixo dela.
+  const [linhaDaRecusa, setLinhaDaRecusa] = useState<NotifyCategory>("message");
+
+  /**
+   * A FRASE, POR CAUSA (issue #3164).
+   *
+   * O `ignorado` cobria caminhos que NÃO se parecem, e um texto só para todos
+   * mentiria em pelo menos um: "o servidor recusou" para quem está sem internet,
+   * "alguma coisa falhou" para quem precisa saber se o problema é do navegador,
+   * do aparelho ou da instalação. Cada causa tem a sua frase — a pessoa só
+   * consegue resolver sabendo qual é.
+   *
+   * `sem_vapid` devolve `null` de propósito (#3157): a página já mostra, acima
+   * desta tabela, o cartão "Nesta instalação, os avisos só aparecem com o site
+   * aberto", com o porquê e como conseguir as chaves. Uma segunda frase aqui
+   * repetiria aquela.
+   */
+  function textoDaInscricao(r: ResultadoDaInscricao): string | null {
+    if (r.situacao === "sem_rede")
+      return t(
+        "Não consegui falar com o servidor, então este aparelho não foi inscrito: confira a internet e ligue o Push de novo.",
+      );
+    if (r.situacao === "recusado")
+      return t(
+        "O servidor recusou a inscrição deste aparelho, então os avisos não vão chegar: o interruptor de Push voltou a ficar desligado.",
+      );
+    if (r.situacao !== "ignorado" || !ehMotivoDoAparelho(r.motivo)) return null;
+    switch (r.motivo) {
+      case "sem_service_worker":
+        return t(
+          "Este navegador não registrou o service worker dos avisos: com o site fechado, este aparelho não recebe aviso.",
+        );
+      case "sem_vapid":
+        return null;
+      case "inscricao_incompleta":
+        return t(
+          "O navegador não devolveu os dados completos da inscrição de Push deste aparelho, então os avisos não vão chegar: o interruptor voltou a ficar desligado.",
+        );
+      case "navegador_recusou":
+        return t(
+          "O navegador recusou criar a inscrição de Push deste aparelho, então os avisos não vão chegar: o interruptor voltou a ficar desligado.",
+        );
+    }
+  }
 
   async function onToggle(category: NotifyCategory, channel: NotifyChannelPref, on: boolean) {
     if (channel === "push" && on) {
@@ -42,11 +98,26 @@ export function NotificationPrefsClient() {
         if (next !== "granted") return;
       }
     }
-    gravarCanal(category, channel, on);
-    // O push de mensagem é o interruptor do aparelho (`pushEfetivo`).
-    if (category === "message" && channel === "push") {
-      void (on ? syncPushSubscription() : encerrarPushDesteAparelho());
+    const prefsNovas = gravarCanal(category, channel, on);
+    if (channel !== "push") return;
+    // Cada tipo é um interruptor próprio. O aparelho só sai do push quando
+    // todos estão desligados; enquanto algum estiver ligado, a inscrição é
+    // regravada com os tipos calados, que o servidor deixa de mandar.
+    if (!algumPushLigado(prefsNovas)) {
+      setRecusaDoPush(null);
+      await encerrarPushDesteAparelho();
+      return;
     }
+    const resultado = await syncPushSubscription();
+    setLinhaDaRecusa(category);
+    // ⚠️ DIZER e DESLIGAR são decisões separadas (#3157). Quem decide se o
+    // interruptor volta a desligar é `pushNaoEntrega`, pela CAUSA: o servidor
+    // ou o navegador recusou a inscrição → desliga o que acabou de ser ligado.
+    // Falta de VAPID ou de service worker → a frase diz o que não vai chegar, e
+    // o interruptor fica ligado, porque o aviso com a aba aberta não depende
+    // deles (ver `MOTIVOS_QUE_DESLIGAM` em `push_client.ts`).
+    if (on && pushNaoEntrega(resultado)) gravarCanal(category, "push", false);
+    setRecusaDoPush(resultado && textoDaInscricao(resultado) ? resultado : null);
   }
 
   return (
@@ -74,24 +145,52 @@ export function NotificationPrefsClient() {
                 ) : null}
                 {cat === "message" ? (
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {t("Desligar o push de mensagem desliga todos os avisos deste aparelho fora do app.")}
+                    {t("Cada aviso liga e desliga sozinho no Push. Desligar todos encerra os avisos deste aparelho fora do app.")}
                   </p>
+                ) : null}
+                {cat === linhaDaRecusa && recusaDoPush !== null ? (
+                  <div
+                    className={`mt-1 text-xs ${pushNaoEntrega(recusaDoPush) ? "text-destructive" : "text-muted-foreground"}`}
+                    data-testid="push-recusado"
+                    data-motivo={
+                      recusaDoPush.situacao === "ignorado"
+                        ? recusaDoPush.motivo
+                        : recusaDoPush.situacao
+                    }
+                    role={pushNaoEntrega(recusaDoPush) ? "alert" : "status"}
+                  >
+                    <p>{textoDaInscricao(recusaDoPush)}</p>
+                    {recusaDoPush.situacao === "recusado" && recusaDoPush.motivo ? (
+                      <p className="mt-0.5">{recusaDoPush.motivo}</p>
+                    ) : null}
+                  </div>
                 ) : null}
               </td>
               <td className="px-4 py-3 text-center">
                 <Switch checked={false} disabled aria-label={`${t(LABELS[cat])} via email`} />
               </td>
               <td className="px-4 py-3 text-center">
-                <Switch
-                  checked={prefs[cat].in_app}
-                  onCheckedChange={(on) => void onToggle(cat, "in_app", on)}
-                  aria-label={`${t(LABELS[cat])} via in_app`}
-                />
+                {SO_NO_CELULAR.has(cat) ? (
+                  // Dentro do app este aviso é o da Central, com som próprio.
+                  <span className="text-muted-foreground" title={t("Dentro do app, este aviso aparece na Central de avisos.")}>
+                    —
+                  </span>
+                ) : (
+                  <Switch
+                    checked={prefs[cat].in_app}
+                    onCheckedChange={(on) => void onToggle(cat, "in_app", on)}
+                    aria-label={`${t(LABELS[cat])} via in_app`}
+                  />
+                )}
               </td>
               <td className="px-4 py-3 text-center">
                 <Switch
-                  checked={pushEfetivo(prefs, cat, "push")}
-                  disabled={denied || unsupported || (cat !== "message" && !prefs.message.push)}
+                  // Sem permissão concedida neste aparelho, nenhum aviso sai do
+                  // Push — e a inscrição só nasce no toque que pede a permissão.
+                  // Mostrar "ligado" aqui (o padrão das preferências) era dizer
+                  // que o celular avisa quando ele nunca foi inscrito.
+                  checked={permission === "granted" && pushEfetivo(prefs, cat, "push")}
+                  disabled={denied || unsupported}
                   onCheckedChange={(on) => void onToggle(cat, "push", on)}
                   aria-label={`${t(LABELS[cat])} via push`}
                   data-testid={cat === "message" ? (prefs.message.push ? "alerts-toggle" : "alerts-enable") : undefined}

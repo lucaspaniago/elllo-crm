@@ -7,55 +7,62 @@
  * (own-scope G1-06a; a lista "por atendente" colapsa a 1 linha, a dele);
  * manager+ ⇒ org-wide + filtro opcional `owner_user_id`. Piso de rota = agent.
  * org da org ativa (cookie validado), NUNCA do body/query. Read-only ⇒ sem audit.
+ *
+ * Sessão OU token de servidor `dsk_…` com `mcp:read` e papel manager+ (Spec 33,
+ * R3). Pelo token não há pessoa nem RLS por atendente: o cliente é o de serviço,
+ * a organização vem da LINHA do token e a leitura é a da organização inteira
+ * (o `p_owner` da query continua restringindo, dentro dela).
  */
 import { randomUUID } from "node:crypto";
 import { type NextRequest } from "next/server";
 import { z } from "zod";
 
+import { resolveAuthDual, tetoDeEscritaDoToken } from "@/lib/api/auth-dual";
 import { fail, ok } from "@/lib/api/wrappers";
 import { isServiceRoleConfigured } from "@/lib/audit";
-import { requireRole } from "@/lib/auth/require-role";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { createClient } from "@/lib/supabase/server";
 import { traduzir } from "@/lib/i18n/dicionario";
+import { IDIOMA_PADRAO } from "@/lib/i18n/idiomas";
+import { normalizarEtiqueta } from "@/lib/metrics/mediana-e-recorte-por-etiqueta";
+import { janelaDoRelatorio, lerRelatorioDeVendas } from "@/lib/relatorios/vendas";
+import { membrosDaOrganizacao } from "@/lib/users/nome-do-atendente";
 
 export const dynamic = "force-dynamic";
-
-const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
 const querySchema = z.object({
   from: z.string().datetime({ offset: true }).optional(),
   to: z.string().datetime({ offset: true }).optional(),
   owner_user_id: z.string().uuid().optional(),
+  // #3212: etiqueta do contato cujas conversas saem da conta. Teto de 120
+  // caracteres é o da etiqueta digitável; o que passa disso é 422, não recorte
+  // silencioso. `""`/só-espaço não é etiqueta (ver `normalizarEtiqueta`).
+  excluir_etiqueta: z.string().max(120).optional(),
 });
-
-interface AttendantRow {
-  user_id: string;
-  won: number;
-  lost: number;
-  conversations_handled: number;
-  avg_first_response_seconds: number | null;
-}
-
-interface MetricsPayload {
-  funnel: { stage_id: string; stage_name: string; position: number; count: number }[];
-  attendants: AttendantRow[];
-}
 
 export async function GET(req: NextRequest): Promise<Response> {
   const requestId = randomUUID();
 
   // spec 13 §6.1: piso agent (vê as próprias); RLS gate a comparação manager+.
-  const authz = await requireRole("agent", { requestId, resource: "metrics" });
+  const authz = await resolveAuthDual(req, {
+    requestId,
+    resource: "metrics",
+    role: "agent",
+    scope: "mcp:read",
+    // O token lê a organização inteira; na sessão um agent vê só a linha dele.
+    tokenRole: "manager",
+  });
   if (!authz.ok) return authz.response;
-  const t = (texto: string) => traduzir(texto, authz.user.idioma);
-  const { org: activeOrg } = authz;
+  // Está em PUBLIC_PATHS: o teto do token é a única contagem das chamadas dele.
+  const teto = await tetoDeEscritaDoToken(authz, "metrics", requestId);
+  if (teto) return teto;
+  const t = (texto: string) => traduzir(texto, authz.idioma ?? IDIOMA_PADRAO);
 
   const url = new URL(req.url);
   const parsed = querySchema.safeParse({
     from: url.searchParams.get("from") ?? undefined,
     to: url.searchParams.get("to") ?? undefined,
     owner_user_id: url.searchParams.get("owner_user_id") ?? undefined,
+    excluir_etiqueta: url.searchParams.get("excluir_etiqueta") ?? undefined,
   });
   if (!parsed.success) {
     return fail("validation_failed", t("Query inválida."), 422, {
@@ -64,46 +71,67 @@ export async function GET(req: NextRequest): Promise<Response> {
     });
   }
 
-  const to = parsed.data.to ? new Date(parsed.data.to) : new Date();
-  const from = parsed.data.from
-    ? new Date(parsed.data.from)
-    : new Date(to.getTime() - THIRTY_DAYS_MS);
-  if (from.getTime() >= to.getTime()) {
+  // A janela e a leitura moram em `lib/relatorios/vendas.ts` desde a #4802
+  // (item 5): a exportação (`/api/v1/reports/vendas/export`) chama a MESMA
+  // função, então o número do arquivo e o da tela não têm como divergir. O
+  // default de 30 dias é o de lá, e continua sendo o desta rota.
+  const janela = janelaDoRelatorio(parsed.data);
+  if (!janela) {
     return fail("validation_failed", t("Janela inválida: 'from' deve ser anterior a 'to'."), 422, {
       requestId,
     });
   }
+  const { from, to } = janela;
 
-  const supabase = await createClient();
-  const { data, error } = await supabase.rpc("fn_attendant_metrics", {
-    p_org: activeOrg.orgId,
-    p_from: from.toISOString(),
-    p_to: to.toISOString(),
-    p_owner: parsed.data.owner_user_id,
+  // Sessão: o cliente do cookie (a RLS recorta). Token: o de serviço, e o
+  // `p_org` abaixo — da sessão ou da linha do token, nunca da query — é o
+  // único recorte de organização.
+  const supabase = authz.supabase;
+  // #3212: a etiqueta do recorte passa pela MESMA normalização do banco
+  // (`normalizarEtiqueta` = `btrim` da RPC): `""`/só-espaço viram `null`, e
+  // `null` desliga o recorte em vez de excluir todo contato sem etiqueta.
+  const excluirEtiqueta = normalizarEtiqueta(parsed.data.excluir_etiqueta);
+  const lido = await lerRelatorioDeVendas(supabase, {
+    orgId: authz.organizationId,
+    janela,
+    owner_user_id: parsed.data.owner_user_id,
+    excluir_etiqueta: excluirEtiqueta,
   });
-  if (error) return fail("internal_error", error.message, 500, { requestId });
+  if (!lido.ok) return fail("internal_error", lido.message, 500, { requestId });
 
-  const metrics = (data ?? { funnel: [], attendants: [] }) as unknown as MetricsPayload;
+  const metrics = lido.relatorio;
 
   // Enriquece cada atendente com nome/email (mesmo padrão de /api/v1/team).
   // Degrada com name=null quando o service role não está configurado (dev).
+  // Só quem tem ou teve vínculo com a org ativa é enriquecido: o admin client
+  // lê qualquer usuário da instalação (regra de `nome-do-atendente.ts`).
   const names = new Map<string, { name: string | null; email: string | null }>();
   if (isServiceRoleConfigured() && metrics.attendants.length > 0) {
     const admin = createAdminClient();
+    const membros = await membrosDaOrganizacao(
+      admin,
+      authz.organizationId,
+      metrics.attendants.map((a) => a.user_id),
+    );
     await Promise.all(
-      metrics.attendants.map(async (a) => {
-        const { data: userRes } = await admin.auth.admin.getUserById(a.user_id);
-        const u = userRes?.user;
-        names.set(a.user_id, {
-          name: (u?.user_metadata?.full_name as string | undefined) ?? null,
-          email: u?.email ?? null,
-        });
-      }),
+      metrics.attendants
+        .filter((a) => membros.has(a.user_id))
+        .map(async (a) => {
+          const { data: userRes } = await admin.auth.admin.getUserById(a.user_id);
+          const u = userRes?.user;
+          names.set(a.user_id, {
+            name: (u?.user_metadata?.full_name as string | undefined) ?? null,
+            email: u?.email ?? null,
+          });
+        }),
     );
   }
 
   const attendants = metrics.attendants.map((a) => ({
     ...a,
+    // #3212: `?? null` é deliberado — linha sem o campo (banco anterior à 0754)
+    // vira "não medida", nunca `undefined` que some do JSON nem `0` que mente.
+    median_first_response_seconds: a.median_first_response_seconds ?? null,
     name: names.get(a.user_id)?.name ?? null,
     email: names.get(a.user_id)?.email ?? null,
   }));
@@ -112,6 +140,10 @@ export async function GET(req: NextRequest): Promise<Response> {
     {
       window: { from: from.toISOString(), to: to.toISOString() },
       owner_user_id: parsed.data.owner_user_id ?? null,
+      // #3212: o recorte é DECLARADO na resposta — qual etiqueta e quantas
+      // conversas da janela ela tirou da conta (0 quando não houve recorte).
+      excluded_tag: metrics.excluded_tag ?? null,
+      excluded_conversations: metrics.excluded_conversations ?? 0,
       funnel: metrics.funnel,
       attendants,
     },

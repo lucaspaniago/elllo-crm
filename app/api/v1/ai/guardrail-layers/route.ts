@@ -1,13 +1,15 @@
 import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
- * GET/PUT /api/v1/ai/guardrail-layers — as duas verificações que custam dinheiro.
+ * GET/PUT /api/v1/ai/guardrail-layers — as verificações que são escolha da organização.
  *
- * A cadeia que confere a mensagem antes de sair tem dez verificações. Oito são
- * determinísticas, custam zero e **não são escolha de ninguém** — por isso não
- * existem aqui: uma rota que aceitasse desligá-las seria a porta para queimar o
- * número do cliente por um PUT, mesmo que a tela não oferecesse o botão.
+ * A maior parte da cadeia que confere a mensagem antes de sair é determinística,
+ * custa zero e **não é escolha de ninguém** — por isso não existe aqui: uma rota
+ * que aceitasse desligá-la seria a porta para queimar o número do cliente por um
+ * PUT, mesmo que a tela não oferecesse o botão.
  *
- * As duas que consultam um modelo custam por mensagem, e aí há escolha real.
+ * Há escolha real em `CAMADAS_CONFIGURAVEIS`: as duas que consultam um modelo e
+ * custam por mensagem, a afirmação clínica (só serve a saúde) e a restrição
+ * comercial (o negócio decide se a IA pode falar de preço).
  *
  * ═══ AUSÊNCIA DE LINHA NÃO É "DESLIGADO" ═══
  *
@@ -24,26 +26,61 @@ import { requireSupportWrite } from "@/lib/impersonate/support";
  * vizinhança do anti-pattern 10 do CLAUDE.md. O filtro por `organization_id`
  * continua explícito no SQL porque o usuário pode pertencer a mais de uma
  * organização, e a RLS deixaria passar as duas.
+ *
+ * Com Bearer `dsk_…` (`config:read`/`config:write`, papel admin) o cliente é o admin
+ * e a RLS não existe: o filtro `organization_id` da linha do token é a barreira.
  */
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 
+import { randomUUID } from "node:crypto";
+
+import { resolveAuthDual, tetoDeEscritaDoToken } from "@/lib/api/auth-dual";
 import { fail, ok } from "@/lib/api/wrappers";
 import { audit } from "@/lib/audit";
 import { requireRole } from "@/lib/auth/require-role";
 import { roleAtLeast } from "@/lib/auth/types";
-import { CAMADAS_SEMANTICAS, padraoDasCamadasNoAmbiente } from "@/lib/agent-engine/guardrails/camadas-da-org";
+import { CAMADAS_CONFIGURAVEIS, padraoDasCamadasNoAmbiente } from "@/lib/agent-engine/guardrails/camadas-da-org";
+import { extractBearer } from "@/lib/mcp/auth";
 import { createClient } from "@/lib/supabase/server";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { traduzir } from "@/lib/i18n/dicionario";
+import { IDIOMA_PADRAO } from "@/lib/i18n/idiomas";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(): Promise<Response> {
-  const authz = await requireRole("manager", { resource: "ai_guardrail_layers" });
-  if (!authz.ok) return authz.response;
-  const { org } = authz;
+export async function GET(req: NextRequest): Promise<Response> {
+  // Quem chama, pelo portão que o trouxe. Sem Bearer, a sessão segue como era
+  // (client de sessão, RLS, `podeEditar` pelo papel). Com Bearer `dsk_…`
+  // (`config:read`, papel admin), o cliente é o admin e o filtro de organização
+  // abaixo é a única barreira: ela vem da linha do token, nunca da query.
+  let org: { orgId: string };
+  let podeEditar: boolean;
+  let db: SupabaseClient;
+  if (extractBearer(req.headers.get("authorization"))) {
+    const requestId = randomUUID();
+    const authz = await resolveAuthDual(req, {
+      requestId,
+      resource: "ai_guardrail_layers",
+      role: "manager",
+      scope: "config:read",
+      tokenRole: "admin",
+    });
+    if (!authz.ok) return authz.response;
+    const teto = await tetoDeEscritaDoToken(authz, "ai_guardrail_layers", requestId);
+    if (teto) return teto;
+    org = { orgId: authz.organizationId };
+    // O token só entra com papel admin (`tokenRole`): pode editar.
+    podeEditar = true;
+    db = authz.supabase;
+  } else {
+    const authz = await requireRole("manager", { resource: "ai_guardrail_layers" });
+    if (!authz.ok) return authz.response;
+    org = { orgId: authz.org.orgId };
+    podeEditar = roleAtLeast(authz.org.role, "admin");
+    db = await createClient();
+  }
 
-  const db = await createClient();
   const { data, error } = await db
     .from("org_guardrail_layers")
     .select("layer, enabled")
@@ -57,21 +94,21 @@ export async function GET(): Promise<Response> {
   const padrao = padraoDasCamadasNoAmbiente();
 
   return ok({
-    camadas: CAMADAS_SEMANTICAS.map((layer) => ({
+    camadas: CAMADAS_CONFIGURAVEIS.map((layer) => ({
       layer,
       /** `null` = a organização não escolheu; vale o ambiente. */
       escolha: escolhido.get(layer) ?? null,
       padraoDoAmbiente: padrao[layer] ?? false,
       efetivo: escolhido.get(layer) ?? padrao[layer] ?? false,
     })),
-    podeEditar: roleAtLeast(org.role, "admin"),
+    podeEditar,
   });
 }
 
 const corpoDoPut = z.object({
   // Só as camadas que TÊM escolha. Um valor fora da lista não é "desconhecido":
   // é alguém tentando desligar pela API o que a tela não oferece.
-  layer: z.enum(CAMADAS_SEMANTICAS),
+  layer: z.enum(CAMADAS_CONFIGURAVEIS),
   enabled: z.boolean(),
 });
 
@@ -79,10 +116,19 @@ export async function PUT(req: NextRequest): Promise<Response> {
   const supportDenied = await requireSupportWrite();
   if (supportDenied) return supportDenied;
 
-  const authz = await requireRole("admin", { resource: "ai_guardrail_layers" });
+  const requestId = randomUUID();
+  const authz = await resolveAuthDual(req, {
+    requestId,
+    resource: "ai_guardrail_layers",
+    role: "admin",
+    scope: "config:write",
+    tokenRole: "admin",
+  });
   if (!authz.ok) return authz.response;
-  const t = (texto: string) => traduzir(texto, authz.user.idioma);
-  const { user, org } = authz;
+  const teto = await tetoDeEscritaDoToken(authz, "ai_guardrail_layers", requestId);
+  if (teto) return teto;
+  const t = (texto: string) => traduzir(texto, authz.idioma ?? IDIOMA_PADRAO);
+  const autor = authz.actor.type === "user" ? authz.actor.id : null;
 
   const parsed = corpoDoPut.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {
@@ -90,12 +136,12 @@ export async function PUT(req: NextRequest): Promise<Response> {
   }
   const corpo = parsed.data;
 
-  const db = await createClient();
+  const db = authz.supabase;
   const { data: gravado, error } = await db
     .from("org_guardrail_layers")
     .upsert(
       {
-        organization_id: org.orgId,
+        organization_id: authz.organizationId,
         layer: corpo.layer,
         enabled: corpo.enabled,
         updated_at: new Date().toISOString(),
@@ -114,8 +160,9 @@ export async function PUT(req: NextRequest): Promise<Response> {
 
   void audit({
     action: "ai.guardrail_layer_changed",
-    organizationId: org.orgId,
-    actorUserId: user.id,
+    organizationId: authz.organizationId,
+    actorUserId: autor,
+    actorApiTokenId: authz.apiTokenId ?? null,
     resourceType: "org_guardrail_layers",
     // A chave é (organização, camada) — não há uuid a referenciar, e mandar o
     // nome da camada numa coluna uuid é o defeito que já custou duas trilhas de

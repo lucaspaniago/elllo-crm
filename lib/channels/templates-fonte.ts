@@ -47,6 +47,10 @@ const FONTE: Record<ProviderDeMensagem, FonteDeTemplates | null> = {
   // Parceiro Graph-compatível: os modelos são os da Cloud API, servidos por uma
   // rota própria (host/token do parceiro).
   datafy: "graph",
+  // Bot do Telegram (#3440): texto livre a qualquer hora, como o canal por QR —
+  // não existe definição aprovada a listar, e um seletor ali ofereceria solução
+  // para um problema que este canal não tem.
+  telegram: null,
 };
 
 /** `null` quando este canal não trabalha com definições aprovadas. */
@@ -60,4 +64,14 @@ export function rotaDeTemplates(fonte: FonteDeTemplates): string {
   if (fonte === "parceiro") return "/api/v1/channels/partner/templates";
   if (fonte === "graph") return "/api/v1/channels/graph-partner/templates";
   return "/api/v1/channels/templates";
+}
+
+/**
+ * A TELA onde quem opera cria e edita as definições desta fonte (Conexões, aba
+ * do canal, sub-aba de modelos). A campanha aponta para cá em vez de criar
+ * modelo no meio do formulário: a plataforma leva de minutos a horas para
+ * aprovar, e um formulário de campanha não é lugar de esperar.
+ */
+export function telaDeModelos(fonte: FonteDeTemplates): string {
+  return `/app/connections?aba=${fonte}&sub=templates`;
 }

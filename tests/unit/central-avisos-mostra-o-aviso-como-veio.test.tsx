@@ -37,6 +37,7 @@ vi.mock("@/hooks/ai/useAgentInbox", () => ({
   useAgentInbox: vi.fn(),
   useUpdateInboxItem: vi.fn(),
   useResolveAllInboxItems: vi.fn(),
+  useDispararAcoesParadas: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
 }));
 /** Todo texto que passar pelo tradutor sai marcado. O que não passar, sai cru. */
 vi.mock("@/hooks/i18n/useT", () => ({ useT: () => (texto: string) => `ES:${texto}` }));
@@ -65,6 +66,9 @@ function lista(itens: AgentInboxItem[] = [aviso], extra: Record<string, unknown>
   vi.mocked(useAgentInbox).mockReturnValue({
     data: { items: itens, open_count: itens.length },
     isLoading: false,
+    // Estes casos renderizam como quem ALCANÇA a Central (é o `podeConsultar`
+    // que habilita a lista e o estado vazio legítimo, #3147).
+    podeConsultar: true,
     ...extra,
   } as unknown as ReturnType<typeof useAgentInbox>);
 }

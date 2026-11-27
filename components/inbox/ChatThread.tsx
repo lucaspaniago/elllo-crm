@@ -3,15 +3,18 @@
 import { useLocaleDeData } from "@/hooks/i18n/useLocaleDeData";
 
 import type { Locale } from "date-fns";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 import { useT } from "@/hooks/i18n/useT";
 import { format, isToday, isYesterday } from "date-fns";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { MessageBubble } from "./MessageBubble";
 import { separarReacoes } from "@/lib/inbox/reacoes-no-fio";
+import { termoSemAcento } from "@/lib/inbox/termo-de-busca";
 import { NoteCard } from "./NoteCard";
 import { PassagemCard } from "./PassagemCard";
+import { useThreadAutoScroll } from "@/hooks/inbox/useThreadAutoScroll";
 import { useMessagesRealtime } from "@/hooks/inbox/useMessagesRealtime";
 import { useConversationNotes } from "@/hooks/inbox/useConversationNotes";
 import { usePassagensDaConversa } from "@/hooks/inbox/usePassagensDaConversa";
@@ -31,6 +34,8 @@ interface Props {
   provider?: string | null;
   /** Escolher uma mensagem para responder. Sobe até o composer. */
   onResponder?: (m: Message) => void;
+  /** Escolher uma mensagem para encaminhar a outra conversa (#2835). */
+  onEncaminhar?: (m: Message) => void;
   /**
    * Quem é o dono da conversa HOJE, e quem é o contato.
    *
@@ -44,6 +49,10 @@ interface Props {
    */
   dono?: { userId: string | null; nome: string | null } | null;
   contatoId?: string | null;
+  /** Contato bloqueado (opt-out) ou pessoal: a rota recusa a reação, então o menu não a oferece. */
+  contatoRecusaEnvio?: boolean;
+  /** O fio mora numa página que rola: acompanhar o fim não pode arrastar a página. */
+  soNaCaixa?: boolean;
 }
 
 /**
@@ -82,13 +91,29 @@ function dayLabel(d: Date, t: (texto: string) => string = (texto) => texto, loca
   return format(d, "dd/MM/yyyy", { locale: locale });
 }
 
+/**
+ * #4575 — quanto tempo o "achei" fica aceso, e até onde se carrega o histórico
+ * atrás de uma citada.
+ *
+ * O destaque é curto de propósito: serve para responder "qual destas?" e sai da
+ * frente. O teto de páginas existe porque uma citada que não está em lugar
+ * nenhum (linha apagada de verdade) não pode arrastar a conversa inteira para a
+ * memória antes de avisar que ela não existe — dez páginas são 500 mensagens,
+ * muito acima do que a paginação já alcança com dois ou três toques manuais.
+ */
+const DESTAQUE_DA_CITADA_MS = 2400;
+const PAGINAS_ATE_A_CITADA = 10;
+
 export function ChatThread({
   conversationId,
   provider,
   onResponder,
+  onEncaminhar,
   dono,
   contatoId,
+  contatoRecusaEnvio = false,
   searchTerm = "",
+  soNaCaixa = false,
 }: Props) {
   const localeDaData = useLocaleDeData();
   const t = useT();
@@ -96,24 +121,17 @@ export function ChatThread({
   const notes = useConversationNotes(conversationId);
   const passagens = usePassagensDaConversa(conversationId);
   const claim = useClaimConversation();
-  const bottomRef = useRef<HTMLDivElement | null>(null);
-  const scrollerRef = useRef<HTMLDivElement | null>(null);
-  const paginasVistas = useRef(0);
-  /**
-   * Esta conversa já ancorou no fim ALGUMA vez, com conteúdo na tela?
-   *
-   * Enquanto for `false`, a abertura ainda não terminou — e a guarda de
-   * distância (que existe para não arrancar quem está lendo o histórico) não
-   * pode valer, porque ninguém rolou nada ainda. Ver o efeito abaixo.
-   */
-  const jaAncorou = useRef(false);
   const activeOrg = useActiveOrg();
   const currentUser = useUser();
   const deleteNote = useDeleteNote(conversationId ?? "");
-  const { editar, apagar, ocultar, restaurar } = useAlterarMensagem(conversationId);
+  const { editar, apagar, ocultar, restaurar, reenviar, reagir } = useAlterarMensagem(conversationId);
   const canManage = activeOrg != null && ROLE_RANK[activeOrg.role] >= ROLE_RANK.manager;
+  // Reenviar é envio: a rota exige `agent`, e quem só lê não ganha um botão que ela recusa.
+  const podeEnviar = activeOrg != null && ROLE_RANK[activeOrg.role] >= ROLE_RANK.agent;
   const canalAlteraEnviada = transportaMensagem(provider)
     && capabilitiesOf(provider as ChannelProvider).alteraMensagemEnviada;
+  const canalPermiteReacao = transportaMensagem(provider)
+    && capabilitiesOf(provider as ChannelProvider).podeReagir;
   const { enabled: debugCitations } = useDebugToggle(activeOrg?.role ?? null);
 
   const messages: Message[] = useMemo(
@@ -126,8 +144,12 @@ export function ChatThread({
    * páginas carregadas, e o rótulo diz isso para ninguém ler "zero" como "não
    * existe na conversa". Apagada e oculta ficam de fora — o texto delas não
    * aparece na bolha, e marcar uma bolha sem o termo visível seria mentir.
+   *
+   * Os DOIS lados passam por `termoSemAcento` (`lib/inbox/termo-de-busca`), a
+   * régua de acento do repo (#4411): `toLocaleLowerCase` dobra CAIXA e não
+   * ACENTO, então `orcamento` não achava "Pode mandar o orçamento?".
    */
-  const termo = searchTerm.trim().toLocaleLowerCase();
+  const termo = termoSemAcento(searchTerm.trim());
   const resultados = useMemo(
     () =>
       new Set(
@@ -137,20 +159,12 @@ export function ChatThread({
               termo &&
               !m.revoked_at &&
               !m.metadata?.crm_hidden_at &&
-              m.body?.toLocaleLowerCase().includes(termo),
+              termoSemAcento(m.body ?? "").includes(termo),
           )
           .map((m) => m.id),
       ),
     [messages, termo],
   );
-  // Só o TERMO leva à ocorrência. Depender do conjunto de resultados faria cada
-  // mensagem nova do tempo real arrancar quem lê de volta à primeira ocorrência.
-  useEffect(() => {
-    if (termo)
-      scrollerRef.current
-        ?.querySelector('[data-search-match="true"]')
-        ?.scrollIntoView({ block: "nearest" });
-  }, [termo]);
   /**
    * As mensagens por id, para resolver a CITADA sem ir ao servidor.
    *
@@ -178,84 +192,89 @@ export function ChatThread({
     [falas, notes, cartoes],
   );
 
-  const paginas = q.data?.pages.length ?? 0;
+  const lastItem = items[items.length - 1];
+  const lastMessage = [...items].reverse().find((item) => item.kind === "message");
+  const latest = lastMessage?.kind === "message" ? lastMessage.data : null;
+  const scroll = useThreadAutoScroll({
+    conversationId,
+    ready: !!conversationId && !q.isLoading && !q.isError && items.length > 0,
+    itemCount: items.length,
+    lastItemKey: lastItem ? `${lastItem.kind}:${lastItem.data.id}` : "",
+    lastMessageId: latest?.id ?? "",
+    lastMessageIsOwn: latest?.direction === "outbound"
+      && (latest.sent_by_user_id === currentUser.id || latest.metadata?._optimistic === true),
+    pages: q.data?.pages.length ?? 0,
+    searching: !!termo,
+  }, soNaCaixa);
+  const { scrollerRef, contentRef, bottomRef } = scroll;
 
-  // Conversa nova: a contagem de páginas recomeça, senão a primeira carga da
-  // próxima conversa seria confundida com um "carregar mais antigas".
-  useEffect(() => {
-    paginasVistas.current = 0;
-    jaAncorou.current = false;
-  }, [conversationId]);
+  /**
+   * #4575 — IR ATÉ A MENSAGEM CITADA.
+   *
+   * Duas situações, e o mesmo gesto resolve as duas:
+   *
+   *   1. a original já está carregada — basta rolar até ela e acender o
+   *      destaque por um instante;
+   *   2. a original é antiga e ficou fora da página (`hasNextPage`), então a
+   *      lista pagina PARA TRÁS até encontrá-la, e só então rola.
+   *
+   * Não vai ao servidor por fora: usa o `fetchNextPage` da própria lista, com o
+   * `beforeLoadOlder` do hook de rolagem, para o histórico não pular na tela de
+   * quem está lendo. Quando a mensagem não existe mais (linha apagada de
+   * verdade, ou além do teto de páginas), o clique diz isso em vez de não fazer
+   * nada — que era o defeito da issue.
+   */
+  const [citadaDestacada, setCitadaDestacada] = useState<string | null>(null);
+  const destaqueDaCitada = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (destaqueDaCitada.current) clearTimeout(destaqueDaCitada.current);
+    },
+    [],
+  );
 
-  // Rola ao fim na primeira carga e quando chega mensagem/nota nova — mas NÃO
-  // quando o crescimento veio do "Carregar mais antigas".
-  //
-  // A thread pagina para o PASSADO: cada `fetchNextPage` traz mensagens mais
-  // antigas, que entram ACIMA das que já estão na tela. Rolar ao fim aqui
-  // devolveria o usuário ao rodapé no instante em que ele pediu para subir —
-  // o clique parece não ter efeito, embora tenha carregado (medido: thread vai
-  // de msg#15..#64 para msg#1..#64 e a viewport volta a 7px do fim).
-  //
-  // A segunda guarda cobre o outro caso: se o usuário rolou para ler o
-  // histórico, mensagem nova não deve arrancá-lo de onde estava.
-  useEffect(() => {
-    const carregouAntigas = paginasVistas.current !== 0 && paginas > paginasVistas.current;
-    paginasVistas.current = paginas;
-    if (carregouAntigas) return;
+  function elementoDaMensagem(id: string): HTMLElement | null {
+    return scrollerRef.current?.querySelector<HTMLElement>(`[data-message-id="${id}"]`) ?? null;
+  }
 
-    /**
-     * A guarda de distância NÃO vale ENQUANTO A ABERTURA NÃO TERMINOU.
-     *
-     * A versão anterior chamava isso de "primeira carga" e media pelo contador
-     * de PÁGINAS da consulta de mensagens — e isso é um proxy, não a coisa. O
-     * fio não é só mensagens: ele intercala notas e **cartões de passagem**, que
-     * chegam de consultas próprias e podem resolver DEPOIS da primeira pintura.
-     *
-     * Medido em 2026-09-18, na prova em tela do cartão "Por que a IA passou para
-     * você", numa conversa SEM mensagens (que é o normal logo depois de uma
-     * passagem): a primeira pintura vem vazia e já consome a "primeira carga";
-     * quando o cartão chega, o efeito roda de novo, a guarda passa a valer, e o
-     * scroller está no topo com o conteúdo recém-nascido embaixo — distância
-     * bem maior que 120px. A guarda concluía "o usuário está lendo o histórico"
-     * de um usuário que não tinha rolado nada, e devolvia sem rolar.
-     *
-     * O efeito visível é o pior possível para esta tela: quem assume vê o
-     * cabeçalho do cartão e o motivo, e o convite **"Assumir e responder" fica
-     * abaixo da dobra do fio** — o gesto existe, está montado, é clicável por
-     * programa e ninguém o vê. Medido por ferramenta: botão em y=1008 numa
-     * janela de 720px.
-     *
-     * `jaAncorou` pergunta o que a guarda precisa saber de verdade — "esta
-     * conversa já chegou ao fim alguma vez, com conteúdo na tela?" —, em vez de
-     * inferir isso da paginação de UMA das três fontes do fio.
-     */
-    const primeiraAncoragem = !jaAncorou.current;
-    if (jaAncorou.current) {
-      const sc = scrollerRef.current;
-      if (sc && sc.scrollHeight - sc.scrollTop - sc.clientHeight > 120) return;
+  async function irParaCitada(id: string) {
+    let alvo = elementoDaMensagem(id);
+    let paginas = 0;
+    let temMais = q.hasNextPage;
+    while (!alvo && temMais && paginas < PAGINAS_ATE_A_CITADA) {
+      scroll.beforeLoadOlder();
+      const proxima = await q.fetchNextPage();
+      paginas += 1;
+      temMais = proxima?.hasNextPage ?? false;
+      // A página nova só vira DOM depois do commit do React: procurar no mesmo
+      // instante acharia o fio antigo. Espera curta, com teto, em vez de
+      // adivinhar um número de frames.
+      for (let espera = 0; espera < 20 && !alvo; espera += 1) {
+        await new Promise((resolver) => setTimeout(resolver, 20));
+        alvo = elementoDaMensagem(id);
+      }
     }
-    /**
-     * O CARTÃO PODE CHEGAR COM O ESQUELETO AINDA NA TELA (#2515).
-     *
-     * As passagens vêm de `usePassagensDaConversa`, uma consulta própria, e
-     * podem resolver ANTES da de mensagens. Aí `items.length` já é 1 enquanto
-     * `q.isLoading` ainda é verdadeiro — e o ramo do esqueleto NÃO monta
-     * `scrollerRef` nem `bottomRef`. Marcar `jaAncorou` nesse instante consumia
-     * a abertura sobre um `scrollIntoView` que roda em cima de um ref nulo:
-     * nada rolava, mas quando as mensagens chegassem a guarda de distância via
-     * 308px até o fim e devolvia sem rolar, deixando "Assumir e responder"
-     * abaixo da dobra (medido na run 37660047994: `base=1028`, `janela=720`).
-     *
-     * Por isso a marca só vale com o destino montado: enquanto o fio de
-     * verdade não existe, a abertura continua pendente.
-     */
-    if (items.length > 0 && bottomRef.current) jaAncorou.current = true;
+    if (!alvo) {
+      toast.info(t("A mensagem original não está mais na conversa."));
+      return;
+    }
+    alvo.scrollIntoView({ block: "center" });
+    setCitadaDestacada(id);
+    if (destaqueDaCitada.current) clearTimeout(destaqueDaCitada.current);
+    destaqueDaCitada.current = setTimeout(
+      () => setCitadaDestacada(null),
+      DESTAQUE_DA_CITADA_MS,
+    );
+  }
 
-    bottomRef.current?.scrollIntoView({
-      behavior: primeiraAncoragem ? "auto" : "smooth",
-      block: "end",
-    });
-  }, [items.length, conversationId, paginas]);
+  // Só o TERMO leva à ocorrência. Depender do conjunto de resultados faria cada
+  // mensagem nova do tempo real arrancar quem lê de volta à primeira ocorrência.
+  useEffect(() => {
+    if (termo)
+      scrollerRef.current
+        ?.querySelector('[data-search-match="true"]')
+        ?.scrollIntoView({ block: "nearest" });
+  }, [termo, scrollerRef]);
 
   /**
    * O ESTADO DO CANAL DESTE THREAD, PUBLICADO SEMPRE — inclusive quando não há
@@ -340,19 +359,23 @@ export function ChatThread({
   }
 
   return (
-    <div {...sinalDoCanal} className="flex h-full min-w-0 flex-col">
+    <div {...sinalDoCanal} className="relative flex h-full min-h-0 min-w-0 flex-col">
       {termo && (
         <div className="px-4 py-1 text-xs text-muted-foreground" role="status">
           {t("Resultados nas mensagens carregadas")}: {resultados.size}
         </div>
       )}
-      <div ref={scrollerRef} className="min-w-0 flex-1 overflow-y-auto py-2">
+      <div ref={scrollerRef} role="region" aria-label={t("Mensagens da conversa")} tabIndex={0}
+        onScroll={scroll.onScroll} onWheel={scroll.onWheel} onTouchMove={scroll.onTouchMove}
+        onPointerDown={scroll.onPointerDown} onKeyDown={scroll.onKeyDown}
+        className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain py-2">
+        <div ref={contentRef}>
         {q.hasNextPage && (
           <div className="flex justify-center py-2">
             <Button
               size="sm"
               variant="ghost"
-              onClick={() => q.fetchNextPage()}
+              onClick={() => { scroll.beforeLoadOlder(); q.fetchNextPage(); }}
               disabled={q.isFetchingNextPage}
             >
               {q.isFetchingNextPage ? t("Carregando…") : t("Carregar mais antigas")}
@@ -403,13 +426,21 @@ export function ChatThread({
                   message={item.data}
                   searchMatch={resultados.has(item.data.id)}
                   debugCitations={debugCitations}
+                  destacada={citadaDestacada === item.data.id}
+                  onIrParaCitada={irParaCitada}
                   onResponder={onResponder}
+                  onEncaminhar={onEncaminhar}
                   // A citada sai da MESMA lista já carregada: buscar no servidor
                   // por cada citação faria uma consulta por bolha. Quando a
                   // citada é antiga demais e ficou fora da página, o fio some —
                   // que é melhor que segurar a conversa esperando.
                   citada={porId.get(item.data.reply_to_message_id ?? "") ?? null}
                   reacoes={reacoesPorAlvo.get(item.data.id)}
+                  onReagir={podeEnviar && canalPermiteReacao && !contatoRecusaEnvio
+                    && Boolean(item.data.external_id) && item.data.type !== "reaction"
+                    && !item.data.metadata?._optimistic
+                    ? (emoji) => reagir.mutateAsync({ id: item.data.id, emoji }).then(() => undefined)
+                    : undefined}
                   // Sem isto o balão diz "Você" em toda mensagem digitada no
                   // CRM — inclusive nas do colega, porque `sent_via='user'` só
                   // registra que um humano digitou, nunca qual.
@@ -426,6 +457,10 @@ export function ChatThread({
                   onRestaurar={canManage && item.data.direction === "inbound"
                     ? () => restaurar.mutateAsync(item.data.id).then(() => undefined)
                     : undefined}
+                  onReenviar={podeEnviar && item.data.direction === "outbound"
+                    ? (confirmado) => reenviar.mutateAsync({ id: item.data.id, confirmado }).then(() => undefined)
+                    : undefined}
+                  podeReenviarDeOutros={canManage}
                 />
               ),
             )}
@@ -433,7 +468,16 @@ export function ChatThread({
         ))}
 
         <div ref={bottomRef} />
+        </div>
       </div>
+      {scroll.hasNewMessages && (
+        <div className="absolute inset-x-0 bottom-3 z-20 flex justify-center px-3" role="status" aria-live="polite">
+          <Button size="sm" className="h-auto max-w-full whitespace-normal rounded-full shadow-lg"
+            onClick={() => scroll.scrollToEnd()}>
+            {t("Novas mensagens · Ir para o fim")}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { copyToClipboard } from "@/lib/clipboard";
 import { randomId } from "@/lib/random-id";
+import { useTelefoneExemplo } from "@/hooks/contacts/useTelefoneExemplo";
 import { traduzir } from "@/lib/i18n/dicionario";
 import type { Idioma } from "@/lib/i18n/idiomas";
 import {
@@ -41,6 +42,7 @@ export function LinksRastreaveis({
   idioma: Idioma;
 }) {
   const t = (v: string) => traduzir(v, idioma);
+  const telefoneExemplo = useTelefoneExemplo();
   const router = useRouter();
   const [form, setForm] = useState<LinkInput>(initial);
   const [pending, start] = useTransition();
@@ -216,7 +218,7 @@ export function LinksRastreaveis({
           <Input
             id="link-phone"
             required
-            placeholder="+5511999999999"
+            placeholder={telefoneExemplo}
             pattern="\+[1-9][0-9]{7,14}"
             value={form.whatsapp_e164}
             onChange={(e) => setForm({ ...form, whatsapp_e164: e.target.value })}
@@ -337,6 +339,9 @@ export function LinksRastreaveis({
             {t(
               "Ative a codificação automática no Google Ads. O script preserva gclid, gbraid ou wbraid recebidos no site. UTMs sozinhas identificam a origem no CRM, mas não comprovam uma conversão no Google.",
             )}
+          </p>
+          <p className="text-sm text-muted-foreground">
+            {t("Para distinguir contas, acrescente google_customer_id ao sufixo de cada conta e use o ID de cliente de dez dígitos. Exemplo: &google_customer_id=1234567890.")}
           </p>
         </div>
       )}

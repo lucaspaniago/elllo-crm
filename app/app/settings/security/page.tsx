@@ -4,8 +4,12 @@ import {
   resolveActiveOrg,
   exigenciaDeMfa,
 } from "@/lib/auth/server";
+import { CabecalhoDaSubTela } from "@/components/settings/CabecalhoDaSubTela";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { empresaExigeMfa, politicaDaEmpresa, type PapelMinimoDeMfa } from "@/lib/auth/politica-mfa";
+import { listarDispositivosConfiaveis } from "@/lib/auth/dispositivo-confiavel";
+import { bloqueioDeChamadasLigado } from "@/lib/organizacao/bloqueio-de-chamadas";
+import { BloqueioDeChamadas } from "./_bloqueioDeChamadas";
 import { SecurityClient } from "./_client";
 import { traduzir } from "@/lib/i18n/dicionario";
 
@@ -30,9 +34,24 @@ export default async function SecurityPage() {
   const user = await requireAuth();
   const org = await resolveActiveOrg(user);
   const enrolled = await isMfaEnrolled();
+  const dispositivos = enrolled ? await listarDispositivosConfiaveis(user.id) : [];
+  // Quem tem a verificação ligada e nenhum código de recuperação por usar fica
+  // sem saída se perder o celular — e é o estado de todo mundo depois da 0759,
+  // que apagou os códigos da forma antiga. Só o servidor lê a tabela (0755).
+  // Erro na leitura não mostra o aviso: "não sei" não vira "você não tem".
+  let semCodigos = false;
+  if (enrolled) {
+    const { count, error } = await createAdminClient()
+      .from("user_recovery_codes")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", user.id)
+      .is("used_at", null);
+    semCodigos = !error && count === 0;
+  }
 
   let papelMinimo: PapelMinimoDeMfa = "none";
   let diasDeCarencia = 0;
+  let chamadasBloqueadas = false;
   if (org) {
     const { data } = await createAdminClient()
       .from("organizations")
@@ -46,6 +65,7 @@ export default async function SecurityPage() {
     // organização que exige.
     papelMinimo = cfg.papelMinimo ?? (empresaExigeMfa(data?.settings) ? "admin" : "none");
     diasDeCarencia = cfg.diasDeCarencia;
+    chamadasBloqueadas = bloqueioDeChamadasLigado(data?.settings);
   }
 
   // A mesma função que o layout usa para decidir o bloqueio — a tela não pode
@@ -61,15 +81,14 @@ export default async function SecurityPage() {
 
   return (
     <div className="flex h-full flex-col gap-6 p-6">
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight">{traduzir("Segurança", idioma)}</h1>
+      <CabecalhoDaSubTela titulo={traduzir("Segurança", idioma)} idioma={idioma}>
         <p className="text-sm text-muted-foreground">
           {traduzir(
             "A verificação em duas etapas da sua conta, os códigos de recuperação e as sessões abertas.",
             idioma,
           )}
         </p>
-      </header>
+      </CabecalhoDaSubTela>
 
       <SecurityClient
         mfaEnrolled={enrolled}
@@ -77,7 +96,11 @@ export default async function SecurityPage() {
         podeExigirDaEquipe={org?.role === "admin"}
         papelMinimo={papelMinimo}
         diasDeCarencia={diasDeCarencia}
+        dispositivos={dispositivos}
+        semCodigos={semCodigos}
       />
+
+      {org?.role === "admin" && <BloqueioDeChamadas ligado={chamadasBloqueadas} />}
     </div>
   );
 }

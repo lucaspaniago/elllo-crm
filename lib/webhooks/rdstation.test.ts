@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import { isRdStationPayload, mapRdStationPayload } from "@/lib/webhooks/rdstation";
-import { mapInboundPayload } from "@/lib/webhooks/inbound";
+import { extrairAtribuicaoDoInbound, mapInboundPayload } from "@/lib/webhooks/inbound";
 import { isRespondiPayload } from "@/lib/webhooks/respondi";
 
 /**
@@ -222,5 +222,206 @@ describe("compatibilidade — o genérico e o Respondi seguem intactos", () => {
 
   it("RD NÃO é Respondi", () => {
     expect(isRespondiPayload(rdEnvelope())).toBe(false);
+  });
+});
+
+/**
+ * Issue #3149, ponta 1: o envelope do RD tem três lugares para um campo do
+ * formulário, e um formulário montado num anúncio manda o clique em qualquer um
+ * deles. Sem ler os três, o lead entra sem atribuição e a falha é silenciosa.
+ */
+describe("chaves de anúncio do envelope do RD Station", () => {
+  /** O clique no item do lead ou na conversão, onde o RD de verdade costuma pôr. */
+  function envelopeComAnuncio(chave: string, valor: string, onde: "lead" | "conversao") {
+    const env = rdEnvelope();
+    const lead = (env.leads as Array<Record<string, unknown>>)[0]!;
+    if (onde === "lead") {
+      lead[chave] = valor;
+    } else {
+      const ultima = lead.last_conversion as { content: Record<string, unknown> };
+      ultima.content[chave] = valor;
+    }
+    return env;
+  }
+
+  it.each(["lead", "conversao"] as const)(
+    "o `fbclid` que veio no %s vira atribuição, não campo do card",
+    (onde) => {
+      const m = mapRdStationPayload(envelopeComAnuncio("fbclid", "IwAR1abc", onde));
+      expect(m.source_metadata.fbclid).toBe("IwAR1abc");
+      expect(m.custom_fields.fbclid).toBeUndefined();
+
+      const atribuicao = extrairAtribuicaoDoInbound(m.source_metadata);
+      expect(atribuicao?.plataforma).toBe("meta_ads");
+      expect(atribuicao?.sourceId).toBe("IwAR1abc");
+    },
+  );
+
+  it("CONTROLE: envelope sem chave de anúncio não inventa atribuição", () => {
+    const m = mapRdStationPayload(rdEnvelope());
+    expect(m.source_metadata).toEqual({});
+    expect(extrairAtribuicaoDoInbound(m.source_metadata)).toBeNull();
+  });
+});
+
+/**
+ * As RESPOSTAS do formulário no envelope. Antes só a identidade e os `rd_*`
+ * chegavam ao card; o resto do conteúdo da conversão se perdia. A régua destes
+ * casos é o envio PLANO para a mesma fonte: o envelope tem de render o mesmo
+ * card que o genérico renderia com as mesmas respostas no topo do corpo.
+ */
+describe("respostas do formulário do envelope do RD", () => {
+  /** Envelope com respostas fictícias na última conversão (e o resto que o RD manda junto). */
+  function envelopeComRespostas(
+    respostas: Record<string, unknown>,
+    extras?: { primeira?: Record<string, unknown>; fichaDoLead?: Record<string, unknown> },
+  ) {
+    const env = rdEnvelope();
+    const lead = (env.leads as Array<Record<string, unknown>>)[0]!;
+    const base = (lead.last_conversion as { content: Record<string, unknown> }).content;
+    lead.last_conversion = {
+      content: {
+        ...base,
+        token_rdstation: "tok-ficticio-0001",
+        traffic_source: "google",
+        traffic_medium: "cpc",
+        user_agent: "Mozilla/5.0 (ficticio)",
+        client_tracking_id: "ct-0001",
+        privacy_data: { browser: "x" },
+        legal_bases: [{ category: "communications", type: "consent" }],
+        ...respostas,
+      },
+    };
+    lead.first_conversion = { content: { ...base, ...(extras?.primeira ?? {}) } };
+    if (extras?.fichaDoLead) lead.custom_fields = extras.fichaDoLead;
+    return env;
+  }
+
+  /** As respostas que o mesmo formulário mandaria num envio plano. */
+  const RESPOSTAS = {
+    "Orçamento Disponível": "R$ 150.000,00",
+    "Cidade/Estado preferido": "Cidade Exemplo / UF",
+    cf_produto_de_interesse: "Produto Exemplo",
+    "Aceito a política de privacidade": "true",
+    utm_source: "facebook",
+  };
+
+  it("as respostas chegam ao card com a chave original (acentos e espaços inclusive)", () => {
+    const m = mapRdStationPayload(envelopeComRespostas(RESPOSTAS));
+    expect(m.custom_fields["Orçamento Disponível"]).toBe("R$ 150.000,00");
+    expect(m.custom_fields["Cidade/Estado preferido"]).toBe("Cidade Exemplo / UF");
+    expect(m.custom_fields.cf_produto_de_interesse).toBe("Produto Exemplo");
+    expect(m.custom_fields["Aceito a política de privacidade"]).toBe("true");
+    // e os metadados do RD seguem lá
+    expect(m.custom_fields.rd_lead_id).toBe("9999999999");
+  });
+
+  it("as chaves técnicas do RD, as de identidade e os blocos aninhados NÃO viram campo", () => {
+    const m = mapRdStationPayload(envelopeComRespostas(RESPOSTAS));
+    for (const chave of [
+      "token_rdstation",
+      "traffic_source",
+      "traffic_medium",
+      "user_agent",
+      "client_tracking_id",
+      "identificador",
+      "conversion_identifier",
+      "conversion_url",
+      "event_type",
+      "email_lead",
+      "Nome",
+      "Celular",
+      "phone_lead",
+      "__cdp__original_event",
+      "privacy_data",
+      "legal_bases",
+    ]) {
+      expect(m.custom_fields, chave).not.toHaveProperty(chave);
+    }
+    expect(m.camposDoFormulario).not.toHaveProperty("token_rdstation");
+    expect(m.camposDoFormulario).not.toHaveProperty("__cdp__original_event");
+  });
+
+  it("é o MESMO card de um envio plano com as mesmas respostas, com e sem field_map", () => {
+    for (const fieldMap of [{}, { email: ["E-mail corporativo"] }]) {
+      const rd = mapRdStationPayload(
+        envelopeComRespostas({ ...RESPOSTAS, "E-mail corporativo": "contato@example.com" }),
+        fieldMap,
+      );
+      const plano = mapInboundPayload(
+        { ...RESPOSTAS, "E-mail corporativo": "contato@example.com" },
+        fieldMap,
+      );
+      const semRd = Object.fromEntries(
+        Object.entries(rd.custom_fields).filter(([k]) => !k.startsWith("rd_")),
+      );
+      expect(semRd).toEqual(plano.custom_fields);
+      expect(rd.source_metadata).toEqual(plano.source_metadata);
+    }
+  });
+
+  it("o field_map da fonte consome a chave como no genérico, sem trocar a identidade do RD", () => {
+    const m = mapRdStationPayload(
+      envelopeComRespostas({ "E-mail corporativo": "outro@example.com" }),
+      { email: ["E-mail corporativo"] },
+    );
+    expect(m.custom_fields).not.toHaveProperty("E-mail corporativo");
+    expect(m.email).toBe("maria.teste@example.com");
+    expect(m.name).toBe("Maria Teste");
+    expect(m.phone).toBe("+5511988887777");
+  });
+
+  it("última conversão sobrepõe a primeira, que sobrepõe a ficha do lead; vazio não apaga", () => {
+    const m = mapRdStationPayload(
+      envelopeComRespostas(
+        { cf_faixa: "nova", cf_observacao: "" },
+        {
+          primeira: { cf_faixa: "antiga", cf_observacao: "da primeira", cf_so_na_primeira: "sim" },
+          fichaDoLead: { cf_faixa: "da ficha", cf_so_na_ficha: "sim" },
+        },
+      ),
+    );
+    expect(m.custom_fields.cf_faixa).toBe("nova");
+    expect(m.custom_fields.cf_observacao).toBe("da primeira");
+    expect(m.custom_fields.cf_so_na_primeira).toBe("sim");
+    expect(m.custom_fields.cf_so_na_ficha).toBe("sim");
+  });
+
+  it("os `rd_*` vencem um campo do formulário de mesmo nome", () => {
+    const m = mapRdStationPayload(envelopeComRespostas({ rd_lead_id: "forjado" }));
+    expect(m.custom_fields.rd_lead_id).toBe("9999999999");
+  });
+
+  it("idempotência intacta: a externalId não depende das respostas", () => {
+    const a = mapRdStationPayload(envelopeComRespostas(RESPOSTAS));
+    const b = mapRdStationPayload(rdEnvelope());
+    expect(a.externalId).toBe(b.externalId);
+    expect(a.externalId).toBe("rdstation:evt:22222222-2222-4222-8222-222222222222");
+  });
+
+  it("atribuição intacta: o anúncio segue a régua do envelope; a ficha do lead não decide clique", () => {
+    const m = mapRdStationPayload(
+      envelopeComRespostas({ ...RESPOSTAS, fbclid: "IwAR-conv" }, { fichaDoLead: { gclid: "G-ficha" } }),
+    );
+    expect(m.source_metadata.fbclid).toBe("IwAR-conv");
+    expect(m.source_metadata.gclid).toBeUndefined();
+    expect(m.source_metadata.utm_source).toBe("facebook");
+    expect(m.custom_fields.fbclid).toBeUndefined();
+    expect(m.custom_fields.gclid).toBeUndefined();
+    expect(m.custom_fields.utm_source).toBeUndefined();
+    expect(extrairAtribuicaoDoInbound(m.source_metadata)?.sourceId).toBe("IwAR-conv");
+  });
+
+  it("reservados do contrato genérico (`external_id`, `stage`) não viram campo", () => {
+    const m = mapRdStationPayload(envelopeComRespostas({ external_id: "x-1", stage: "Ganho" }));
+    expect(m.custom_fields).not.toHaveProperty("external_id");
+    expect(m.custom_fields).not.toHaveProperty("stage");
+    expect(m.externalId).toBe("rdstation:evt:22222222-2222-4222-8222-222222222222");
+  });
+
+  it("CONTROLE: o envelope sem respostas continua rendendo só os `rd_*`", () => {
+    const m = mapRdStationPayload(rdEnvelope());
+    expect(Object.keys(m.custom_fields).every((k) => k.startsWith("rd_"))).toBe(true);
+    expect(m.camposDoFormulario).toEqual({});
   });
 });

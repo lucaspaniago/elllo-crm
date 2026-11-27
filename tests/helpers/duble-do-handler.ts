@@ -51,6 +51,20 @@ export interface OpcoesDoDubleDoHandler {
   /** Linhas de `calendar_appointments` lidas pela guarda de agenda. Padrão: `[]`. */
   agenda?: LinhaDoDuble[];
   /**
+   * O roteamento por número do #3642: `channel_routing_policies` (uma por número
+   * que tem dono) e os donos em `channel_routing_responsibles` (`policy_id`,
+   * `user_id`). Padrão VAZIO = instalação sem um número por vendedor, em que a
+   * guarda do envio não restringe ninguém — o comportamento de antes.
+   */
+  politicasDeNumero?: LinhaDoDuble[];
+  responsaveisDeNumero?: LinhaDoDuble[];
+  /**
+   * As sessões que a guarda do envio lê por lista (`.in("id", ...)`) para saber
+   * se quem envia tem número próprio CONECTADO do mesmo canal (doc 237, 1-B).
+   * Padrão: `[]` — ninguém tem número próprio.
+   */
+  sessoesDeNumero?: LinhaDoDuble[];
+  /**
    * A linha de `ai_agents` que a conferência da operação do agente lê pela REST
    * (`assertAgentOperationSupabase`). Função = estado vivo: o teste pausa o
    * agente entre uma bolha e outra.
@@ -224,6 +238,17 @@ export function criarDubleDoHandler(
             capturas.filtros.channel_sessions!.push({ coluna, valor });
             return cadeia;
           },
+          // A leitura POR LISTA (`.in("id", ...)`) é a da guarda do número do
+          // atendente (#3642): devolve as linhas de `sessoesDeNumero`, aguardável
+          // como o PostgREST. Fica numa cadeia à parte para a leitura de uma
+          // linha só (`maybeSingle`) continuar exatamente como era.
+          in: (coluna: string, valores: unknown[]) => ({
+            then: (ok: (v: unknown) => unknown, erro?: (e: unknown) => unknown) =>
+              Promise.resolve({
+                data: (opcoes.sessoesDeNumero ?? []).filter((l) => valores.includes(l[coluna])),
+                error: null,
+              }).then(ok, erro),
+          }),
           maybeSingle: async () => ({
             data: {
               metadata: opcoes.channelMetadata ?? {},
@@ -288,22 +313,39 @@ export function criarDubleDoHandler(
       }
 
       if (tabela === "calendar_appointments") {
+        const filtros: Array<(r: LinhaDoDuble) => boolean> = [];
         const cadeia: {
           select: (colunas?: string) => typeof cadeia;
           eq: (coluna: string, valor: unknown) => typeof cadeia;
           in: (coluna: string, valores: unknown[]) => typeof cadeia;
           order: (...args: unknown[]) => typeof cadeia;
           limit: (...args: unknown[]) => typeof cadeia;
+          maybeSingle: () => Promise<{ data: LinhaDoDuble | null; error: null }>;
+          single: () => Promise<{ data: LinhaDoDuble | null; error: null }>;
           then: (
             resolve: (v: { data: LinhaDoDuble[]; error: null }) => unknown,
             reject?: (e: unknown) => unknown,
           ) => PromiseLike<unknown>;
         } = {
           select: () => cadeia,
-          eq: () => cadeia,
+          // O `eq` do pulo da agenda (#3848) lê UM compromisso por id: aqui o
+          // filtro é aplicado de verdade, senão o retrato sairia com o título
+          // de outra linha da agenda.
+          eq: (coluna: string, valor: unknown) => {
+            filtros.push((r) => r[coluna] === valor);
+            return cadeia;
+          },
           in: () => cadeia,
           order: () => cadeia,
           limit: () => cadeia,
+          maybeSingle: async () => ({
+            data: (opcoes.agenda ?? []).find((r) => filtros.every((f) => f(r))) ?? null,
+            error: null,
+          }),
+          single: async () => ({
+            data: (opcoes.agenda ?? []).find((r) => filtros.every((f) => f(r))) ?? null,
+            error: null,
+          }),
           then: (resolve, reject) =>
             Promise.resolve({ data: [...(opcoes.agenda ?? [])], error: null }).then(
               resolve,
@@ -484,6 +526,63 @@ export function criarDubleDoHandler(
                 capturas.filtros.messages!.push({ coluna, valor: valores });
                 return cadeia;
               },
+              // `not(col, "is", null)` e `not(col, "in", "(a,b)")`, os dois que
+              // o PostgREST aceita aqui. Operador fora deles estoura: filtro
+              // ignorado em silêncio deixaria o teste verde medindo nada.
+              not: (coluna: string, operador: string, valor: unknown) => {
+                if (operador === "is" && valor === null) {
+                  filtros.push((r) => r[coluna] !== null && r[coluna] !== undefined);
+                } else if (operador === "in" && typeof valor === "string") {
+                  const lista = valor.replace(/^\(|\)$/g, "").split(",").map((v) => v.trim());
+                  filtros.push((r) => !lista.includes(String(r[coluna])));
+                } else {
+                  throw new Error(`[duble-do-handler] not(${coluna}, ${operador}) não implementado`);
+                }
+                capturas.filtros.messages!.push({ coluna, valor: `not.${operador}:${String(valor)}` });
+                return cadeia;
+              },
+              // `is(col, null)`, inclusive no caminho JSON `col->>chave`, que o
+              // PostgREST lê como texto (chave ausente = null).
+              is: (coluna: string, valor: null) => {
+                if (valor !== null) {
+                  throw new Error(`[duble-do-handler] is(${coluna}, ${String(valor)}) não implementado`);
+                }
+                const [base, chave] = coluna.split("->>");
+                filtros.push((r) => {
+                  const v = chave === undefined
+                    ? r[base!]
+                    : ((r[base!] ?? null) as Record<string, unknown> | null)?.[chave];
+                  return v === null || v === undefined;
+                });
+                capturas.filtros.messages!.push({ coluna, valor: "is:null" });
+                return cadeia;
+              },
+              // `or("a.is.null,a.neq.x")`: só `is.null` e `neq`, os dois que a
+              // leitura do #5015 usa. `->>` lê texto; NULL não casa `neq`.
+              or: (expressao: string) => {
+                const partes = expressao.split(",").map((parte) => {
+                  const [coluna, operador, ...resto] = parte.split(".");
+                  const alvo = resto.join(".");
+                  const [base, chave] = coluna!.split("->>");
+                  const ler = (r: LinhaDoDuble) => {
+                    const v = chave === undefined
+                      ? r[base!]
+                      : ((r[base!] ?? null) as Record<string, unknown> | null)?.[chave];
+                    return v === null || v === undefined ? null : String(v);
+                  };
+                  if (operador === "is" && alvo === "null") return (r: LinhaDoDuble) => ler(r) === null;
+                  if (operador === "neq") return (r: LinhaDoDuble) => ler(r) !== null && ler(r) !== alvo;
+                  throw new Error(`[duble-do-handler] or(${parte}) não implementado`);
+                });
+                filtros.push((r) => partes.some((f) => f(r)));
+                capturas.filtros.messages!.push({ coluna: "or", valor: expressao });
+                return cadeia;
+              },
+              gt: (coluna: string, valor: unknown) => {
+                filtros.push((r) => String(r[coluna] ?? "") > String(valor));
+                capturas.filtros.messages!.push({ coluna, valor: `gt:${String(valor)}` });
+                return cadeia;
+              },
               order: () => cadeia,
               limit: () => cadeia,
               // A leitura em lote devolve as linhas como elas estão, sem casar
@@ -509,6 +608,51 @@ export function criarDubleDoHandler(
             return cadeia;
           },
         };
+      }
+
+      if (
+        tabela === "channel_routing_policies" ||
+        tabela === "channel_routing_responsibles"
+      ) {
+        // As duas tabelas que dizem "de quem é este número" (#3642). Vazias por
+        // padrão: sem policy, a organização não separa números por vendedor e a
+        // guarda do envio libera. Uma linha de policy + os responsáveis ligam a
+        // regra no teste que a prova.
+        const linhas =
+          tabela === "channel_routing_policies"
+            ? opcoes.politicasDeNumero ?? []
+            : opcoes.responsaveisDeNumero ?? [];
+        const filtros: Array<[string, unknown]> = [];
+        const listas: Array<[string, unknown[]]> = [];
+        const casa = (l: LinhaDoDuble) =>
+          filtros.every(([c, v]) => l[c] === v) &&
+          listas.every(([c, vs]) => vs.includes(l[c]));
+        const cadeia = {
+          select: () => cadeia,
+          eq: (coluna: string, valor: unknown) => {
+            filtros.push([coluna, valor]);
+            return cadeia;
+          },
+          in: (coluna: string, valores: unknown[]) => {
+            listas.push([coluna, valores]);
+            return cadeia;
+          },
+          maybeSingle: async () => ({
+            data: linhas.find(casa) ?? null,
+            error: null,
+          }),
+          // A segunda e a terceira leitura do quadro são AGUARDADAS direto
+          // (`await db.from(...).select(...).eq(...).eq(...)`) e esperam um array,
+          // como o PostgREST. Uma cadeia que não é aguardável devolveria o próprio
+          // objeto, `data` viria `undefined`, e a guarda cairia no caminho "sem
+          // regra" — o teste ficaria verde sem exercitar nada.
+          then: (ok: (v: unknown) => unknown, erro?: (e: unknown) => unknown) =>
+            Promise.resolve({
+              data: linhas.filter(casa),
+              error: null,
+            }).then(ok, erro),
+        };
+        return cadeia;
       }
 
       throw new Error(`duble-do-handler: tabela inesperada '${tabela}'`);

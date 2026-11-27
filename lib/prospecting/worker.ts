@@ -5,6 +5,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { sendMessageHandler } from "@/app/api/v1/messages/_handler";
 import { loadChannelKnobs, loadPacingState, recordSend } from "@/lib/agent-engine/pacing/store";
 import {
+  dayStartInTz,
   decidePacing,
   janelaDeProspeccaoAberta,
   proximaAberturaDaProspeccao,
@@ -24,24 +25,41 @@ import { autorizarContatoParaIA } from "@/lib/ai/elegibilidade/autorizacao";
 import { decidirPreGoLiveDoCanalViaSupabase } from "@/lib/ai/elegibilidade/consulta-pre-go-live";
 import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
-import { assertProspectingContinuation, assertProspectingDelivery } from "./guard";
-import { instrucaoDeAbordagemFria, montarDadosDeAbordagem, estrategiaDoCandidato } from "./estrategia-site";
+import {
+  assertProspectingContinuation,
+  assertProspectingDelivery,
+  vetoDoContatoAntesDaVaga,
+} from "./guard";
+import { entradasDaAbordagem, estrategiaDoCandidato } from "./estrategia-site";
 import {
   INTERVALO_MINIMO_ENTRE_TENTATIVAS_MIN,
   LIMITE_TENTATIVAS,
   siteEfetivo,
 } from "./site-efetivo";
-import { previaDoAgente } from "./previa";
+import { previaAprovadaDoAgente, previaDoAgente } from "./previa";
 import { blocoVozVendedor, personalizacaoDaOrganizacao } from "./personalizar";
 import { campaignConfigSchema, type OfertaDaCampanha } from "./schema";
 import { prepararCandidatos } from "./preparo";
-import { ProspectingError } from "./provider";
+import { provedoresQueConferemNumero } from "@/lib/channels";
+import { empresasComModuloDesligado, moduloLigado } from "@/lib/instalacao/modulos";
+import { CanalReconectandoError, ProspectingError } from "./provider";
+import { mensagemDaRecusaDoCanal } from "./motivo-da-pausa";
+import { canalDaCampanha } from "./canal-da-campanha";
+// O carimbo do pedido da prospecção: `prospecting:` — nunca `rule:` (#3072).
+import { pedidoDaProspeccao } from "./pedido-da-prospeccao";
+import {
+  abordagensComMidiaDesde,
+  prepararMidiaDaAbordagem,
+  TETO_DE_LEGENDA,
+  TETO_DIARIO_DE_MIDIA_POR_NUMERO,
+} from "./midia-da-abordagem";
 import { OrgNaoOperanteError } from "@/lib/organizacao/operante";
 import {
   withProspectingLock,
   synchronizeSearch,
   validateConfig,
   prepararCandidatoNoEnvio,
+  MSG_CANAL_DESCONECTADO,
   type Campaign,
   type Candidate,
 } from "./store";
@@ -55,6 +73,40 @@ import {
  * ponytail: não lê o env; se o operador mexer em MAX_SENDS_PER_TURN, a fria segue em 3.
  */
 const TETO_DE_BOLHAS_DA_ABORDAGEM = 3;
+
+/**
+ * TETO DO ADIAMENTO DA RECONEXÃO (issue #3073) — quanto tempo a campanha pode
+ * esperar o canal voltar ao `WORKING` antes de a espera virar PAUSA.
+ *
+ * A régua é `prospecting_campaigns.channel_down_since`: gravado a partir da
+ * PRIMEIRA vez que a campanha viu o canal fora (`coalesce(channel_down_since,
+ * now())`) e zerado quando ela o vê em `WORKING`. Conta, portanto, desde o
+ * PRIMEIRO adiamento desta espera (até um tick depois do último `WORKING` que o
+ * tick observou). O relógio do PRÓPRIO canal
+ * (`channel_sessions.last_status_change_at`) NÃO serve: a ingestão o regrava a
+ * cada evento de status, então um canal que alterna `STARTING`↔`STOPPED`
+ * reiniciaria a contagem a cada volta.
+ *
+ * 30 minutos, e o número sai da cadência MEDIDA da campanha, não do gosto:
+ * - o tick roda a cada minuto (`docs/features/prospeccao-nativa.md`) e o passo do
+ *   adiamento é de 1 minuto (`CanalReconectandoError.retomarEmMs`), então 30 é o
+ *   30º adiamento;
+ * - é 2× o intervalo padrão entre envios (`interval_minutes`, default 15): duas
+ *   vagas perdidas já é a campanha "Ativa" sem fazer o trabalho dela;
+ * - é ~180× a queda de SEGUNDOS que abriu a issue — uma reconexão normal não
+ *   chega perto, e o teto não regride ao defeito de pausar por um soluço;
+ * - o vigia religa `STOPPED` em ≤60 s (`WATCHDOG_INTERVAL_MS`, default em
+ *   `lib/agent-engine/env.ts`), então 30 min fora do ar é a sessão GENUINAMENTE
+ *   presa — e `STARTING` preso não gera aviso de saúde nenhum
+ *   (`lib/channels/health.ts`): a pausa, com o motivo no cartão da campanha, é o
+ *   único sinal que sobra;
+ * - e é 1/4 das 2h dos dois casos de teste do mantenedor, então os dois pausam
+ *   com folga.
+ *
+ * Pausar é reversível num clique ("Retomar fila") e a campanha pausada diz o
+ * motivo; seguir "Ativa" sem enviar não diz nada a ninguém.
+ */
+export const TETO_DO_ADIAMENTO_MS = 30 * 60_000;
 
 export async function sendNextCandidate(
   pool: pg.Pool,
@@ -72,13 +124,33 @@ export async function sendNextCandidate(
     new Promise((resolve) => setTimeout(resolve, ms)),
 ) {
   const cfg = campaignConfigSchema.parse(c.config);
+  // O NÚMERO da campanha: coluna (fonte da verdade desde a 9221) e `config`
+  // têm de dizer o MESMO número. Divergência é estado impossível de propósito
+  // (o `start` e o `resume` gravam os dois juntos): seguir com um dos dois
+  // mandaria por um número e contaria o teto em outro — a conta do aquecimento
+  // sai do número que ENVIA, e nesse estado ninguém sabe qual é.
+  const canal = canalDaCampanha(c);
+  if (!canal)
+    throw new ProspectingError(
+      "A campanha não tem conexão de WhatsApp definida. Pause e inicie de novo escolhendo uma conexão.",
+    );
+  if (c.channel_session_id && c.channel_session_id !== cfg.channel_session_id)
+    throw new ProspectingError(
+      "A conexão gravada na campanha diverge da configuração dela. Pause e inicie de novo escolhendo uma conexão.",
+    );
   await validateConfig(db, c.organization_id, cfg);
+  // O CANAL ESTÁ `WORKING` — a validação passou, e a espera da reconexão acabou.
+  // Limpa a marca do adiamento para a PRÓXIMA espera começar a contar do zero
+  // (issue #3073): sem isto, uma espera antiga envelheceria junto com o canal já
+  // recuperado e pausaria a campanha no adiamento seguinte. Só escreve quando há
+  // o que limpar — o caminho feliz comum não paga uma query a mais.
+  if (c.channel_down_since != null)
+    await db.query(
+      "update prospecting_campaigns set channel_down_since=null,updated_at=now() where organization_id=$1 and id=$2",
+      [c.organization_id, c.id],
+    );
   if (new Date(c.next_send_at).getTime() > Date.now()) return;
-  const { knobs, numberActivatedAt } = await loadChannelKnobs(
-    db,
-    c.organization_id,
-    cfg.channel_session_id,
-  );
+  const { knobs, numberActivatedAt } = await loadChannelKnobs(db, c.organization_id, canal);
   const now = new Date();
   // O PORTÃO DA PROSPECÇÃO: dias próprios (`prospeccao_dias`, 0642) + horas de
   // disparo — e NÃO o domingo compartilhado. Fora dele, o envio fica agendado
@@ -94,15 +166,15 @@ export async function sendNextCandidate(
     );
     return;
   }
-  const pacingState = await loadPacingState(db, c.organization_id, cfg.channel_session_id, {
+  const pacingState = await loadPacingState(db, c.organization_id, canal, {
     now,
     timezone: knobs.timezone,
     numberActivatedAt,
   });
   const channel = (
     await db.query(
-      "select daily_message_limit from channel_sessions where organization_id=$1 and id=$2",
-      [c.organization_id, cfg.channel_session_id],
+      "select daily_message_limit from channel_sessions where organization_id=$1 and id=$2 and archived_at is null",
+      [c.organization_id, canal],
     )
   ).rows[0];
   if (!channel) throw new ProspectingError("Conexão de saída indisponível.");
@@ -124,15 +196,23 @@ export async function sendNextCandidate(
     );
     return;
   }
-  // Count attempts, including failures/unknown delivery: a timeout must not release quota.
+  // TETO, INTERVALO E AQUECIMENTO SÃO DESTE NÚMERO (issue #3896).
+  //
+  // Antes a contagem era da ORGANIZAÇÃO inteira: com duas campanhas em números
+  // diferentes rodando, as duas dividiam as mesmas 50 abordagens do dia e o
+  // MESMO intervalo mínimo — dois números valendo o de um só, que é
+  // exatamente a queixa do pedido. Agora a chave é o `channel_session_id` da
+  // campanha do candidato, e não a campanha: uma campanha PAUSADA no mesmo
+  // número já queimou tentativas daquele número nas últimas 24 h, e essas
+  // contam para o aquecimento dele.
   const { rows: counts } = await db.query<{
     campaign: number;
     total: number;
     retry_at: Date | null;
     last_attempt: Date | null;
   }>(
-    "select count(*) filter(where campaign_id=$2)::int as campaign,count(*)::int as total,max(attempted_at) as last_attempt,min(attempted_at)+interval '24 hours' as retry_at from prospecting_candidates where organization_id=$1 and attempted_at>now()-interval '24 hours'",
-    [c.organization_id, c.id],
+    "select count(*) filter(where p.campaign_id=$2)::int as campaign,count(*)::int as total,max(p.attempted_at) as last_attempt,min(p.attempted_at)+interval '24 hours' as retry_at from prospecting_candidates p join prospecting_campaigns pc on pc.organization_id=p.organization_id and pc.id=p.campaign_id where p.organization_id=$1 and pc.channel_session_id=$3 and p.attempted_at>now()-interval '24 hours'",
+    [c.organization_id, c.id, canal],
   );
   const count = counts[0]!;
   // O TETO DO WARM-UP DESTA ESTEIRA. Os degraus da casa (20 no primeiro dia)
@@ -181,16 +261,43 @@ export async function sendNextCandidate(
     );
     return;
   }
+  // Aprovação da prévia é OPÇÃO da campanha, desligada por padrão: campanha sem
+  // a chave (inclusive as que já rodavam antes dela existir) envia como sempre.
+  if (
+    cfg.exigir_aprovacao_da_previa &&
+    (queued.automatic_sends ?? 0) === 0 &&
+    !previaAprovadaDoAgente(queued.data, cfg.agent_id, cfg.briefing_editado_em, cfg.fonte_da_abordagem ?? "estrategia")
+  ) {
+    const pause = await db.query(
+      "update prospecting_campaigns set status='paused',error='A primeira abordagem aguarda revisão e aprovação humana da prévia.',updated_at=now() where organization_id=$1 and id=$2 and status='running' returning id",
+      [c.organization_id, c.id],
+    );
+    if ((pause.rowCount ?? 0) > 0) {
+      await audit({
+        action: "prospecting.approval_required",
+        organizationId: c.organization_id,
+        resourceType: "prospecting",
+        resourceId: c.id,
+        metadata: { candidateId: queued.id },
+        requestId: randomUUID(),
+      });
+    }
+    return;
+  }
   // A checagem do canal olha o telefone desta empresa (modo de teste, lista liberada) e vem
   // ANTES de qualquer criação: se ela recusar, a campanha pausa sem ter deixado contato,
   // negócio nem conversa para trás — que é exatamente o que o modo `on_send` quer evitar.
   const preflight = await decidirPreGoLiveDoCanalViaSupabase(admin, {
     organizationId: c.organization_id,
-    channelSessionId: cfg.channel_session_id,
+    channelSessionId: canal,
     contactPhoneNumber: queued.phone ?? "",
   });
   if (!preflight.permite)
-    throw new ProspectingError(`O canal ainda não permite esta abordagem: ${preflight.motivo}.`);
+    // O motivo que o preflight devolve é vocabulário de código
+    // (`fora_da_lista_de_teste`): vai para a tela traduzido por um mapa único
+    // (`./motivo-da-pausa.ts`, #4170). Motivo sem frase própria continua
+    // saindo cru — o comportamento de antes.
+    throw new ProspectingError(mensagemDaRecusaDoCanal(preflight.motivo));
   // MODO `on_send`: a empresa está na fila, mas ainda NÃO existe no CRM — contato,
   // negócio e conversa nascem agora, na vez dela de ser abordada. Se ela saiu da fila
   // no caminho (virou contato por outro lado, ou o CRM recusou o cadastro), não houve
@@ -218,6 +325,25 @@ export async function sendNextCandidate(
       422,
       "candidato",
     );
+  // A MARCA DO CONTATO é conferida ANTES de reservar a vaga do número. A guarda
+  // cheia, mais abaixo, vem depois da transação que grava `attempted_at`, o
+  // intervalo e o `recordSend`: sem esta leitura, cada empresa vetada gastaria
+  // uma vaga do teto diário e do aquecimento, mais um intervalo inteiro, sem
+  // mandar nada. Aqui ela sai `failed` com o motivo e SEM `attempted_at` (não
+  // houve tentativa), e a próxima rodada pega a seguinte sem esperar.
+  const vetoAntes = await vetoDoContatoAntesDaVaga(admin, c.organization_id, p.contact_id);
+  if (vetoAntes) {
+    await db.query(
+      "update prospecting_candidates set status='failed',error=$3,updated_at=now() where organization_id=$1 and id=$2 and status='queued'",
+      [c.organization_id, p.id, vetoAntes],
+    );
+    logger.warn("[prospecting] contato vetado antes de reservar a vaga; a campanha segue", {
+      organization_id: c.organization_id,
+      campaign_id: c.id,
+      error: vetoAntes,
+    });
+    return;
+  }
   await db.query("begin");
   try {
     await db.query(
@@ -238,7 +364,7 @@ export async function sendNextCandidate(
       ],
     );
     // Reserve the shared channel budget before the external effect, including uncertain attempts.
-    await recordSend(db, c.organization_id, cfg.channel_session_id, now);
+    await recordSend(db, c.organization_id, canal, now);
     await db.query("commit");
   } catch (error) {
     await db.query("rollback");
@@ -278,6 +404,9 @@ export async function sendNextCandidate(
     // de outro agente (a do padrão da organização), o envio escreve do zero.
     const personalizacao = await personalizacaoDaOrganizacao(db, c.organization_id);
     const site = siteEfetivo(p.data, new Date().toISOString());
+    // A estratégia continua sendo calculada — ela é o diagnóstico que a TELA mostra. Quem
+    // decide se ela sobe para a instrução (sem ficha digital, #4829, ou pelo prompt do
+    // agente, não sobe) é `entradasDaAbordagem`.
     const estrategia = site
       ? estrategiaDoCandidato(p.data, site, {
           ofertas: (cfg.ofertas ?? ["site"]) as OfertaDaCampanha[],
@@ -288,27 +417,32 @@ export async function sendNextCandidate(
       : null;
     // Modo "saída na 2ª": a 1ª mensagem só cumprimenta, então nada de ângulo de
     // venda — nem estratégia (na instrução) nem Auditoria/Detalhe/Rascunho (nos
-    // dados), que o prompt frio deixa citar "como o motivo do contato".
-    const soCumprimenta = cfg.exit_offer !== "first_message";
+    // dados), que o prompt frio deixa citar "como o motivo do contato". Sem ficha
+    // digital, nem os fatos da ficha nem a prévia guardada. Pelo prompt do agente,
+    // sem estratégia nem auditoria. A decisão mora em `entradasDaAbordagem`, a MESMA
+    // que a prévia chama. A prévia guardada só entra se for da MESMA fonte e do texto
+    // ATUAL da campanha (`briefing_editado_em`).
+    const fonte = cfg.fonte_da_abordagem ?? "estrategia";
+    const { instrucao, dados, comContextoDaEquipe, semFichaDigital } = entradasDaAbordagem({
+      config: cfg,
+      data: p.data,
+      site,
+      estrategia,
+      voz: blocoVozVendedor(personalizacao),
+      previa: previaDoAgente(p.data, cfg.agent_id, cfg.briefing_editado_em, fonte),
+    });
     const generated = await gerarAbordagemDeFormulario(pool, llmEdgeConfigFromEnv(env), {
       tenantId: c.organization_id,
       agentId: cfg.agent_id,
       leadId: p.contact_id,
-      instrucao: instrucaoDeAbordagemFria(
-        cfg.instruction,
-        cfg.qualification,
-        blocoVozVendedor(personalizacao) || undefined,
-        estrategia,
-        soCumprimenta,
-      ),
+      instrucao,
       origem: "Pesquisa de empresas",
       // NÃO é `automacao`: a pessoa não entrou em funil nenhum. O prompt do
       // ramo frio é o único que proíbe afirmar preenchimento — ver blocoDeModo.
       origemDaAbordagem: "prospeccao_fria",
-      // Fonte única em `montarDadosDeAbordagem` (prévia da tela bebe da mesma).
-      dados: soCumprimenta
-        ? montarDadosDeAbordagem(p.data, null, null)
-        : montarDadosDeAbordagem(p.data, site, previaDoAgente(p.data, cfg.agent_id)),
+      dados,
+      comContextoDaEquipe,
+      semFichaDigital,
     });
     if (!generated.ok)
       // DO CANDIDATO: o modelo não produziu texto para ESTES dados.
@@ -325,6 +459,16 @@ export async function sendNextCandidate(
     });
     if (!authorization.ok)
       throw new ProspectingError("Não foi possível preparar o atendimento da resposta.");
+    // `ok` é "o banco respondeu"; `autorizou` é "a IA pode assumir". Com
+    // `ai_opt_out` ("sempre atendimento humano") o update casa 0 linhas e volta
+    // `{ok:true, autorizou:false}` — e só olhar `ok` mandava a abordagem a quem a
+    // operação trancou. A recusa é DESTE contato: a campanha segue.
+    if (authorization.autorizou === false)
+      throw new ProspectingError(
+        "A IA não pode atender este contato.",
+        409,
+        "candidato",
+      );
     // A SAÍDA é montada aqui — não pedida ao modelo — e vai JUNTO DA PRIMEIRA
     // BOLHA quando a CAMPANHA manda oferecê-la aí (`exit_offer`, migration 0705:
     // ver o `if` depois de `splitForSend`). Sem ela, a saída que a pessoa usa é
@@ -347,10 +491,54 @@ export async function sendNextCandidate(
     // `split_max_chars` — é o mesmo preço que o `splitForSend` já paga quando o
     // teto de bolhas do turno é atingido: a alternativa seria picar a saída em
     // duas mensagens, e aí ela voltaria a depender de uma bolha posterior.
+    // A MÍDIA FIXA DA CAMPANHA (#4581) muda o RECORTE do texto, e por isso ela é
+    // decidida ANTES do corte: com mídia, a 1ª bolha não é "a primeira de N
+    // mensagens de texto" — é a LEGENDA do arquivo, e legenda tem teto próprio no
+    // WhatsApp (`TETO_DE_LEGENDA`, 1024). Um teto de bolha maior que isso
+    // (o schema do agente aceita até 4000) mandaria uma legenda que a plataforma
+    // corta ou recusa, e a primeira frase da abordagem — a única que a pessoa lê
+    // antes de decidir se responde — chegaria pela metade.
+    //
+    // O teto da legenda RESERVA o espaço da SAÍDA: ela entra na 1ª bolha logo
+    // abaixo e, se o corte enchesse os 1024 caracteres, o "responda PARAR" seria
+    // exatamente o que a plataforma cortaria — a pessoa receberia a apresentação
+    // e ficaria sem caminho de volta, que é o desfecho que a saída existe para
+    // evitar. `comSaida("")` devolve só o que ela acrescenta, então a folga é
+    // medida, não estimada.
+    //
+    // SEM mídia nada disto roda: estilo e teto são os de sempre, bolha a bolha.
+    //
+    // O TETO DIÁRIO DE MÍDIA DO NÚMERO (doc 358 › 2A) vem antes de tudo isso:
+    // passado o teto, a abordagem é a de uma campanha sem mídia — texto puro, no
+    // estilo do agente — e a campanha segue. O "dia" é o do fuso da janela do
+    // número (`knobs.timezone`), a mesma régua do portão 7h–22h.
+    const midiaOmitidaPeloTeto =
+      cfg.midia_da_abordagem != null &&
+      (await abordagensComMidiaDesde(
+        db,
+        c.organization_id,
+        canal,
+        dayStartInTz(now, knobs.timezone),
+      )) >= TETO_DIARIO_DE_MIDIA_POR_NUMERO;
+    if (midiaOmitidaPeloTeto)
+      logger.info("[prospecting] teto diário de mídia do número atingido; a abordagem sai só com texto", {
+        organization_id: c.organization_id,
+        campaign_id: c.id,
+        channel_session_id: canal,
+        teto: TETO_DIARIO_DE_MIDIA_POR_NUMERO,
+      });
+    const comMidia = cfg.midia_da_abordagem != null && !midiaOmitidaPeloTeto;
+    const folgaDaSaida =
+      comMidia && cfg.exit_offer === "first_message"
+        ? comSaida("", locale, cfg.texto_da_saida).length
+        : 0;
+    const tetoDaBolha = comMidia
+      ? Math.min(agent.split_max_chars ?? 600, Math.max(80, TETO_DE_LEGENDA - folgaDaSaida))
+      : (agent.split_max_chars ?? 600);
     const baloes = splitForSend(
       generated.texto,
-      agent.split_messages ?? false,
-      agent.split_max_chars ?? 600,
+      comMidia ? true : (agent.split_messages ?? false),
+      tetoDaBolha,
       TETO_DE_BOLHAS_DA_ABORDAGEM,
     );
     // Texto vazio com o estilo ligado não devolve bolha nenhuma (`splitForSend` →
@@ -366,7 +554,37 @@ export async function sendNextCandidate(
     // (é o `context.ts` que manda o agente só cumprimentar na primeira). Pôr o
     // rodapé aqui incondicionalmente ofereceria a saída DUAS vezes — e na
     // mensagem que o operador não escolheu.
-    if (cfg.exit_offer === "first_message") baloes[0] = comSaida(baloes[0]!, locale);
+    // O TEXTO é da campanha (`config.texto_da_saida`, #4370) e não do modelo:
+    // vazio cai na frase padrão de sempre, e texto sem a palavra que o detector
+    // reconhece é trocado pelo padrão em `rodape-de-saida.ts` — a saída não pode
+    // depender da redação ter dado certo.
+    if (cfg.exit_offer === "first_message") baloes[0] = comSaida(baloes[0]!, locale, cfg.texto_da_saida);
+    // A MÍDIA VAI JUNTO DA PRIMEIRA BOLHA — e é a MESMA mensagem física, não uma
+    // segunda logo antes dela. Três razões, todas medidas no caminho que já
+    // existe:
+    //
+    //   1. ORDEM: o handler manda o que recebe e devolve o status; mandar a mídia
+    //      "antes" seria um segundo envio cuja ordem eu mesmo teria de garantir —
+    //      exatamente o que a legenda dispensa. Um envio, uma ordem.
+    //   2. IDEMPOTÊNCIA: a 1ª bolha é a ÚNICA que leva `internalMessageId`
+    //      (`p.message_id`). Numa repetição com o mesmo id, o handler acha a linha
+    //      (`_handler.ts`, ramo 23505) e devolve sem falar com o canal — então a
+    //      mídia não tem como sair duas vezes. Numa mensagem separada e sem id, a
+    //      repetição reenviaria o arquivo, e o contato receberia a mesma imagem
+    //      duas vezes (o desfecho que mais queima número).
+    //   3. SAÍDA: o rodapé já está na 1ª bolha, então "responda PARAR" viaja junto
+    //      do arquivo em vez de depender de uma bolha que pode não sair.
+    //
+    // A assinatura acontece AQUI e não a cada bolha: uma URL para o envio inteiro.
+    // Falha de assinatura RECUSA a abordagem (a configuração pediu um arquivo, e
+    // entregar texto puro seria outra abordagem) — o `ProspectingError` sem escopo
+    // é `campanha`, que é o certo: o arquivo é o mesmo para a fila inteira.
+    const midiaPreparada = await prepararMidiaDaAbordagem(
+      admin,
+      comMidia ? cfg.midia_da_abordagem : null,
+    );
+    if (midiaPreparada && !midiaPreparada.ok) throw new ProspectingError(midiaPreparada.motivo);
+    const midia = midiaPreparada && midiaPreparada.ok ? midiaPreparada : null;
     let mensagem: Message | undefined;
     let falhouEm: Message | undefined;
     /** A conversa deixou de ser fria ENTRE bolhas: a pessoa respondeu ou um humano assumiu. */
@@ -409,7 +627,7 @@ export async function sendNextCandidate(
           {
             organization_id: c.organization_id,
             actor: { type: "ai_agent", id: p.id, agent_id: cfg.agent_id, role: "ai_operator" },
-            requestId: `prospecting:${p.id}`,
+            requestId: pedidoDaProspeccao(p.id),
             serviceBoundary: boundary,
             // O RECIBO E A IDEMPOTÊNCIA do candidato moram na PRIMEIRA bolha: é a
             // linha `messages` de id estável (`p.message_id`) que o `sending`
@@ -433,11 +651,26 @@ export async function sendNextCandidate(
               revision: String(agent.operation_revision),
             },
           },
-          {
-            conversation_id: p.conversation_id,
-            type: "text",
-            body: baloes[i]!,
-          },
+          // A 1ª bolha leva a MÍDIA junto, como LEGENDA: `type` diz ao canal o que
+          // é o arquivo, `media_*` entregam o endereço assinado e o `body` continua
+          // sendo o texto desta bolha (com a saída, no modo `first_message`). As
+          // seguintes saem `text` puro — e SEM mídia este ramo é o de sempre,
+          // byte a byte.
+          midia && i === 0
+            ? {
+                conversation_id: p.conversation_id,
+                type: midia.tipo,
+                // Legenda vazia é AUSÊNCIA de legenda, não `body: ""`: o schema do
+                // envio exige `body` com pelo menos 1 caractere quando ele existe.
+                ...(baloes[i] ? { body: baloes[i]! } : {}),
+                media_url: midia.url,
+                media_mime: midia.mime,
+              }
+            : {
+                conversation_id: p.conversation_id,
+                type: "text",
+                body: baloes[i]!,
+              },
         );
       } catch (error) {
         // Na 1ª bolha nada saiu: o erro segue para o `catch` de fora (candidato
@@ -544,15 +777,24 @@ export async function sendNextCandidate(
         contact_id: p.contact_id,
         conversation_id: p.conversation_id,
         agent_id: cfg.agent_id,
-        channel_session_id: cfg.channel_session_id,
+        channel_session_id: canal,
         sent,
         // Bolhas FÍSICAS confirmadas / bolhas em que o texto foi fatiado.
         bubbles_sent: entregues,
         bubbles_total: baloes.length,
+        // A abordagem saiu COM o arquivo da campanha (#4581). Sem PII e sem o
+        // endereço assinado: o tipo basta para responder, depois, "quem recebeu
+        // aquele arquivo" — a pergunta que a régua de banimento faz.
+        ...(midia ? { media_type: midia.tipo } : {}),
+        // A campanha tem mídia, mas este número já passou do teto do dia (doc 358
+        // › 2A): a abordagem saiu só com texto, e é aqui que isso fica dito.
+        ...(midiaOmitidaPeloTeto
+          ? { media_omitted: "teto_diario_por_numero", media_daily_cap: TETO_DIARIO_DE_MIDIA_POR_NUMERO }
+          : {}),
         // Por que as seguintes não saíram, quando a conversa deixou de ser fria.
         ...(parouEm || lancouEm ? { stopped_reason: parouEm ?? lancouEm } : {}),
       },
-      requestId: `prospecting:${p.id}`,
+      requestId: pedidoDaProspeccao(p.id),
     });
   } catch (error) {
     // Organização parada: a porta de saída lança ANTES de qualquer envio, então
@@ -610,11 +852,48 @@ const ORGS_COM_PREPARO_PENDENTE =
   // existe um é o preparo, em TS.
   "or (coalesce(pc.search->>'avaliar_site','true') <> 'false' and coalesce(pc.search->>'gerar_previa','false') = 'true' and c.data->'previa' is null " +
   "and ((c.data->'site' is not null and not coalesce((c.data->'site'->>'provisorio')::boolean, false)) " +
-  "or (c.data->'site' is null and nullif(trim(c.data->>'website'), '') is null))))) " +
+  "or (c.data->'site' is null and nullif(trim(c.data->>'website'), '') is null))) " +
+  // (c) WhatsApp por conferir (`whatsapp.ts`): telefone sem veredito, e uma conexão
+  // conectada cujo canal sabe perguntar ($1 = `provedoresQueConferemNumero()`, ou vazio
+  // com o módulo `conferir_whatsapp` desligado). Sem ela a organização NÃO entra —
+  // senão voltaria toda rodada para nada. Pela mesma razão, $2 = as empresas que
+  // desligaram o módulo (#4871): o preparo delas não confere, e a pendência nunca sumiria.
+  "or (nullif(trim(c.data->>'phone'), '') is not null and c.data->'whatsapp' is null " +
+  "and not (pc.organization_id = any($2::uuid[])) " +
+  "and exists (select 1 from channel_sessions s where s.organization_id=pc.organization_id " +
+  "and s.provider = any($1::text[]) and s.status='WORKING' and s.archived_at is null)))) " +
   "group by pc.organization_id order by min(pc.updated_at) limit 20";
 
 /** Teto de tempo do preparo de UMA organização dentro do tick. */
 const PRAZO_DO_PREPARO_MS = 100_000;
+
+/**
+ * Quem CONFERE WhatsApp nesta rodada (#4871) — decidido POR EMPRESA, mesmo num
+ * tick que percorre até 20 organizações de uma vez.
+ *
+ * O cron não tem "a empresa do request": o tick é GLOBAL e a pergunta certa é
+ * "esta empresa ainda confere?", respondida aqui. A ordem é a da camada por
+ * empresa, e ela é a MESMA de `lib/instalacao/modulos.ts`:
+ *
+ *   1. instalação desligada VENCE — nem a linha `ligado` da empresa liga;
+ *   2. a linha `desligado` da empresa tira a empresa;
+ *   3. sem linha, a empresa herda a instalação;
+ *   4. `desligadas === null` é leitura que falhou, e falha de leitura não
+ *      confere o número de ninguém (fecha, não abre).
+ *
+ * Puro de propósito: a rodada lê `organization_modules` UMA vez
+ * (`empresasComModuloDesligado`) e esta função responde por cada empresa sem
+ * tocar no banco — o teste prova as combinações sem dublê da decisão.
+ */
+export function confereWhatsapp(
+  instalacaoLigada: boolean,
+  desligadas: ReadonlySet<string> | null,
+  organizacaoId: string,
+): boolean {
+  if (!instalacaoLigada) return false;
+  if (desligadas === null) return false;
+  return !desligadas.has(organizacaoId);
+}
 
 export async function tickProspecting(pool: pg.Pool, admin: SupabaseClient, requestId?: string) {
   // Organização parada (suspensa, redigida, arquivada) não prospecta: a busca é
@@ -634,9 +913,25 @@ export async function tickProspecting(pool: pg.Pool, admin: SupabaseClient, requ
   // Segunda consulta, à parte (a primeira não muda): quem só tem rascunho/pausada.
   // Fail-open: se ela falhar, as organizações que já rodam seguem como antes.
   let apenasPreparo: string[] = [];
+  // O TETO da instalação, como antes: desligado, ninguém confere WhatsApp.
+  let conferirNaInstalacao = false;
+  // #4871 — a camada POR EMPRESA, lida UMA vez para a rodada inteira (o tick é
+  // global). `null` = a leitura falhou: ninguém confere nesta rodada.
+  let semConferencia: ReadonlySet<string> | null = null;
   try {
+    conferirNaInstalacao = await moduloLigado(admin, "conferir_whatsapp");
+    // A empresa que desligou o módulo não precisa ser lida quando a instalação já
+    // negou a todos: a instalação vence, e a leitura extra não mudaria resposta.
+    semConferencia = conferirNaInstalacao
+      ? await empresasComModuloDesligado(admin, "conferir_whatsapp")
+      : new Set<string>();
+    // Módulo desligado na instalação OU leitura ilegível (o padrão): lista vazia,
+    // e o ramo (c) não seleciona ninguém.
     apenasPreparo = (
-      await pool.query<{ organization_id: string }>(ORGS_COM_PREPARO_PENDENTE)
+      await pool.query<{ organization_id: string }>(ORGS_COM_PREPARO_PENDENTE, [
+        conferirNaInstalacao && semConferencia !== null ? provedoresQueConferemNumero() : [],
+        [...(semConferencia ?? [])],
+      ])
     ).rows.map((r) => r.organization_id);
   } catch (error) {
     logger.error("[prospecting] consulta das organizações a preparar falhou", {
@@ -681,13 +976,34 @@ export async function tickProspecting(pool: pg.Pool, admin: SupabaseClient, requ
         }
         // (Nada de fetch de site aqui dentro: a verificação e a prévia são do
         // `prepararCandidatos`, depois deste bloco e fora do bloqueio.)
-        const c = (
+        // TODAS as campanhas `running` da organização, em ordem determinística
+        // (#3896). Antes era `.rows[0]` SEM `order by`: com duas campanhas em
+        // números diferentes, só UMA enviava por rodada — e qual delas não era
+        // determinístico. O volume do segundo número ficava parado sem ninguém
+        // ver, e a escolha mudava de rodada para rodada.
+        const rodando = (
           await db.query<Campaign>(
-            "select * from prospecting_campaigns where organization_id=$1 and status='running'",
+            "select * from prospecting_campaigns where organization_id=$1 and status='running' order by next_send_at,id",
             [org],
           )
-        ).rows[0];
-        if (c) {
+        ).rows;
+        for (const escolhida of rodando) {
+          // O PRAZO DO TICK vale dentro da organização também: com N campanhas
+          // (uma por número), o laço de fora só confere entre organizações, e
+          // uma org com muitos números estouraria os 180 s sozinha.
+          if (Date.now() >= deadline) break;
+          // RELÊ A CAMPANHA ANTES DE ENVIAR. Entre a seleção e a vez dela, o
+          // operador pode ter pausado — e enviar com a linha velha seria o
+          // envio que ninguém pediu. O claim do candidato (`status='sending'`
+          // dentro da transação) continua sendo a garantia contra duplicar
+          // depois de um restart; esta leitura cobre o intervalo ANTERIOR.
+          const c = (
+            await db.query<Campaign>(
+              "select * from prospecting_campaigns where organization_id=$1 and status='running' and id=$2",
+              [org, escolhida.id],
+            )
+          ).rows[0];
+          if (!c) continue;
           try {
             await sendNextCandidate(pool, db, admin, c);
           } catch (error) {
@@ -719,7 +1035,54 @@ export async function tickProspecting(pool: pg.Pool, admin: SupabaseClient, requ
                 ? error.message
                 : "Falha inesperada no envio. Confira o histórico antes de retomar.";
 
-            if (doCandidato) {
+            // TERCEIRO CASO, e o único dos três que NÃO é falha: a conexão saiu
+            // de `WORKING` por instantes (reconexão). Antes ele caía no MESMO
+            // `else` da pausa, e a campanha ia para `paused` no instante exato
+            // da queda — a sessão voltava a `WORKING` em segundos e a lista
+            // seguia parada esperando alguém retomar à mão (issue #3073).
+            //
+            // Aqui a fila ESPERA, pelo mesmo mecanismo que ela já usa para
+            // janela fechada, teto diário e ritmo: `next_send_at`. Nenhum
+            // candidato foi tentado (a checagem do canal vem antes de
+            // `attempted_at`), então não há quota queimada, nem candidato a
+            // marcar, nem erro a gravar na campanha — a lista não perdeu nada.
+            if (error instanceof CanalReconectandoError) {
+              // O TETO (issue #3073): esperar o canal voltar TEM LIMITE. Passado
+              // `TETO_DO_ADIAMENTO_MS` desde o primeiro adiamento desta espera
+              // (`c.channel_down_since`), a "reconexão" já não é um
+              // soluço: a campanha PAUSA com a recusa de canal DESCONECTADO — a
+              // mesma frase do `FAILED` —, em vez de seguir "Ativa" sem enviar e
+              // sem aviso para sempre. Pausar deixa o motivo no cartão e volta
+              // num clique; seguir ativa não diz nada a ninguém.
+              const desde = c.channel_down_since
+                ? new Date(c.channel_down_since).getTime()
+                : null;
+              if (desde !== null && Date.now() - desde >= TETO_DO_ADIAMENTO_MS) {
+                await db.query(
+                  "update prospecting_campaigns set status='paused',error=$3,channel_down_since=null,updated_at=now() where organization_id=$1 and id=$2",
+                  [org, c.id, MSG_CANAL_DESCONECTADO],
+                );
+                logger.warn("[prospecting] reconexão além do teto; a campanha foi pausada", {
+                  organization_id: org,
+                  campaign_id: c.id,
+                  esperando_desde: c.channel_down_since,
+                  teto_ms: TETO_DO_ADIAMENTO_MS,
+                });
+              } else {
+                await db.query(
+                  // `greatest`, como a retomada: a vaga já agendada (com o jitter da
+                  // esteira fria) não é ANTECIPADA para o passo curto do adiamento.
+                  "update prospecting_campaigns set next_send_at=greatest(next_send_at,$3),channel_down_since=coalesce(channel_down_since,now()),updated_at=now() where organization_id=$1 and id=$2",
+                  [org, c.id, new Date(Date.now() + error.retomarEmMs)],
+                );
+                logger.info("[prospecting] conexão reconectando; o envio foi adiado e a campanha segue", {
+                  organization_id: org,
+                  campaign_id: c.id,
+                  error: error.message,
+                  retomar_em_ms: error.retomarEmMs,
+                });
+              }
+            } else if (doCandidato) {
               // Marca o candidato e SEGUE: a próxima rodada pega o próximo.
               // `attempted_at` já foi gravado antes do envio, então ele não
               // volta para a fila sozinho.
@@ -775,6 +1138,14 @@ export async function tickProspecting(pool: pg.Pool, admin: SupabaseClient, requ
         org,
         requestId ?? randomUUID(),
         Math.min(deadline, Date.now() + PRAZO_DO_PREPARO_MS),
+        {
+          // #4871: a decisão da rodada, em memória e POR EMPRESA — a empresa
+          // desligada não tem o número dos leads conferido, e a ligada é preparada
+          // na MESMA execução, sem uma leitura de módulos por organização. O resto
+          // das dependências continua sendo o padrão do preparo.
+          conferirWhatsapp: async (_admin, organizacaoId) =>
+            confereWhatsapp(conferirNaInstalacao, semConferencia, organizacaoId),
+        },
       );
     } catch (error) {
       logger.error("[prospecting] preparo automático falhou", {

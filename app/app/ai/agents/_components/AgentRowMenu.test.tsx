@@ -7,7 +7,9 @@
  * motivo no title, alcançável por hover), e quando a recusa chega mesmo assim
  * (a lista estava velha e outro admin promoveu o agente) ela vira frase.
  */
-import { render, screen } from "@testing-library/react";
+import { render as renderBruto, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { ReactElement } from "react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -19,14 +21,22 @@ vi.mock("../_actions", () => ({
   archiveAgentAction: vi.fn(),
   duplicateAgentAction: vi.fn(),
   pauseAgentAction: vi.fn(),
+  renameAgentAction: vi.fn(),
   unpauseAgentAction: vi.fn(),
 }));
 
 import { toast } from "sonner";
-import { archiveAgentAction } from "../_actions";
+import { archiveAgentAction, duplicateAgentAction, renameAgentAction } from "../_actions";
+import { agentsListQueryKey } from "@/hooks/ai/useAgents";
 import { AgentRowMenu } from "./AgentRowMenu";
 
-const FRASE = "O agent padrão da organização não pode ser arquivado.";
+let queryClient: QueryClient;
+function render(ui: ReactElement) {
+  queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return renderBruto(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>);
+}
+
+const FRASE = "O agente padrão da organização não pode ser arquivado.";
 
 function agente(isDefault: boolean): AgentRow {
   return {
@@ -86,5 +96,77 @@ describe("AgentRowMenu — o agente padrão não se arquiva", () => {
 
     await vi.waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
     expect(toast.error).toHaveBeenCalledWith(FRASE);
+  });
+});
+
+describe("AgentRowMenu — o ⋯ cabe o dedo no celular", () => {
+  // `size-8` sem prefixo derrubava o `h-11 w-11` do size `icon` em toda largura:
+  // no celular o gatilho tinha 32px. Com `md:` o computador segue igual.
+  it("o gatilho não encolhe abaixo de md", () => {
+    render(<AgentRowMenu agent={agente(false)} />);
+    const classes = screen.getByRole("button", { name: "Menu de ações" }).className.split(/\s+/);
+
+    expect(classes).not.toContain("size-8");
+    expect(classes).toContain("h-11");
+    expect(classes).toContain("md:size-8");
+  });
+});
+
+/**
+ * Duplicar e renomear pela lista não apareciam até a pessoa apertar F5. A lista
+ * vem de `useAgentsList` (React Query, com `initialData` do servidor), e o
+ * `router.refresh()` só entrega um `initialData` novo — que o React Query
+ * ignora com o cache já cheio. O conserto invalida a chave da lista.
+ */
+describe("AgentRowMenu — a lista acompanha a ação sem F5", () => {
+  beforeEach(() => {
+    vi.mocked(duplicateAgentAction).mockReset();
+    vi.mocked(renameAgentAction).mockReset();
+  });
+
+  it("duplicar invalida a lista de agentes", async () => {
+    vi.mocked(duplicateAgentAction).mockResolvedValue({ ok: true, data: { new_id: "x" } });
+    const user = userEvent.setup({ delay: null });
+    render(<AgentRowMenu agent={agente(false)} />);
+    const invalidar = vi.spyOn(queryClient, "invalidateQueries");
+
+    await user.click(screen.getByRole("button", { name: "Menu de ações" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Duplicar" }));
+
+    await vi.waitFor(() =>
+      expect(invalidar).toHaveBeenCalledWith({ queryKey: agentsListQueryKey }),
+    );
+  });
+
+  it("renomear invalida a lista de agentes", async () => {
+    vi.mocked(renameAgentAction).mockResolvedValue({ ok: true });
+    const user = userEvent.setup({ delay: null });
+    render(<AgentRowMenu agent={agente(false)} />);
+    const invalidar = vi.spyOn(queryClient, "invalidateQueries");
+
+    await user.click(screen.getByRole("button", { name: "Menu de ações" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Renomear" }));
+    const campo = await screen.findByLabelText("Nome");
+    await user.clear(campo);
+    await user.type(campo, "Atendente novo");
+    await user.click(screen.getByRole("button", { name: "Salvar" }));
+
+    await vi.waitFor(() =>
+      expect(invalidar).toHaveBeenCalledWith({ queryKey: agentsListQueryKey }),
+    );
+    expect(renameAgentAction).toHaveBeenCalledWith(agente(false).id, "Atendente novo");
+  });
+
+  it("falha na ação não recarrega a lista", async () => {
+    vi.mocked(duplicateAgentAction).mockResolvedValue({ ok: false, error: "internal_error" });
+    const user = userEvent.setup({ delay: null });
+    render(<AgentRowMenu agent={agente(false)} />);
+    const invalidar = vi.spyOn(queryClient, "invalidateQueries");
+
+    await user.click(screen.getByRole("button", { name: "Menu de ações" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Duplicar" }));
+
+    await vi.waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(invalidar).not.toHaveBeenCalled();
   });
 });

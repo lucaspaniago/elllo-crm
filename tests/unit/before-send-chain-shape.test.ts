@@ -28,14 +28,21 @@ const ORDEM_ESPERADA = [
   "lgpd",
   "pacing",
   "messaging_window",
+  "teto_de_respostas",
   "spinning",
   "promise",
+  "concessao_sem_lastro",
   "semantic_promise",
   "factual_claim",
   "case_promise",
   "internal_vocabulary",
+  // Fork elllo (9005): o que o Lucas contou do contato não vai ao contato.
+  "nota_do_lucas",
   "clinical_claim",
+  "commercial_restriction",
   "agenda_stall",
+  "horario_da_agenda",
+  "registro_sem_efeito",
   "disclosure",
 ] as const;
 
@@ -58,6 +65,16 @@ describe("forma da cadeia before_send", () => {
     expect(nomes.indexOf("messaging_window")).toBe(nomes.indexOf("pacing") + 1);
   });
 
+  it("o teto de respostas por conversa roda depois da janela e antes do spinning (#4590)", () => {
+    // A janela da plataforma decide se o envio é permitido; o teto por conversa
+    // conta quantas respostas ESTE atendimento já teve; o spinning julga a cópia
+    // contra o histórico do NÚMERO. Nesta ordem, o gate mais barato (um count por
+    // conversa, já lido sob o lock) barra antes do que carrega a janela de cópias.
+    const nomes = BEFORE_SEND_GATES.map((g) => g.name);
+    expect(nomes.indexOf("teto_de_respostas")).toBe(nomes.indexOf("messaging_window") + 1);
+    expect(nomes.indexOf("teto_de_respostas")).toBeLessThan(nomes.indexOf("spinning"));
+  });
+
   it("lgpd vem antes de qualquer gate que gaste recurso", () => {
     const nomes = BEFORE_SEND_GATES.map((g) => g.name);
     expect(nomes.indexOf("lgpd")).toBeLessThan(nomes.indexOf("pacing"));
@@ -67,8 +84,8 @@ describe("forma da cadeia before_send", () => {
     // O par (tamanho, versão) é o que amarra os dois. Acrescentar um gate sem
     // bumpar deixa o trace de auditoria mentindo sobre qual cadeia rodou — e o
     // trace é justamente a prova que as Fases 0–2 usam para dizer "não regrediu".
-    expect(BEFORE_SEND_GATES).toHaveLength(13);
-    expect(BEFORE_SEND_CHAIN_VERSION).toBe(9);
+    expect(BEFORE_SEND_GATES).toHaveLength(19);
+    expect(BEFORE_SEND_CHAIN_VERSION).toBe(15);
   });
 
   it("internal_vocabulary roda ANTES do disclosure — inspeciona o texto do modelo, não o emendado", () => {
@@ -90,12 +107,38 @@ describe("forma da cadeia before_send", () => {
     // Mesma razão dos dois vizinhos: o disclosure pode emendar o corpo, e a afirmação
     // clínica que se quer barrar é a que o MODELO escreveu.
     const nomes = BEFORE_SEND_GATES.map((g) => g.name);
-    expect(nomes.indexOf("clinical_claim")).toBe(nomes.indexOf("internal_vocabulary") + 1);
-    expect(nomes.indexOf("agenda_stall")).toBe(nomes.indexOf("clinical_claim") + 1);
+    // Fork elllo (9005): `nota_do_lucas` fica entre os dois (também lê só o texto do modelo).
+    expect(nomes.indexOf("clinical_claim")).toBe(nomes.indexOf("nota_do_lucas") + 1);
+    expect(nomes.indexOf("commercial_restriction")).toBe(nomes.indexOf("clinical_claim") + 1);
+    expect(nomes.indexOf("agenda_stall")).toBe(nomes.indexOf("commercial_restriction") + 1);
   });
 
   it("nenhum gate repetido — nome duplicado quebraria a leitura do trace", () => {
     const nomes = BEFORE_SEND_GATES.map((g) => g.name);
     expect(new Set(nomes).size).toBe(nomes.length);
+  });
+
+  it("registro_sem_efeito fica entre agenda_stall e o disclosure — texto do modelo, nunca o emendado", () => {
+    // #3333. A mesma razão da agenda: o disclosure pode EMENDAR o corpo, e a afirmação que
+    // este gate julga ("já registrei seu interesse") é a que o MODELO escreveu.
+    const nomes = BEFORE_SEND_GATES.map((g) => g.name);
+    expect(nomes.indexOf("registro_sem_efeito")).toBeGreaterThan(nomes.indexOf("agenda_stall"));
+    expect(nomes.indexOf("registro_sem_efeito")).toBeLessThan(nomes.indexOf("disclosure"));
+  });
+
+  it("concessao_sem_lastro fica logo depois de promise e antes de semantic_promise", () => {
+    // O primeiro erro de ensino sobre um valor que só o cliente trouxe tem de ser este:
+    // o do semântico ensina só a mudar a forma da frase, e o valor continuaria nela.
+    const nomes = BEFORE_SEND_GATES.map((g) => g.name);
+    expect(nomes.indexOf("concessao_sem_lastro")).toBe(nomes.indexOf("promise") + 1);
+    expect(nomes.indexOf("semantic_promise")).toBe(nomes.indexOf("concessao_sem_lastro") + 1);
+  });
+
+  it("horario_da_agenda fica logo depois de agenda_stall — a família da agenda junta, antes do disclosure", () => {
+    // #3596. Confere o dia+horário que o MODELO escreveu contra o que a agenda devolveu;
+    // depois de o disclosure emendar o corpo, o texto julgado já não seria só dele.
+    const nomes = BEFORE_SEND_GATES.map((g) => g.name);
+    expect(nomes.indexOf("horario_da_agenda")).toBe(nomes.indexOf("agenda_stall") + 1);
+    expect(nomes.indexOf("horario_da_agenda")).toBeLessThan(nomes.indexOf("disclosure"));
   });
 });

@@ -2,7 +2,7 @@
 
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useTransition, useState } from "react";
+import { useState } from "react";
 
 import { useT } from "@/hooks/i18n/useT";
 import { forgotPasswordSchema, type ForgotPasswordInput } from "@/lib/auth/schemas";
@@ -10,10 +10,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { requestPasswordReset } from "@/app/actions/auth/requestPasswordReset";
+import { AvisoSemResposta, useEnvioComTeto } from "@/components/auth/teto-da-espera";
 
 export function ForgotPasswordForm() {
   const t = useT();
-  const [isPending, startTransition] = useTransition();
+  const { pendente: isPending, semResposta, enviar } = useEnvioComTeto();
   const [serverError, setServerError] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
 
@@ -28,8 +29,7 @@ export function ForgotPasswordForm() {
 
   const onSubmit = (values: ForgotPasswordInput) => {
     setServerError(null);
-    startTransition(async () => {
-      const res = await requestPasswordReset(values);
+    void enviar(() => requestPasswordReset(values), (res) => {
       if (res.ok) {
         setSent(true);
         return;
@@ -39,12 +39,13 @@ export function ForgotPasswordForm() {
       } else if (res.error === "validation_error") {
         setServerError(t("Email inválido. Confira o campo."));
       } else if (res.error === "smtp_not_configured") {
-        // #2755 — sem SMTP a instalação não envia e-mail NENHUM: dizer
+        // #2755 — sem SMTP e sem Resend no CRM a recuperação nem é tentada: dizer
         // "tente novamente" mandava quem esqueceu a senha repetir um gesto que
-        // nunca vai funcionar. Dizemos o que é, e quem resolve é o administrador.
+        // nunca vai funcionar. A frase diz só o que o CRM sabe (#3039): o SMTP
+        // posto à mão no `.env` do Supabase ele não enxerga.
         setServerError(
           t(
-            "A recuperação de senha não está disponível nesta instalação: sem SMTP configurado não sai e-mail nenhum. Contate o administrador para configurar em /admin/email.",
+            "A recuperação de senha não está disponível nesta instalação: sem SMTP nem Resend configurados no CRM, não enviamos o e-mail de recuperação. Contate o administrador para configurar em /admin/email.",
           ),
         );
       } else {
@@ -91,6 +92,7 @@ export function ForgotPasswordForm() {
           {serverError}
         </div>
       )}
+      {semResposta && <AvisoSemResposta />}
       <Button type="submit" className="w-full" disabled={isPending}>
         {isPending ? t("Enviando...") : t("Enviar link de redefinição")}
       </Button>

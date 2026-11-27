@@ -43,7 +43,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { useT } from "@/hooks/i18n/useT";
+import { irAoDesafioDeMfa } from "@/lib/auth/ir-ao-desafio-de-mfa";
 
 /** Todo motivo de recusa que as DUAS actions sabem devolver. */
 type CodigoDeRecusa =
@@ -57,7 +59,7 @@ type CodigoDeRecusa =
  * Uma frase por código, e não "Não deu para salvar" para todos, porque os
  * motivos levam a consertos diferentes: `endpoint_inseguro` é o operador
  * trocando o endereço, `forbidden_role` é ele chamando quem é o dono, e
- * `mfa_required` é ele refazendo o login. Um texto genérico mandaria os três
+ * `mfa_required` é ele informando o código (a tela leva ao desafio). Um texto genérico mandaria os três
  * tentarem de novo — o único que não conserta nenhum dos três.
  */
 export const MENSAGEM_DA_RECUSA: Record<CodigoDeRecusa, string> = {
@@ -68,6 +70,8 @@ export const MENSAGEM_DA_RECUSA: Record<CodigoDeRecusa, string> = {
   validation_failed: "Confira o endereço e a chave: um dos dois passou do tamanho aceito.",
   endpoint_inseguro:
     "Endereço recusado por segurança: informe um servidor público em https, sem rede interna, sem localhost e sem segredo colado no endereço.",
+  curinga_nao_aceito:
+    "Curinga não é aceito. Escreva o nome de cada ferramenta de escrita que pode rodar: * ou all liberariam também as ferramentas que o servidor ainda nem anuncia.",
   upstream_unavailable: "Não foi possível falar com o servidor.",
   erro_ao_gravar: "Não foi possível salvar. Tente de novo em instantes.",
   sem_servidor:
@@ -79,10 +83,16 @@ interface FerramentaAnunciada {
   readonly descricao: string | null;
 }
 
-export function CadastroDoServidorMcpExterno() {
+export function CadastroDoServidorMcpExterno({ liberadasIniciais = "" }: { liberadasIniciais?: string }) {
   const t = useT();
   const [endpoint, setEndpoint] = useState("");
   const [chave, setChave] = useState("");
+  /**
+   * As ESCRITAS liberadas (#4445) para a conexão do servidor compartilhado, uma
+   * por linha. Abre com a lista JÁ GRAVADA: o salvar sempre manda este campo, e
+   * começar em branco apagaria as liberações de quem só trocou o endereço.
+   */
+  const [liberadasConexao, setLiberadasConexao] = useState(liberadasIniciais);
   const [erro, setErro] = useState<string | null>(null);
   /** O desfecho que deu certo (salvou, testou ou removeu). */
   const [aviso, setAviso] = useState<string | null>(null);
@@ -92,6 +102,12 @@ export function CadastroDoServidorMcpExterno() {
     null,
   );
   const [pendente, iniciar] = useTransition();
+
+  /** A recusa em frase; a do código leva ao desafio, que entrar de novo não traria. */
+  function recusar(codigo: CodigoDeRecusa) {
+    if (codigo === "mfa_required") irAoDesafioDeMfa();
+    setErro(t(MENSAGEM_DA_RECUSA[codigo]));
+  }
 
   /** Zera o retrato da rodada anterior — nenhuma frase antiga sobrevive a um clique. */
   function limparRetrato() {
@@ -111,9 +127,13 @@ export function CadastroDoServidorMcpExterno() {
       return;
     }
     iniciar(async () => {
-      const r = await definirServidorMcpExterno({ endpoint, chave });
+      const r = await definirServidorMcpExterno({
+        endpoint,
+        chave,
+        escritasLiberadasConexao: liberadasConexao,
+      });
       if (!r.ok) {
-        setErro(t(MENSAGEM_DA_RECUSA[r.error]));
+        recusar(r.error);
         return;
       }
       // A ÚNICA janela em que a chave é mostrada — e só o fim dela (ver o
@@ -132,11 +152,13 @@ export function CadastroDoServidorMcpExterno() {
       // salvar, com o mesmo gate de permissão e a mesma trilha de auditoria.
       const r = await definirServidorMcpExterno({ endpoint: "", chave: "" });
       if (!r.ok) {
-        setErro(t(MENSAGEM_DA_RECUSA[r.error]));
+        recusar(r.error);
         return;
       }
       setEndpoint("");
       setChave("");
+      // A liberação de escrita continua gravada (é decisão separada do
+      // cadastro): sem servidor registrado, ela não alcança nada.
       setAviso(t("Servidor externo removido. A IA desta empresa não alcança mais o sistema de fora."));
     });
   }
@@ -146,7 +168,7 @@ export function CadastroDoServidorMcpExterno() {
     iniciar(async () => {
       const r = await listarFerramentasMcpExternas();
       if (!r.ok) {
-        setErro(t(MENSAGEM_DA_RECUSA[r.error]));
+        recusar(r.error);
         return;
       }
       setTeste({
@@ -223,6 +245,39 @@ export function CadastroDoServidorMcpExterno() {
           >
             {t("Remover")}
           </Button>
+        </CardContent>
+      </Card>
+
+      {/* #4445 — a liberação de ESCRITA. Fica em card próprio porque é outra
+          decisão: o cadastro diz QUAL sistema a IA alcança; este diz o que ela
+          pode ALTERAR nele durante uma conversa. */}
+      <Card>
+        <CardHeader>
+          <CardTitle>{t("Ferramentas de escrita liberadas")}</CardTitle>
+          <CardDescription>
+            {t(
+              "A liberação nasce vazia: enquanto esta lista estiver em branco, nenhuma ferramenta de escrita roda durante o atendimento — a IA consulta, mas não altera nada no sistema de fora. Deixar em branco e salvar revoga as liberações.",
+            )}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="mcp-escrita-conexao">{t("Só para esta conexão (servidor compartilhado)")}</Label>
+            <Textarea
+              id="mcp-escrita-conexao"
+              data-testid="escritas-conexao"
+              rows={3}
+              spellCheck={false}
+              placeholder="criar_agendamento"
+              value={liberadasConexao}
+              onChange={(e) => setLiberadasConexao(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              {t(
+                "Uma ferramenta por linha, com o nome exato que o servidor anuncia. A lista é explícita: curinga (*, all, todos) não é aceito.",
+              )}
+            </p>
+          </div>
         </CardContent>
       </Card>
 

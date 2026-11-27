@@ -35,7 +35,8 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useActiveOrg } from "@/hooks/auth/AuthProvider";
 import { useContactTagVocabulary } from "@/hooks/contacts/useContactTagVocabulary";
-import { useDeleteContact, mensagemDeBloqueioPorVinculo } from "@/hooks/contacts/useDeleteContact";
+import { useCamposDeContatoDaOrg } from "@/hooks/contacts/useCamposDeContatoDaOrg";
+import { useDeleteContact, mensagemDeBloqueioPorVinculo, destinoDoBloqueio } from "@/hooks/contacts/useDeleteContact";
 import type { ContactOrderBy } from "@/lib/schemas/contacts";
 import type { Contact } from "@/lib/types/contacts";
 import { rotuloParaAEquipe } from "@/lib/contacts/rotulo-do-contato";
@@ -141,10 +142,13 @@ export function ContactsTable({
   const vocabularioDeEtiquetas = useContactTagVocabulary(orgAtiva?.orgId ?? null);
   const del = useDeleteContact();
   const [alvo, setAlvo] = useState<Contact | null>(null);
-  // Issue #2715 — editar pela linha, sem abrir a ficha. Sem customFieldDefs:
-  // o contrato do diálogo some a seção de campos do funil, e o caminho rápido
-  // coexiste com o completo (quem precisa dos campos abre a ficha, como hoje).
+  // Issue #2715 — editar pela linha, sem abrir a ficha.
+  // Issue #4929 — e com os MESMOS campos personalizados da ficha: a lista não
+  // tem funil único, então o conjunto é a união dos campos de CONTATO de todos
+  // os funis, que é exatamente o que o PATCH valida. Uma chamada só, pelo mesmo
+  // leitor do servidor (`defsDeContatoDaOrg`).
   const [contatoEmEdicao, setContatoEmEdicao] = useState<Contact | null>(null);
+  const camposDeContato = useCamposDeContatoDaOrg(Boolean(orgAtiva?.orgId));
   const router = useRouter();
   const qc = useQueryClient();
   // Issue #2382 — seletor de canal ao INICIAR a conversa. O diálogo é o retorno
@@ -202,10 +206,15 @@ export function ContactsTable({
     }
   }
 
+  // Abaixo de `md` cada linha vira um cartão (só CSS, como o Inbox: o DOM é o
+  // mesmo nas duas larguras). O telefone e a última atividade alinham sob o
+  // nome, que começa depois da caixa de seleção quando ela existe.
+  const recuoSobONome = onAlternarSelecao ? "max-md:pl-7.5" : "max-md:pl-0";
+
   return (
     <>
-    <Table>
-      <TableHeader>
+    <Table className="max-md:block">
+      <TableHeader className="max-md:hidden">
         <TableRow>
           {/*
             Cabeça da seleção em lote (#2484, F3): marca de uma vez tudo o que
@@ -267,11 +276,14 @@ export function ContactsTable({
           </TableHead>
         </TableRow>
       </TableHeader>
-      <TableBody>
+      <TableBody className="max-md:block">
         {contacts.map((c) => (
-          <TableRow key={c.id} className="cursor-pointer">
+          <TableRow
+            key={c.id}
+            className="cursor-pointer max-md:flex max-md:flex-wrap max-md:items-center max-md:gap-x-3.5 max-md:px-4 max-md:py-2"
+          >
             {onAlternarSelecao && (
-              <TableCell>
+              <TableCell className="max-md:p-0">
                 <button
                   type="button"
                   role="checkbox"
@@ -279,24 +291,29 @@ export function ContactsTable({
                   aria-label={`${t("Selecionar contato")} ${displayName(c, t)}`}
                   data-testid={`selecionar-contato-${c.id}`}
                   onClick={() => onAlternarSelecao(c.id)}
-                  className="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border border-muted-foreground bg-background transition-colors hover:bg-surface-elevated focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-accent"
+                  className="relative flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border border-muted-foreground bg-background transition-colors hover:bg-surface-elevated focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-accent pointer-coarse:before:absolute pointer-coarse:before:-inset-3.5"
                 >
                   {selecionados?.has(c.id) && <Check size={12} weight="bold" aria-hidden />}
                 </button>
               </TableCell>
             )}
-            <TableCell className="font-medium">
-              <Link href={`/app/contacts/${c.id}`} className="hover:underline">
+            <TableCell className="font-medium max-md:min-w-0 max-md:flex-1 max-md:p-0 max-md:wrap-anywhere">
+              <Link
+                href={`/app/contacts/${c.id}`}
+                className="hover:underline max-md:flex max-md:min-h-11 max-md:items-center"
+              >
                 {displayName(c)}
               </Link>
             </TableCell>
-            <TableCell className="text-muted-foreground">
+            <TableCell className="text-muted-foreground max-md:hidden">
               {c.email ?? "—"}
             </TableCell>
-            <TableCell className="text-muted-foreground">
+            <TableCell
+              className={`text-muted-foreground max-md:basis-full max-md:py-0 max-md:pr-0 max-md:text-xs ${recuoSobONome}`}
+            >
               {c.phone_number ? phoneForDisplay(c.phone_number) : "—"}
             </TableCell>
-            <TableCell>
+            <TableCell className="max-md:hidden">
               <div className="flex flex-wrap gap-1">
                 {c.tags.length === 0
                   ? <span className="text-muted-foreground text-xs">—</span>
@@ -305,12 +322,14 @@ export function ContactsTable({
                     ))}
               </div>
             </TableCell>
-            <TableCell className="text-muted-foreground text-sm">
+            <TableCell
+              className={`text-muted-foreground text-sm max-md:py-0 max-md:pr-0 max-md:text-xs ${recuoSobONome}`}
+            >
               {c.last_activity_at
                 ? formatUltimaAtividade(c.last_activity_at, localeDaData)
                 : "—"}
             </TableCell>
-            <TableCell>
+            <TableCell className="max-md:min-w-0 max-md:flex-1 max-md:p-0">
               <div className="flex flex-wrap gap-1">
                 {c.is_anonymized && <Badge variant="destructive">{t("Anonimizado")}</Badge>}
                 {c.is_blocked && <Badge variant="warning">{t("Bloqueado")}</Badge>}
@@ -336,10 +355,10 @@ export function ContactsTable({
                 )}
               </div>
             </TableCell>
-            <TableCell>
+            <TableCell className="max-md:p-0">
               <div className="flex items-center justify-end gap-0.5">
                 {c.conversa ? (
-                  <Button variant="ghost" size="icon" className="h-8 w-8" asChild>
+                  <Button variant="ghost" size="icon" className="md:h-8 md:w-8" asChild>
                     <Link
                       href={`/app/inbox?id=${c.conversa.id}`}
                       title={t("Abrir conversa no Inbox")}
@@ -355,7 +374,7 @@ export function ContactsTable({
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="h-8 w-8"
+                    className="md:h-8 md:w-8"
                     title={t("Iniciar conversa no Inbox")}
                     aria-label={`${t("Iniciar conversa com")} ${displayName(c, t)} ${t("no Inbox")}`}
                     disabled={abrindo}
@@ -370,7 +389,7 @@ export function ContactsTable({
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="h-8 w-8"
+                    className="md:h-8 md:w-8"
                     title={t("Editar contato")}
                     aria-label={`${t("Editar contato")} ${displayName(c, t)}`}
                     onClick={() => setContatoEmEdicao(c)}
@@ -381,7 +400,7 @@ export function ContactsTable({
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-8 w-8 text-muted-foreground hover:text-error-fg"
+                  className="text-muted-foreground hover:text-error-fg md:h-8 md:w-8"
                   title={t("Excluir contato")}
                   aria-label={`${t("Excluir contato")} ${displayName(c, t)}`}
                   onClick={() => setAlvo(c)}
@@ -412,8 +431,8 @@ export function ContactsTable({
             {avisoDeVinculo ? (
               <span className="mt-2 block text-sm font-medium text-warning-fg">
                 {avisoDeVinculo}{" "}
-                <Link href="/app/agenda" className="underline">
-                  {t("Abrir Agenda")}
+                <Link href={destinoDoBloqueio(vinculos.data).href} className="underline">
+                  {t(destinoDoBloqueio(vinculos.data).rotulo)}
                 </Link>
               </span>
             ) : null}
@@ -432,12 +451,18 @@ export function ContactsTable({
       </AlertDialogContent>
     </AlertDialog>
     {/* Issue #2715 — edição pela linha. Montado só com alvo escolhido, no
-        mesmo molde do AlertDialog de exclusão: fechar zera o state. */}
+        mesmo molde do AlertDialog de exclusão: fechar zera o state.
+        Issue #4929 — com os campos personalizados do contato, que a ficha já
+        mostrava. `camposDeTodosOsFunis` só muda a frase da seção: o diálogo
+        diz de onde vêm os campos em vez de repetir a da ficha, que fala do
+        funil padrão. */}
     {contatoEmEdicao && (
       <EditContactDialog
         contact={contatoEmEdicao}
         open
         onOpenChange={(v) => { if (!v) setContatoEmEdicao(null); }}
+        customFieldDefs={camposDeContato.data ?? []}
+        camposDeTodosOsFunis
         vocabulario={vocabularioDeEtiquetas.data}
       />
     )}

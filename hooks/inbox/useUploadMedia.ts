@@ -6,6 +6,12 @@ import { ApiError, type ApiErrorBody } from "@/lib/api/types";
 
 export interface UploadedMedia {
   storage_path: string;
+  /**
+   * O nome como a pessoa escolheu o arquivo (#4457) — o caminho no bucket é
+   * `out-<uuid>.<ext>`. Ausente na rota de nota interna, que não sai para o
+   * cliente.
+   */
+  media_filename?: string | null;
   media_mime: string;
   media_size_bytes: number;
   kind: "image" | "video" | "audio" | "document";
@@ -30,9 +36,12 @@ export function useUploadMedia() {
       file: File | Blob;
       filename?: string;
       destino?: DestinoDoUpload;
+      /** Gravação do composer: o servidor converte para opus (F2, o AAC do iPhone). */
+      notaDeVoz?: boolean;
     }) => {
       const form = new FormData();
       form.append("file", args.file, args.filename ?? (args.file instanceof File ? args.file.name : "audio"));
+      if (args.notaDeVoz) form.append("nota_de_voz", "1");
       const rota = args.destino === "nota" ? "notes/media" : "media";
       const res = await fetch(`/api/v1/conversations/${args.conversationId}/${rota}`, {
         method: "POST",

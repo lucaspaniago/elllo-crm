@@ -1,13 +1,15 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useState } from "react";
 
 import { useT } from "@/hooks/i18n/useT";
 import { recoverOrganization } from "@/app/actions/auth/recoverOrganization";
+import { AvisoSemResposta, useEnvioComTeto } from "@/components/auth/teto-da-espera";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { PlanoDoCadastro } from "@/lib/cobranca/cadastro";
+import { formatCents } from "@/lib/money";
 
 /**
  * As frases em português são as CHAVES do dicionário — a mesma convenção do
@@ -59,17 +61,19 @@ export function RecoverOrganizationForm({
   const [name, setName] = useState(nomeSugerido ?? "");
   const [plano, setPlano] = useState(planoInicial ?? "");
   const [error, setError] = useState<string | null>(null);
-  const [isPending, startTransition] = useTransition();
+  const { pendente: isPending, semResposta, enviar } = useEnvioComTeto();
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
-    startTransition(async () => {
-      const result = await recoverOrganization(name, plano || undefined);
-      // O caminho de sucesso não volta: a action redireciona (onboarding, ou a
-      // própria tela mostrando o pedido enviado).
-      if (!result.ok) setError(t(MENSAGENS[result.error] ?? MENSAGENS.provision_failed!));
-    });
+    // O caminho de sucesso não volta: a action redireciona (onboarding, ou a
+    // própria tela mostrando o pedido enviado).
+    void enviar(
+      () => recoverOrganization(name, plano || undefined),
+      (result) => {
+        if (!result.ok) setError(t(MENSAGENS[result.error] ?? MENSAGENS.provision_failed!));
+      },
+    );
   }
 
   return (
@@ -98,7 +102,7 @@ export function RecoverOrganizationForm({
           >
             {planos.map((p) => (
               <option key={p.id} value={p.id}>
-                {p.nome} — {new Intl.NumberFormat(undefined, { style: "currency", currency: "BRL" }).format(p.preco_cents / 100)} / {p.intervalo === "ano" ? t("ano") : t("mês")}
+                {p.nome} — {formatCents(p.preco_cents, p.moeda)} / {p.intervalo === "ano" ? t("ano") : t("mês")}
                 {p.trial_dias > 0 ? ` · ${p.trial_dias} ${t("dias de teste")}` : ` · ${t("sem período de teste")}`}
               </option>
             ))}
@@ -110,6 +114,7 @@ export function RecoverOrganizationForm({
           {error}
         </p>
       )}
+      {semResposta && <AvisoSemResposta />}
       <Button className="w-full" type="submit" disabled={isPending || name.trim().length < 2}>
         {isPending
           ? t("Preparando seu ambiente…")

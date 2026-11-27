@@ -8,6 +8,7 @@ import { useT } from "@/hooks/i18n/useT";
 import { AgentForm, type ChannelSessionLite } from "./AgentForm";
 import type { CoberturaPorFunil } from "./FunisDoAgente";
 import type { MaterialDoAcervo } from "./BasesDoAgente";
+import type { SkillDisponivel } from "@/lib/ai/skills/skills-do-agente";
 import type { FunilDaResposta } from "@/hooks/pipelines/usePipelines";
 import { TestPanel } from "./TestPanel";
 import { RunsTable } from "./RunsTable";
@@ -22,8 +23,18 @@ interface Props {
   /** Funis da org, para a marcação de escopo do agente (spec 17 passo 3). */
   funis?: FunilDaResposta[];
   cobertura?: CoberturaPorFunil;
+  /**
+   * Funil de entrada por número (#4921) — ver `AgentForm`. Obrigatório aqui (a
+   * página é a única que monta as abas): esquecer de passá-lo apagaria em
+   * silêncio o aviso do funil de entrada por número (#4940).
+   */
+  funilDeEntradaPorNumero: Record<string, string | null>;
+  /** Números dos roteadores ativos que levam conversa a este agente (#4940). */
+  numerosDoRoteador: string[];
   /** O acervo da organização, para a seção "o que ele consulta" (0181). */
   materiais?: MaterialDoAcervo[];
+  /** As skills da organização, para a seção "quais skills ele usa" (9107). */
+  skills?: SkillDisponivel[];
   agent: AgentRow;
   draft: AgentVersionRow | null;
   published: AgentVersionRow | null;
@@ -38,9 +49,11 @@ interface Props {
   /** Os provedores que a instalação oferece — ver `AgentForm`. */
   provedoresOferecidos?: readonly string[];
   channelSessions: ChannelSessionLite[];
-  routerMembership?: { routerId: string; routerName: string } | null;
+  routerMembership?: { routerId: string; routerName: string; channelSessionId: string; channelStatus: string | null } | null;
   readOnly?: boolean;
   organizationTimezone?: string;
+  /** Módulo opcional `mcp_por_agente` ligado — ver `AgentForm`. */
+  mcpPorAgente?: boolean;
 }
 
 export function AgentTabs(props: Props) {
@@ -81,10 +94,14 @@ export function AgentTabs(props: Props) {
           channelSessions={props.channelSessions}
           funis={props.funis}
           cobertura={props.cobertura}
+          funilDeEntradaPorNumero={props.funilDeEntradaPorNumero}
+          numerosDoRoteador={props.numerosDoRoteador}
           materiais={props.materiais}
+          skills={props.skills}
           routerMembership={props.routerMembership}
           readOnly={props.readOnly}
           organizationTimezone={props.organizationTimezone}
+          mcpPorAgente={props.mcpPorAgente}
         />
       </TabsContent>
 
@@ -94,6 +111,7 @@ export function AgentTabs(props: Props) {
           draft={props.draft}
           published={props.published}
           readOnly={props.readOnly}
+          channelSessions={props.channelSessions}
         />
       </TabsContent>
 

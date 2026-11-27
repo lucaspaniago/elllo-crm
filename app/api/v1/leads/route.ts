@@ -10,8 +10,9 @@ import { type NextRequest } from "next/server";
 
 import { ApiError } from "@/lib/api/types";
 import { ok, fail } from "@/lib/api/wrappers";
+import { resolveAuthDual, tetoDeEscritaDoToken } from "@/lib/api/auth-dual";
 import { requireRole } from "@/lib/auth/require-role";
-import type { VisibilityMode } from "@/lib/auth/types";
+import { somenteOProprio, type VisibilityMode } from "@/lib/auth/types";
 import {
   AVISO_NEGOCIO_ABERTO_EXISTENTE,
   negocioAbertoExistente,
@@ -19,7 +20,7 @@ import {
 import { createLeadSchema, validateRequest, type CreateLeadInput } from "@/lib/schemas";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { logger } from "@/lib/logger";
-import { createClient } from "@/lib/supabase/server";
+import { IDIOMA_PADRAO } from "@/lib/i18n/idiomas";
 
 import { createLeadHandler } from "./_handler";
 
@@ -32,9 +33,17 @@ export async function POST(req: NextRequest): Promise<Response> {
   const requestId = randomUUID();
 
   // spec 13 §4: escrita é agent+ (viewer é read-only).
-  const authz = await requireRole("agent", { requestId, resource: "crm_leads" });
+  const authz = await resolveAuthDual(req, {
+    requestId,
+    resource: "crm_leads",
+    role: "agent",
+    scope: "mcp:write",
+  });
   if (!authz.ok) return authz.response;
-  const { user: authUser, org: activeOrg } = authz;
+  const teto = await tetoDeEscritaDoToken(authz, "leads_create", requestId);
+  if (teto) return teto;
+  const { organizationId, actor, idioma } = authz;
+  const t = (texto: string) => traduzir(texto, idioma ?? IDIOMA_PADRAO);
 
   let input;
   try {
@@ -64,8 +73,15 @@ export async function POST(req: NextRequest): Promise<Response> {
   // Gerente e admin enxergam a organização inteira e criam como sempre. O modo
   // vem da org do cookie validado, nunca do corpo — admin client, como em
   // `app/app/layout.tsx`.
+  // O papel real só existe na sessão (o token não é "o Atendente"): o responsável
+  // padrão é do papel `agent`, como era antes da porta do token.
+  let papelDaSessao: string | null = null;
+  if (authz.via === "session") {
+    const sessao = await requireRole("viewer", { requestId, resource: "crm_leads" });
+    if (sessao.ok) papelDaSessao = sessao.org.role;
+  }
   if (
-    activeOrg.role === "agent" &&
+    papelDaSessao === "agent" &&
     input.owner_user_id === undefined &&
     input.owner_agent_id === undefined
   ) {
@@ -75,7 +91,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     const { data: orgRow, error: orgErr } = await admin
       .from("organizations")
       .select("settings")
-      .eq("id", activeOrg.orgId)
+      .eq("id", organizationId)
       .maybeSingle();
     // Leitura do modo falhou: segue SEM o padrão e registra. Seguir não amplia
     // acesso (a RLS de `crm_leads` lê o mesmo modo e decide); derrubar a criação
@@ -84,12 +100,16 @@ export async function POST(req: NextRequest): Promise<Response> {
     if (orgErr) {
       logger.error("leads.create: leitura do modo de visibilidade falhou; segue sem responsável padrão", {
         requestId,
-        orgId: activeOrg.orgId,
+        orgId: organizationId,
         error: orgErr.message,
       });
     }
     const modo = (orgRow?.settings as { visibility_mode?: VisibilityMode } | null)?.visibility_mode;
-    if (modo === "own") {
+    // `modo === "own"` estava escrito à mão aqui, na tela do Inbox e no catálogo
+    // de recursos — três cópias da MESMA pergunta. Agora ela é um predicado só
+    // (`somenteOProprio`), e a #3479 é o que acontece quando uma das cópias fica
+    // para trás: no negócio o criador vira responsável, na conversa não.
+    if (somenteOProprio(modo)) {
       // ─── CARTEIRA DE OUTRO VENDEDOR (issue #2591, regra 4) ─────────────────
       //
       // O padrão do #2547 acima dá o negócio a quem o criou — mas isso só é
@@ -101,23 +121,27 @@ export async function POST(req: NextRequest): Promise<Response> {
       //
       // O dono que NÃO conta (viewer, revogado, de outra org) passa como
       // `donoDaCarteira: null` — aí nada muda, que é o padrão.
-      const carteira = await carteiraDoContato(admin, activeOrg.orgId, input.contact_id);
+      const carteira = await carteiraDoContato(admin, organizationId, input.contact_id);
       if (
         recusaNegocioNaCarteiraDeOutro({
           modo,
-          criadorId: authUser.id,
+          criadorId: actor.id,
           donoDaCarteira: carteira.qualificado ? carteira.dono : null,
         })
       ) {
-        return fail("carteira_de_outro_vendedor", traduzir(MOTIVO_DA_RECUSA, authUser.idioma), 403, {
+        return fail("carteira_de_outro_vendedor", t(MOTIVO_DA_RECUSA), 403, {
           requestId,
         });
       }
-      input = { ...input, owner_user_id: authUser.id };
+      // Só a sessão chega aqui (papelDaSessao), logo o ator é pessoa; o guarda é explícito
+      // para que o id de um token nunca vá para coluna de pessoa (tests/unit/ator-modulo-nao-vira-pessoa).
+      if (actor.type === "user") {
+        input = { ...input, owner_user_id: actor.id };
+      }
     }
   }
 
-  const supabase = await createClient();
+  const supabase = authz.supabase;
 
   // ─── AVISO DE NEGÓCIO ABERTO DUPLICADO (issue #1751) ───────────────────────
   //
@@ -131,7 +155,7 @@ export async function POST(req: NextRequest): Promise<Response> {
   // lead órfão é caminho legítimo (#852).
   const negocioExistente = input.contact_id
     ? await negocioAbertoExistente(supabase, {
-        organizationId: activeOrg.orgId,
+        organizationId,
         contactId: input.contact_id,
         pipelineId: input.pipeline_id,
       })
@@ -141,10 +165,10 @@ export async function POST(req: NextRequest): Promise<Response> {
     const lead = await createLeadHandler(
       supabase,
       {
-        organization_id: activeOrg.orgId,
-        actor: { type: "user", id: authUser.id },
+        organization_id: organizationId,
+        actor,
         requestId,
-        idioma: authUser.idioma,
+        idioma,
       },
       input as CreateLeadInput,
     );

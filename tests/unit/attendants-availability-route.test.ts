@@ -27,6 +27,11 @@ vi.mock("@/lib/audit", () => ({
   audit: vi.fn(async () => undefined),
 }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
+vi.mock("@/lib/mcp/auth", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/mcp/auth")>()),
+  validateBearerToken: vi.fn(),
+}));
+vi.mock("@/lib/ai/dispatcher/rate-limit", () => ({ checkRateLimit: vi.fn() }));
 
 const ORG = "22222222-2222-4222-8222-222222222222";
 const ANA = "11111111-1111-4111-8111-111111111111";
@@ -142,6 +147,14 @@ describe("GET /api/v1/attendants/availability", () => {
     // presença na tela Equipe) e há leitor não-tela
     // (`crm_list_available_attendants`), e o que a tela consome é `present` —
     // derivado no SERVIDOR com o prazo de `lib/atendimento/presenca.ts`.
+    //
+    // `sector_ids` ENTROU com os setores (0801) e virou lista na 9062: a coluna "Setor" e o
+    // filtro da aba Atendimento leem daqui, sem uma chamada por linha.
+    //
+    // `sector_id` (singular) FICA, mesmo depois do N:N: é o campo que quem já
+    // consome esta resposta lê hoje, e tirá-lo seria quebrar cliente para
+    // entregar recurso novo (revisão do mantenedor, 31/10). Ele carrega o
+    // primeiro setor; o conjunto é `sector_ids`.
     expect(Object.keys(body.data[0] ?? {}).sort()).toEqual(
       [
         "capacity",
@@ -153,6 +166,8 @@ describe("GET /api/v1/attendants/availability", () => {
         "present",
         "role",
         "schedule",
+        "sector_id",
+        "sector_ids",
         "updated_at",
         "user_id",
       ].sort(),

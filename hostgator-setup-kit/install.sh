@@ -41,6 +41,8 @@ dc() {
   # para arquivo ausente derrubaria o compose no meio da instalação.
   local -a ca=()
   if ca_do_supabase_ok && [ -f docker-compose.supabase-ca.yml ]; then ca=(-f docker-compose.supabase-ca.yml); fi
+  # Rede do Supabase self-hosted no mesmo host (gemea de _common.sh).
+  if rede_do_supabase_ok && [ -f docker-compose.supabase-rede.yml ]; then ca+=(-f docker-compose.supabase-rede.yml); fi
   if [ "${SINGLE_SERVER:-0}" = "1" ]; then
     # #2099: o overlay do proxy da hospedagem entra também no single-server.
     case "${REVERSE_PROXY:-caddy}" in
@@ -63,6 +65,9 @@ dc_files() {
   local sufixo=""
   if ca_do_supabase_ok && [ -f docker-compose.supabase-ca.yml ]; then
     sufixo=" -f docker-compose.supabase-ca.yml"
+  fi
+  if rede_do_supabase_ok && [ -f docker-compose.supabase-rede.yml ]; then
+    sufixo="${sufixo} -f docker-compose.supabase-rede.yml"
   fi
   if [ "${SINGLE_SERVER:-0}" = "1" ]; then
     case "${REVERSE_PROXY:-caddy}" in
@@ -110,10 +115,17 @@ ca_do_supabase() {
 # Idem _common.sh: silenciosa, para as decisões de montagem.
 ca_do_supabase_ok() { ca_do_supabase >/dev/null 2>&1; }
 
+# Gemea de _common.sh: rede docker de um Supabase self-hosted no mesmo host.
+rede_do_supabase_ok() {
+  [ -n "${SUPABASE_DOCKER_NETWORK:-}" ] && docker network inspect "$SUPABASE_DOCKER_NETWORK" >/dev/null 2>&1
+}
+
 pg_container() {
   local -a rede=() ca=()
   local caminho=""
-  [ -n "${PSQL_DOCKER_NETWORK:-}" ] && rede=(--network "$PSQL_DOCKER_NETWORK")
+  # Gêmea de _common.sh: sem PSQL_DOCKER_NETWORK, vale a rede do Supabase do mesmo host.
+  if [ -n "${PSQL_DOCKER_NETWORK:-}" ]; then rede=(--network "$PSQL_DOCKER_NETWORK")
+  elif rede_do_supabase_ok; then rede=(--network "$SUPABASE_DOCKER_NETWORK"); fi
   # `local caminho` separado de propósito: `local caminho="$(...)"` engole o
   # status do comando substituído e o `if` aceitaria CA quebrada como pronta.
   if caminho="$(ca_do_supabase 2>/dev/null)"; then
@@ -1648,7 +1660,11 @@ if [ -z "${SENTRY_DSN+x}" ]; then
     printf '\n%s\n' "$(t "Você pode mudar depois no .env, a qualquer momento.")"
     read -r -p "$(t "  Enviar relatórios de erro anonimizados? (s/N) ")" _tel
     if resposta_sim "${_tel:-}"; then
-      SENTRY_DSN=""
+      # `comunidade` é o TOKEN do consentimento, não um DSN: o `.env` de quem
+      # instala não leva a chave do Sentry do projeto (#4936). Vazio aqui virou
+      # "desligado" em lib/sentry/dsn.ts — gravar vazio transformaria o "sim"
+      # em silêncio.
+      SENTRY_DSN="comunidade"
       c_grn "$(t "✓ Telemetria de erros ligada — obrigado, isso ajuda o projeto.")"
     else
       SENTRY_DSN="off"
@@ -1771,6 +1787,14 @@ esac
   # ele era compilado aqui na VPS e nenhum update jamais o alcançava.
   envq WORKER_IMAGE "${IMG_WORKER}:${TAG_ALVO}"
   envq WORKER_PULL_POLICY "$PULL_POLICY_ALVO"
+  # O par de prazos do desligamento (#2823) — os dois GRAVADOS juntos porque um
+  # sem o outro é o defeito que a issue mediu: `WORKER_STOP_GRACE_PERIOD` é o que
+  # o compose passa ao `docker stop` (sem ele, o padrão de 10 s do Docker mata o
+  # contêiner antes dos 30 s que o worker se dá) e `SHUTDOWN_GRACE_MS` é o prazo
+  # INTERNO, contado do sinal. O de fora tem de ser maior; 40 s para 30 s dá 10 s
+  # de folga para fechar pool e healthz. Mexeu num, mexa no outro.
+  envq WORKER_STOP_GRACE_PERIOD "${WORKER_STOP_GRACE_PERIOD:-40s}"
+  envq SHUTDOWN_GRACE_MS "${SHUTDOWN_GRACE_MS:-30000}"
   envq SCHEDULER_IMAGE "${IMG_SCHEDULER}:${TAG_ALVO}"
   envq SCHEDULER_PULL_POLICY "$PULL_POLICY_ALVO"
   # A telefonia por SIP (profile `telefonia`, desligado por padrão) também segue
@@ -1923,10 +1947,11 @@ esac
   printf '# só ao sistema que vai criar empresas (depois: docker compose up -d app).\n'
   envq TENANT_PROVISIONING_SECRET "${TENANT_PROVISIONING_SECRET:-}"
   printf '# Telemetria de erros (você escolheu isto durante a instalação).\n'
-  printf '#   "off"  = não envia nada.\n'
-  printf '#   vazio  = só ERRO pro Sentry da comunidade, com CPF/telefone/e-mail\n'
-  printf '#            substituídos e token de URL redigido. Sem trace, sem replay.\n'
-  printf '#   <dsn>  = manda pro SEU Sentry (aí com performance e replay).\n'
+  printf '#   "off"        = não envia nada.\n'
+  printf '#   "comunidade" = só ERRO pro Sentry do projeto, com CPF/telefone/e-mail\n'
+  printf '#                  substituídos e token de URL redigido. Sem trace, sem replay.\n'
+  printf '#   <dsn>        = manda pro SEU Sentry (aí com performance e replay).\n'
+  printf '#   vazio        = DESLIGADA, igual a "off".\n'
   envq SENTRY_DSN "${SENTRY_DSN:-}"
   envq INTERNAL_SECRET "$INTERNAL_SECRET"
   envq INTERNAL_CRON_SECRET "$INTERNAL_CRON_SECRET"
@@ -1979,6 +2004,10 @@ esac
   fi
 } > .env
 chmod 600 .env
+# Instalação nova já nasce com o consentimento decidido ("off", "comunidade" ou o
+# DSN próprio): a conversão do update.sh (#4936) é só para quem instalou ANTES, e
+# nunca pode religar quem instalou depois com a chave vazia (#4948).
+marcar_consentimento_de_telemetria .env.consentimento-de-telemetria
 # O par dos avisos com o app fechado (Web Push): gerado aqui uma única vez, pela
 # MESMA função que a atualização usa (`gravar_imagens`). Reexecutar o install
 # não troca nada: o `load_env` lá em cima trouxe o par, e o `envq` o regravou.
@@ -2490,6 +2519,41 @@ else
   [ -n "$health_body" ] && c_dim "$(t "  última resposta: {1}" "$(printf '%s' "$health_body" | head -c 200 || true)")"
 fi
 
+# ── #2945: a PROVA de que a rota pública do Supabase chega ao GoTrue ────────
+#
+# Aqui, e não antes: é o ponto em que o app já respondeu saudável e o domínio já
+# está no ar — a mesma condição que faz a pergunta ter sentido. Antes do #2933
+# quem a respondia era, sem querer, o `v_sb_key()` da fase 2 (que batia em
+# `${NEXT_PUBLIC_SUPABASE_URL}/auth/v1/settings`, a URL pública, e morria em
+# "chave inválida" quando o Traefik sem as etiquetas entregava o pedido ao app);
+# o #2933 o mandou perguntar ao gateway INTERNO, que é o certo atrás de
+# Cloudflare laranja, e a instalação ficou SEM nenhuma prova da rota pública. O
+# #2099 é o defeito que a prova pegava: etiqueta do Traefik que não chegou ao
+# Envoy e um login que só falha depois, com a instalação já verde.
+#
+# O `SUPABASE_INTERNAL_URL` no guard não é enfeite: ele só existe quando o
+# Supabase é DESTA VPS (quem o grava é o install-single-server.sh). Num
+# Traefik com o Supabase na NUVEM a URL pública tem as APIs em outro host, e
+# `/auth/v1/settings` no domínio do CRM responderia 404 — o mesmo 404 de
+# "chave inválida" que o #2933 tirou da fase 2. Sem esta condição, a sonda
+# reprovaria uma instalação correta, que é pior que não sondar.
+#
+# A sonda devolve 0 (provado), 1 (a ASSINATURA do app: 404, ou o 3xx para
+# /login — a instalação PARA, com o diagnóstico do #2099) ou 2 (não provei, e
+# o motivo pode ser só o certificado do domínio ainda saindo). O 2 AVISA e
+# SEGUE (#2945): parar uma instalação certa por um `curl` que não provou nada
+# é o defeito que o próprio kit consertou no #2933, do outro lado da moeda.
+if [ "${REVERSE_PROXY:-caddy}" = "traefik" ] && [ -n "${SUPABASE_INTERNAL_URL:-}" ] && [ "${APP_SAUDAVEL:-0}" = 1 ]; then
+  step "$(t "Conferindo a rota pública do Supabase no Traefik")"
+  rota_publica_rc=0
+  rota_publica_msg="$(sondar_rota_publica_do_supabase "https://${DOMAIN}" "${NEXT_PUBLIC_SUPABASE_ANON_KEY:-}" 10 3)" || rota_publica_rc=$?
+  case "$rota_publica_rc" in
+    0) c_grn "$(t "✓ a rota pública /auth/v1/* chega ao GoTrue do Supabase (o Traefik está publicando as APIs)")" ;;
+    1) die "$rota_publica_msg" ;;
+    *) c_ylw "⚠ $rota_publica_msg" ;;
+  esac
+fi
+
 # O catálogo dos provedores diretos vem no baseline, mas a OpenRouter é grande
 # demais para ser congelada nele: seus ~400 modelos chegam pelo cron diário
 # `api/v1/cron/sync-model-catalog`, que o scheduler bate às 04:15 UTC
@@ -2626,10 +2690,20 @@ fi
 telemetria_no_banner() {
   if [ "${SENTRY_DSN:-}" = "off" ]; then
     printf '%s\n' "$(t "  Telemetria: DESLIGADA — nenhum relatório de erro sai desta instalação.")"
-    printf '%s\n' "$(t "  Para ligar, apague a linha SENTRY_DSN do .env e rode: {1}" "docker compose $(dc_files) up -d")"
+    printf '%s\n' "$(t "  Para ligar, ponha SENTRY_DSN=comunidade (ou o seu DSN) no .env e rode: {1}" "docker compose $(dc_files) up -d")"
   else
     printf '%s\n' "$(t "  Telemetria: LIGADA — só relatórios de erro anonimizados vão ao Sentry do")"
     printf '%s\n' "$(t "  projeto. Para desligar, ponha SENTRY_DSN='off' no .env e rode: {1}" "docker compose $(dc_files) up -d")"
+  fi
+}
+
+senha_no_banner() {
+  # O install-single-server.sh preenche OWNER_PASSWORD antes de chamar --yes.
+  # Pode ser uma senha gerada pelo kit ou uma credencial preparada pela pessoa.
+  if [ "${SINGLE_SERVER:-0}" = "1" ]; then
+    t "(a que você definiu ou a de OWNER_PASSWORD no .env da pasta do CRM)"
+  else
+    t "(a que você definiu)"
   fi
 }
 
@@ -2647,7 +2721,7 @@ $(pendencia_da_ia)
 
   2. $(t "Faça login com:")
        $(t "e-mail:") ${OWNER_EMAIL}
-       $(t "senha:")  $(t "(a que você definiu)")
+       $(t "senha:")  $(senha_no_banner)
 
   3. $(t "Conecte o WhatsApp (2º passo do onboarding):")
        $(t "Deixe o WhatsApp JÁ ABERTO em Configurações → Aparelhos conectados")

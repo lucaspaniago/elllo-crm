@@ -1,5 +1,10 @@
+import type { FormatoDaVoz } from '@/lib/ai/voz/formato';
 import type { AgentOperationContext } from '@/lib/ai/agents/operation';
 import type { JobClaim } from './queue/claim';
+// Tipo SÓ (erased no build): o vocabulário de mídia do passo automático vem da
+// régua única (`lib/messaging/media/midia-com-legenda.ts`) — e é `import type`
+// para este contrato continuar puro, sem dependência de runtime.
+import type { TipoDeMidiaComLegenda } from '@/lib/messaging/media/midia-com-legenda';
 /**
  * Contrato agnóstico de canal (F2-25; blueprint risco nº 1 + veredito executivo).
  *
@@ -23,6 +28,17 @@ export interface ChannelSendInput {
   jobId: string;
   /** posição da mensagem no turno (1..n) — com jobId forma a chave de idempotência */
   seq: number;
+  /**
+   * `seq` da PRIMEIRA mensagem física do ENVIO a que esta pertence (#4370).
+   *
+   * O `seq` é o contador do TURNO: entre dois `send_message` do mesmo job ele
+   * continua crescendo, então sozinho ele não diz onde um envio termina. Quem
+   * conhece a fronteira é quem chama (`agent/inbound-turn.ts`), e ela vai para o
+   * `send_ledger.envio_seq` na MESMA escrita da linha — o reprocesso da saída
+   * configurável lê as bolhas do envio por ela. Opcional: um adapter que a
+   * ignore continua enviando (e o ledger grava NULL, que é a régua anterior).
+   */
+  envioSeq?: number;
   /** referência da conversa no canal (conversation_id do CRM na v1) */
   conversationId: string;
   body: string;
@@ -39,18 +55,62 @@ export interface ChannelSendInput {
     language: string;
     /** Valor por slot, chaveado por `slotKey` — a mesma chave da tela. */
     values: Record<string, string>;
-  };  /**
+  };
+  /**
+   * Presente = este envio é uma NOTA DE VOZ (Fase 6b do plano de voz,
+   * `docs/superpowers/plans/2026-10-29-voz-elevenlabs.md`), não texto.
+   *
+   * Opcional pela MESMA razão do `template` acima: um adapter que ignore o
+   * campo manda `body` como texto — degrada, não quebra. Hoje só o adapter
+   * WAHA-via-CRM o lê (repassa direto a `SendMessageInput.voz`, mesmo shape).
+   */
+  voz?: {
+    textoOriginal: string;
+    apiKey: string;
+    voiceId: string;
+    modelId?: string;
+    /** mp3 (canal que converte) ou ogg/opus (canal oficial) — `lib/ai/voz/formato.ts`. */
+    formato?: FormatoDaVoz;
+    upload: (audio: Buffer, mimeType: string) => Promise<string>;
+  };
+  /**
    * Presente = este envio é uma MÍDIA e o `body` é a legenda (pode ser vazio).
    *
-   * Duas procedências, um caminho só: `storagePath` é a imagem que já mora no
+   * Duas procedências, um caminho só: `storagePath` é a imagem ou o áudio que já mora no
    * Storage da conversa (hoje só a foto do catálogo usa — `agent/fotos-do-produto.ts`);
    * `url` é a mídia de um passo automático (#2734), apontada direto pelo operador.
    * Caminho, nunca bytes: quem assina a URL curta para o canal é o handler de
    * mensagens, como em toda mídia — e é ele que confere a URL antes de buscar.
    */
   media?:
-    | { storagePath: string; mime: string }
-    | { url: string; mime: string; type: 'image' | 'document' };
+    | {
+        storagePath: string;
+        mime: string;
+        /**
+         * Áudio × imagem de um arquivo que já mora na pasta da conversa (catálogo,
+         * apresentação). Ausente nas fotos do produto, que sempre foram imagem.
+         */
+        kind?: 'audio' | 'image';
+        /**
+         * Presente só quando o arquivo da conversa NÃO é imagem: material da
+         * empresa (#4129) pode ser PDF/planilha e vai como DOCUMENTO. Ausente =
+         * imagem, o comportamento de sempre das fotos do produto — um agente
+         * antigo, recompilado, continua enviando foto como foto.
+         */
+        type?: TipoDeMidiaComLegenda;
+        /** Nome do documento para o cliente; ausente = o basename do arquivo. */
+        filename?: string;
+      }
+    | { url: string; mime: string; type: TipoDeMidiaComLegenda };
+  /**
+   * O material da empresa que ESTA mensagem carrega (#4129), quando houver.
+   *
+   * Vai ao `metadata` da linha gravada pelo handler, e é por ele que os freios
+   * de reenvio contam (7 dias / 3 em 24 h) e que o Inbox mostra o documento da
+   * IA. Opcional pela mesma razão de `template`/`voz`: um adapter que o ignore
+   * ainda envia a mensagem — degrada, não quebra.
+   */
+  materialId?: string;
 }
 
 /**
@@ -67,8 +127,12 @@ export type ChannelSendResult =
   | { kind: 'queued'; idempotencyKey: string; messageId: string | null }
   /** veto PERMANENTE de negócio (opt-out/is_blocked, irrevogável — regra dura nº 2) */
   | { kind: 'blocked'; idempotencyKey: string }
-  /** o canal registrou a mensagem como falha (retry consome tentativa) */
-  | { kind: 'failed'; idempotencyKey: string; messageId: string | null }
+  /**
+   * o canal registrou a mensagem como falha. `permanente` = recusa definitiva
+   * deste conteúdo (4xx do provedor): o turno encerra sem retry. Ausente/false =
+   * transitória: o retry consome tentativa, como sempre.
+   */
+  | { kind: 'failed'; idempotencyKey: string; messageId: string | null; permanente?: boolean }
   /** transporte/tool indisponível (transiente) — o job re-tenta com a MESMA key */
   | { kind: 'unavailable'; reason: string };
 

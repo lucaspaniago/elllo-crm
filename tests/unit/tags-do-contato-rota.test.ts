@@ -63,7 +63,13 @@ async function chamaRota() {
 
 beforeEach(() => {
   logError.mockReset();
-  vi.mocked(requireRole).mockResolvedValue({ ok: true, org: { orgId: ORG, name: "Org", role: "agent" } } as never);
+  // resolveAuthDual (sessão) lê `authz.user.id` para montar o actor: o dublê de
+  // requireRole precisa trazer o usuário, como o de produção.
+  vi.mocked(requireRole).mockResolvedValue({
+    ok: true,
+    user: { id: "pessoa-1", idioma: "pt-BR" },
+    org: { orgId: ORG, name: "Org", role: "agent" },
+  } as never);
 });
 
 describe("GET /api/v1/contact-tags", () => {
@@ -79,6 +85,30 @@ describe("GET /api/v1/contact-tags", () => {
 
     expect(status).toBe(200);
     expect(body.data).toEqual(["google", "vip"]);
+  });
+
+  /**
+   * A ORDEM DAS SUGESTÕES É A DE USO (#3180). Com o campo vazio o editor
+   * oferece as PRIMEIRAS desta lista, então a ordem alfabética entregava sempre
+   * o mesmo bloco do começo do alfabeto: com 73 etiquetas, as mesmas oito.
+   *
+   * O controle abaixo tem o alfabeto e o uso em ordens DIFERENTES de propósito:
+   * "zebra" é a mais usada e "abelha" a menos usada, e uma rota que ordenasse
+   * pelo alfabeto devolveria o inverso. Empate cai no alfabeto (caso dos 200
+   * abaixo), para a resposta ser determinística.
+   */
+  it("as mais usadas vêm primeiro, não as primeiras do alfabeto", async () => {
+    vi.mocked(createClient).mockResolvedValue(bancoFalso([
+      { organization_id: ORG, tags: ["abelha"] },
+      { organization_id: ORG, tags: ["zebra"] },
+      { organization_id: ORG, tags: ["zebra"] },
+      { organization_id: ORG, tags: ["zebra"] },
+    ]));
+
+    const { status, body } = await chamaRota();
+
+    expect(status).toBe(200);
+    expect(body.data).toEqual(["zebra", "abelha"]);
   });
 
   /**

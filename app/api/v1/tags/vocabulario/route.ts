@@ -5,7 +5,7 @@
  * ── Por que manager, e não agent ─────────────────────────────────────────────
  *
  * A leitura é inofensiva, mas a escrita REESCREVE o vocabulário de todo mundo da
- * organização, inclusive as regras `add_tag` dos agentes — é decisão de
+ * organização, inclusive as regras `add_tag` e `remove_tag` — é decisão de
  * configuração, não de atendimento. Mesmo gate do roteamento de filas
  * (`settings_routing`), que também é configuração de organização.
  *
@@ -32,8 +32,10 @@
  * uso" já usa, para a troca de fonte custar uma linha por campo.
  */
 import { randomUUID } from "node:crypto";
+import { tagsPageQuerySchema, tagsPageResultSchema } from "@/lib/schemas/tags";
 import type { NextRequest } from "next/server";
 
+import { resolveAuthDual, tetoDeEscritaDoToken } from "@/lib/api/auth-dual";
 import { ok, fail } from "@/lib/api/wrappers";
 import { audit } from "@/lib/audit";
 import { requireRole } from "@/lib/auth/require-role";
@@ -44,19 +46,46 @@ import { createClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(): Promise<Response> {
+export async function GET(req: NextRequest): Promise<Response> {
   const requestId = randomUUID();
-  const auth = await requireRole("manager", { requestId, resource: "settings_tags" });
+  const auth = await resolveAuthDual(req, {
+    requestId,
+    resource: "settings_tags",
+    role: "manager",
+    scope: "config:read",
+    tokenRole: "admin",
+  });
   if (!auth.ok) return auth.response;
-  if (await mfaEmDivida())
+  const teto = await tetoDeEscritaDoToken(auth, "tags.vocabulario", requestId);
+  if (teto) return teto;
+  // O MFA é de PESSOA: o token não tem fator, quem o prova é a sessão. No ramo do
+  // token a verificação não se aplica (a mesma régua de `channel-sessions`).
+  if (auth.via === "session" && (await mfaEmDivida()))
     return fail("mfa_required", "Confirme a verificação em duas etapas.", 403, { requestId });
 
-  const db = await createClient();
+  if (req.nextUrl.searchParams.has("page") || req.nextUrl.searchParams.has("busca")) {
+    const parsed = tagsPageQuerySchema.safeParse({
+      page: req.nextUrl.searchParams.get("page") ?? undefined,
+      busca: req.nextUrl.searchParams.get("busca") ?? undefined,
+    });
+    if (!parsed.success) return fail("validation_failed", "Confira a busca e a página.", 422, { requestId });
+    const db = auth.supabase;
+    const { data, error } = await db.rpc("fn_vocabulario_de_tags_pagina", {
+      p_org: auth.organizationId, p_busca: parsed.data.busca,
+      p_offset: (parsed.data.page - 1) * 100, p_limit: 100,
+    });
+    const page = tagsPageResultSchema.safeParse(data);
+    if (error || !page.success) return fail("internal_error", "Não foi possível carregar as etiquetas.", 500, { requestId });
+    return ok(page.data.items, { requestId, meta: { total: page.data.total, page: parsed.data.page, per_page: 100 } });
+  }
+
+  const db = auth.supabase;
   // Client da SESSÃO: a função é `security invoker`, então quem recorta a
   // organização é a RLS e o `p_org` da sessão — pedir a de outro tenant não
-  // devolve nada.
+  // devolve nada. No ramo do token o client é o admin (sem RLS): quem recorta é o
+  // `p_org` da linha do token, que a própria função também filtra por dentro.
   const { data, error } = await db.rpc("fn_vocabulario_de_tags", {
-    p_org: auth.org.orgId,
+    p_org: auth.organizationId,
   });
   if (error) return fail("internal_error", "Não foi possível carregar as etiquetas.", 500, { requestId });
 
@@ -95,8 +124,29 @@ export async function POST(req: NextRequest): Promise<Response> {
   const { acao, tag, destino, cor } = parsed.data;
 
   const db = await createClient();
-  // Uma chamada só. Renomear a etiqueta e trocar o nome nas regras `add_tag` dos
-  // agentes acontece na MESMA transação — é isto que impede o estado que a issue
+  // #2855 — com a tela paginada, o destino da junção é digitado, não escolhido
+  // numa lista. A função só recusa destino vazio: um nome que não existe faria
+  // "juntar" virar um renomear sem aviso. A conferência é no vocabulário INTEIRO
+  // (curado + em uso + regras), pela mesma leitura paginada da tela.
+  // ponytail: lê só os 200 primeiros nomes que CONTÊM o destino; acima disso uma
+  // etiqueta existente pode ser recusada (falha fechada, sem perda de dado).
+  if (acao === "juntar" && destino) {
+    const { data: achadas, error: erroDaBusca } = await db.rpc("fn_vocabulario_de_tags_pagina", {
+      p_org: auth.org.orgId,
+      p_busca: destino.trim(),
+      p_offset: 0,
+      p_limit: 200,
+    });
+    const pagina = tagsPageResultSchema.safeParse(achadas);
+    if (erroDaBusca || !pagina.success)
+      return fail("internal_error", "Não foi possível concluir a operação.", 500, { requestId });
+    const chave = destino.trim().toLowerCase();
+    if (!pagina.data.items.some((linha) => linha.tag.trim().toLowerCase() === chave))
+      return fail("destino_inexistente", "A etiqueta de destino não existe nesta organização.", 422, { requestId });
+  }
+
+  // Uma chamada só. Renomear a etiqueta e trocar o nome nas regras `add_tag` e
+  // `remove_tag` acontece na MESMA transação — é isto que impede o estado que a issue
   // descreve: contato renomeado com o agente ainda escrevendo o nome antigo.
   // `p_cor` vai sempre (nulo fora do `definir_cor`): a assinatura da função tem
   // o parâmetro com `default null`, e mandar o campo explícito evita depender de

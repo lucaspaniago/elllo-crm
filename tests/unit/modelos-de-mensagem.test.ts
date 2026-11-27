@@ -127,4 +127,47 @@ describe("preencher modelo — {{nome}} pela régua de nomeDoContato", () => {
     expect(r.texto).toBe("Olá , tudo bem?");
     expect(r.lacunas).toEqual(["nome"]);
   });
+
+  it("com texto de reserva, o nome vazio sai a reserva e não vira lacuna", async () => {
+    const contato = {
+      id: "c-sem-nome",
+      organization_id: ORG_ID,
+      name: null,
+      display_name: "Contato 543134@lid",
+      phone_number: "+5511999998888",
+      email: null,
+    };
+    const db = comModelo('Olá {{nome|"aluno"}}, tudo bem?', contato);
+
+    const r = await preencherModeloDeMensagem(deps(db), {
+      templateId: "t-boasvindas",
+      contactId: "c-sem-nome",
+    });
+
+    expect(r.texto).toBe("Olá aluno, tudo bem?");
+    expect(r.lacunas).toEqual([]);
+  });
+
+  it("{{saudacao}} sem instante do envio volta intacta — e é lacuna, como era quando saía vazia", async () => {
+    // Antes do resolvedor único (#3687) a saudação saía "" aqui e entrava em
+    // `lacunas`. Agora ela fica literal (sem instante não há cumprimento a
+    // escolher), e a lacuna tem de continuar avisando quem integra.
+    const contato = {
+      id: "c-misto",
+      organization_id: ORG_ID,
+      name: "Marcos",
+      display_name: null,
+      phone_number: "+5511999998888",
+      email: null,
+    };
+    const db = comModelo("{{saudacao}}, {{nome}}!", contato);
+
+    const r = await preencherModeloDeMensagem(deps(db), {
+      templateId: "t-boasvindas",
+      contactId: "c-misto",
+    });
+
+    expect(r.texto).toBe("{{saudacao}}, Marcos!");
+    expect(r.lacunas).toEqual(["saudacao"]);
+  });
 });

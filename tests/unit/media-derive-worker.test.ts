@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const downloadMock = vi.fn();
+const storageFromMock = vi.fn(() => ({ download: downloadMock }));
 const updateEqMock = vi.fn();
+const updateFilterMock = vi.fn();
+let updateError: { message: string } | null = null;
+let updateRejection: Error | null = null;
 const messageRow = {
   id: "msg1",
   organization_id: "org1",
@@ -63,11 +67,16 @@ vi.mock("@/lib/supabase/admin", () => ({
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const chain: any = new Proxy(
             {
-              eq: () => chain,
+              eq: (coluna: string, valor: unknown) => {
+                updateFilterMock(coluna, valor);
+                return chain;
+              },
               neq: () => chain,
               select: () => chain,
               then: (onFulfilled: (v: unknown) => void, onRejected?: (e: unknown) => void) => {
-                const p = Promise.resolve({ data: [messageRow], error: null });
+                const p = updateRejection
+                  ? Promise.reject(updateRejection)
+                  : Promise.resolve({ data: [messageRow], error: updateError });
                 return p.then(onFulfilled, onRejected);
               },
             },
@@ -85,7 +94,7 @@ vi.mock("@/lib/supabase/admin", () => ({
       });
       return chain;
     },
-    storage: { from: () => ({ download: downloadMock }) },
+    storage: { from: storageFromMock },
   }),
 }));
 
@@ -109,9 +118,11 @@ vi.mock("@/lib/agent-engine/edge/llm/credentials", () => ({
 }));
 
 import { deriveMessageMedia, MARCADOR_NAO_LIDA } from "@/workers/media-derive-worker";
+import { PdfExtractError } from "@/lib/ai/rag/extractors/pdf";
 import { deriveMediaText } from "@/lib/messaging/media/derive";
 import { DETALHE_TECNICO } from "@/lib/event-log/aviso-de-evento-morto";
 import { resolveOrgLlmConfig, type OrgLlmConfig } from "@/lib/agent-engine/edge/llm/credentials";
+import { logger } from "@/lib/logger";
 
 function configResolvida(over: Partial<OrgLlmConfig> = {}): OrgLlmConfig {
   return {
@@ -147,7 +158,11 @@ function eventRow(attempts = 0) {
 describe("deriveMessageMedia", () => {
   beforeEach(() => {
     downloadMock.mockReset().mockResolvedValue({ data: new Blob([new Uint8Array([1, 2, 3])]), error: null });
+    storageFromMock.mockClear();
     updateEqMock.mockReset();
+    updateFilterMock.mockReset();
+    updateError = null;
+    updateRejection = null;
     inboxInsertMock.mockReset();
     messageRow.media_derived_status = null;
     messageRow.type = "audio";
@@ -194,6 +209,108 @@ describe("deriveMessageMedia", () => {
     expect(r.status).toBe("ok");
     expect(updateEqMock).toHaveBeenCalledWith(
       expect.objectContaining({ media_derived_text: "transcrição do áudio real", media_derived_status: "ready" }),
+    );
+  });
+
+  it.each(["audio", "image", "document", "video"])(
+    "recusa caminho de outra organização antes dos efeitos privilegiados (%s)",
+    async (tipo) => {
+      messageRow.type = tipo;
+      messageRow.media_storage_path = "org2/conversa-alheia/arquivo-privado.ogg";
+      const resultado = await deriveMessageMedia(eventRow());
+      expect(downloadMock).not.toHaveBeenCalled();
+      expect(storageFromMock).not.toHaveBeenCalled();
+      expect(deriveMediaText).not.toHaveBeenCalled();
+      expect(resolveOrgLlmConfig).not.toHaveBeenCalled();
+      expect(updateEqMock).toHaveBeenCalledExactlyOnceWith({ media_derived_status: "skipped" });
+      expect(updateFilterMock.mock.calls).toEqual([["id", "msg1"], ["organization_id", "org1"]]);
+      expect(inboxInsertMock).not.toHaveBeenCalled();
+      expect(resultado).toEqual({
+        consumer_key: "media_derive_v1",
+        status: "skipped",
+        detail: "invalid_media_path",
+      });
+    },
+  );
+
+  it.each([
+    "org11/conversa/arquivo.ogg",
+    "org1/../org2/arquivo.ogg",
+    "org1/conversa/%2e%2e/arquivo.ogg",
+    "org1/conversa\\arquivo.ogg",
+    "org1//arquivo.ogg",
+    "org1/conversa/arquivo.ogg?download=1",
+    "org1/conversa/arquivo.ogg#fragmento",
+    "org1/conversa/arquivo.ogg ",
+  ])("marca só skipped para caminho ambíguo, sem baixar: %s", async (caminho) => {
+    messageRow.media_storage_path = caminho;
+    const resultado = await deriveMessageMedia(eventRow());
+    expect(downloadMock).not.toHaveBeenCalled();
+    expect(storageFromMock).not.toHaveBeenCalled();
+    expect(deriveMediaText).not.toHaveBeenCalled();
+    expect(resolveOrgLlmConfig).not.toHaveBeenCalled();
+    expect(updateEqMock).toHaveBeenCalledExactlyOnceWith({ media_derived_status: "skipped" });
+    expect(updateFilterMock.mock.calls).toEqual([["id", "msg1"], ["organization_id", "org1"]]);
+    expect(inboxInsertMock).not.toHaveBeenCalled();
+    expect(resultado).toEqual({
+      consumer_key: "media_derive_v1", status: "skipped", detail: "invalid_media_path",
+    });
+  });
+
+  it.each(["error", "rejection"])("falha ao marcar skipped retorna error sem ecoar a causa externa (%s)", async (falha) => {
+    messageRow.media_storage_path = "org2/conversa-alheia/arquivo-privado.ogg";
+    const externo = "conteudo-externo-que-nao-deve-aparecer";
+    if (falha === "error") updateError = { message: externo };
+    else updateRejection = new Error(externo);
+    const aviso = vi.spyOn(logger, "warn");
+    const erro = vi.spyOn(logger, "error");
+    try {
+      const resultado = await deriveMessageMedia(eventRow());
+      expect(resultado).toEqual({ consumer_key: "media_derive_v1", status: "error", detail: "skip_status_update_failed" });
+      expect(JSON.stringify(resultado)).not.toContain(externo);
+      expect(updateEqMock).toHaveBeenCalledExactlyOnceWith({ media_derived_status: "skipped" });
+      expect(updateFilterMock.mock.calls).toEqual([["id", "msg1"], ["organization_id", "org1"]]);
+      expect(downloadMock).not.toHaveBeenCalled();
+      expect(storageFromMock).not.toHaveBeenCalled();
+      expect(deriveMediaText).not.toHaveBeenCalled();
+      expect(resolveOrgLlmConfig).not.toHaveBeenCalled();
+      expect(inboxInsertMock).not.toHaveBeenCalled();
+      expect(aviso).not.toHaveBeenCalled();
+      expect(erro).not.toHaveBeenCalled();
+    } finally {
+      aviso.mockRestore();
+      erro.mockRestore();
+    }
+  });
+
+  it.each([null, ""])("preserva markSkipped para mídia sem caminho (%s)", async (caminho) => {
+    messageRow.media_storage_path = caminho;
+    const resultado = await deriveMessageMedia(eventRow());
+    expect(downloadMock).not.toHaveBeenCalled();
+    expect(storageFromMock).not.toHaveBeenCalled();
+    expect(deriveMediaText).not.toHaveBeenCalled();
+    expect(resolveOrgLlmConfig).not.toHaveBeenCalled();
+    expect(updateEqMock).toHaveBeenCalledExactlyOnceWith({ media_derived_status: "skipped" });
+    expect(updateFilterMock.mock.calls).toEqual([["id", "msg1"], ["organization_id", "org1"]]);
+    expect(resultado).toEqual({
+      consumer_key: "media_derive_v1", status: "skipped", detail: "no media",
+    });
+  });
+
+  it("preserva o caminho legítimo sem exigir pasta de conversa e ignora org do payload", async () => {
+    messageRow.type = "document";
+    messageRow.media_mime = "application/pdf";
+    messageRow.media_storage_path = "org1/proposta.pdf";
+    const evento = eventRow();
+    const resultado = await deriveMessageMedia({
+      ...evento,
+      payload: { ...evento.payload, organization_id: "org2" },
+    });
+    expect(resultado.status).toBe("ok");
+    expect(downloadMock).toHaveBeenCalledExactlyOnceWith("org1/proposta.pdf");
+    expect(deriveMediaText).toHaveBeenCalledOnce();
+    expect(updateEqMock).toHaveBeenCalledWith(
+      expect.objectContaining({ media_derived_status: "ready" }),
     );
   });
 
@@ -279,6 +396,7 @@ describe("deriveMessageMedia", () => {
    * com "The model `claude-sonnet-5` does not exist or you do not have access
    * to it", e a Central com ZERO avisos de mídia.
    */
+
   describe("a falha permanente avisa a Central", () => {
     const RECUSA_DO_PROVEDOR =
       "The model `claude-sonnet-5` does not exist or you do not have access to it.";
@@ -329,6 +447,117 @@ describe("deriveMessageMedia", () => {
 
     it("derivação que dá certo não avisa nada (controle)", async () => {
       await deriveMessageMedia(eventRow(4));
+      expect(inboxInsertMock).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * ─── PDF ESCANEADO NÃO É FALHA CRÍTICA (#4889) ────────────────────────────
+   *
+   * O extrator marca o caso de duas formas: `motivo: "sem_texto"` quando o PDF
+   * abriu inteiro e não tem letra selecionável, `"falha"` quando a engine não
+   * conseguiu ler. Até aqui o worker só olhava a exceção, então os dois
+   * custavam o mesmo: cinco tentativas, aviso "a leitura deu erro em todas as
+   * tentativas" e um `event_dead` aberto — que, pelo índice único da migration
+   * 0491, ocupa a única vaga da organização e esconde a falha seguinte.
+   *
+   * Medido no dublê: ZERO inserts em `agent_inbox_items` e `skipped` já na
+   * PRIMEIRA tentativa. Se alguém apagar o tratamento novo, o `status` volta a
+   * ser `error` e a Central recebe um aviso que ninguém pode resolver.
+   */
+  describe("PDF sem texto selecionável (escaneado)", () => {
+    const SEM_TEXTO = "pdfjs-dist extracted no text (possibly image-only PDF)";
+    const MOTIVO = "o PDF não tem texto selecionável (é escaneado ou só imagem)";
+
+    beforeEach(() => {
+      messageRow.type = "document";
+      messageRow.media_mime = "application/pdf";
+      messageRow.media_storage_path = "org1/proposta-escaneada.pdf";
+    });
+
+    it.each([0, 4])(
+      "encerra como skipped e grava failed com a razão, sem avisar a Central (attempts=%s)",
+      async (attempts) => {
+        vi.mocked(deriveMediaText).mockRejectedValue(
+          new PdfExtractError(SEM_TEXTO, undefined, "sem_texto"),
+        );
+        const erro = vi.spyOn(logger, "error");
+        try {
+          const r = await deriveMessageMedia(eventRow(attempts));
+
+          expect(r).toEqual({
+            consumer_key: "media_derive_v1",
+            status: "skipped",
+            detail: "pdf_sem_texto",
+          });
+          // O turno seguinte precisa saber que existe arquivo ilegível — é o
+          // mesmo marcador das demais falhas terminais.
+          expect(updateEqMock).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({
+              media_derived_text: MARCADOR_NAO_LIDA,
+              media_derived_status: "failed",
+              metadata: { media_derived_motivo: MOTIVO },
+            }),
+          );
+          // E a Central fica limpa: nada há para o operador consertar num PDF
+          // que o cliente mandou escaneado.
+          expect(inboxInsertMock, "PDF escaneado abriu aviso na Central").not.toHaveBeenCalled();
+          // Nem "falhou de vez": a derivação terminou, não desistiu.
+          expect(erro).not.toHaveBeenCalled();
+        } finally {
+          erro.mockRestore();
+        }
+      },
+    );
+
+    it("falha ao gravar o desfecho devolve error, sem avisar a Central", async () => {
+      // Sugerido por @xofrd na #4889. O dublê ignora o retorno de
+      // `updateEqMock`: quem decide o `{ error }` do update é `updateError`
+      // (zerado no beforeEach de fora).
+      vi.mocked(deriveMediaText).mockRejectedValue(
+        new PdfExtractError(SEM_TEXTO, undefined, "sem_texto"),
+      );
+      updateError = { message: "db fora" };
+
+      const r = await deriveMessageMedia(eventRow(0));
+
+      expect(r).toEqual({
+        consumer_key: "media_derive_v1",
+        status: "error",
+        detail: "failed_status_update_failed",
+      });
+      expect(inboxInsertMock).not.toHaveBeenCalled();
+    });
+
+    it("erro REAL de extração (motivo falha) continua tentando e avisa na última", async () => {
+      // O controle que dá sentido ao caso acima: o mesmo `PdfExtractError`,
+      // com o outro motivo, tem de seguir o caminho de sempre.
+      vi.mocked(deriveMediaText).mockRejectedValue(
+        new PdfExtractError("pdfjs-dist failed to extract text from the PDF", new Error("boom"), "falha"),
+      );
+
+      const r = await deriveMessageMedia(eventRow(4));
+
+      expect(r.status).toBe("error");
+      expect(inboxInsertMock, "o erro real deixou de avisar").toHaveBeenCalledTimes(1);
+      expect(updateEqMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          media_derived_status: "failed",
+          metadata: expect.objectContaining({
+            media_derived_motivo: expect.stringContaining("falhou em todas as tentativas"),
+          }),
+        }),
+      );
+    });
+
+    it("erro REAL de extração numa tentativa intermediária não avisa nem encerra", async () => {
+      vi.mocked(deriveMediaText).mockRejectedValue(
+        new PdfExtractError("pdfjs-dist failed to extract text from the PDF", undefined, "falha"),
+      );
+
+      const r = await deriveMessageMedia(eventRow(1));
+
+      expect(r.status).toBe("error");
       expect(inboxInsertMock).not.toHaveBeenCalled();
     });
   });

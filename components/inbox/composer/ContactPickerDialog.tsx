@@ -1,6 +1,7 @@
 "use client";
 
 import { useT } from "@/hooks/i18n/useT";
+import { useTelefoneExemplo } from "@/hooks/contacts/useTelefoneExemplo";
 
 import { useEffect, useState } from "react";
 
@@ -51,6 +52,7 @@ export function ContactPickerDialog({
   onPick,
 }: Props) {
   const t = useT();
+  const telefoneExemplo = useTelefoneExemplo();
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
   const [manualName, setManualName] = useState("");
@@ -138,7 +140,7 @@ export function ContactPickerDialog({
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Buscar por nome ou telefone…"
+            placeholder={t("Buscar por nome ou telefone…")}
             className="pl-8"
             autoFocus
           />
@@ -146,7 +148,7 @@ export function ContactPickerDialog({
 
         <div className="max-h-48 overflow-y-auto rounded-md border border-border">
           {list.isLoading && contacts.length === 0 ? (
-            <p className="px-3 py-6 text-center text-sm text-muted-foreground">Carregando…</p>
+            <p className="px-3 py-6 text-center text-sm text-muted-foreground">{t("Carregando…")}</p>
           ) : contacts.length === 0 ? (
             <p className="px-3 py-4 text-center text-sm text-muted-foreground">
               {debounced ? t("Nenhum contato encontrado na base.") : t("Nenhum contato com telefone na base.")}
@@ -198,7 +200,7 @@ export function ContactPickerDialog({
             <p className="text-xs font-medium text-muted-foreground">
               {searchPhone && !phoneAlreadyInList
                 ? t("Enviar número informado")
-                : "Ou informe um contato"}
+                : t("Ou informe um contato")}
             </p>
             {searchPhone && !phoneAlreadyInList && (
               <button
@@ -222,7 +224,7 @@ export function ContactPickerDialog({
               </button>
             )}
             <div className="space-y-1.5">
-              <Label htmlFor="manual-contact-name">Nome (opcional)</Label>
+              <Label htmlFor="manual-contact-name">{t("Nome (opcional)")}</Label>
               <Input
                 id="manual-contact-name"
                 value={manualName}
@@ -237,7 +239,7 @@ export function ContactPickerDialog({
                 id="manual-contact-phone"
                 value={manualPhone}
                 onChange={(e) => setManualPhone(e.target.value)}
-                placeholder="+55 32 98479-3302"
+                placeholder={telefoneExemplo}
                 disabled={sending}
               />
             </div>
@@ -247,7 +249,7 @@ export function ContactPickerDialog({
               disabled={sending || !resolvedManualPhone}
               onClick={pickManual}
             >
-              Enviar contato
+              {t("Enviar contato")}
             </Button>
           </div>
         )}

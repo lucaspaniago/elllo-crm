@@ -110,10 +110,12 @@ const QUEM_LE_A_AGENDA: Record<string, string> = {
   "app/api/v1/cron/contact-names/route.ts": "a varredura que ESCREVE o campo",
   "lib/channels/meta/ingest.ts": "o app WhatsApp Business (coexistência) que ESCREVE o campo",
   "lib/contacts/nome-da-agenda.ts": "decide o que a varredura grava",
+  "lib/modulo/redigir-contato.ts":
+    "usa o nome da agenda (que vem no objeto do contato das conversas) só para TIRÁ-LO do texto livre do módulo sem `contatos`; o objeto sai inteiro",
   "lib/contacts/agenda-do-celular.ts":
     "o 'Sincronizar agenda' (#2776) que ESCREVE o campo no contato que acabou de nascer; não lê nem monta mensagem",
   "lib/contacts/rotulo-do-contato.ts": "rotuloParaAEquipe, o rótulo das telas da equipe",
-  "lib/automation/template.ts": "a guarda que recusa {{contact.address_book_name}}",
+  "lib/variaveis/resolvedor.ts": "a guarda que recusa {{contact.address_book_name}}",
   "lib/database.types.ts": "tipos gerados do banco",
   "lib/audit/actions.ts": "só o NOME da ação de auditoria (contact.address_book_name_filled); não lê a coluna",
   "lib/types/contacts.ts": "tipo da ficha e da lista de contatos",
@@ -124,6 +126,13 @@ const QUEM_LE_A_AGENDA: Record<string, string> = {
   "lib/lgpd/export-collector.ts":
     "o acesso do TITULAR (LGPD Art. 18 II, data.json): é dado pessoal dele, apagado na anonimização — não é mensagem, é o que ele pediu",
   "app/api/v1/lgpd/requests/[id]/preview/route.ts": "a prévia do export que a equipe confere antes de entregar",
+  "lib/contacts/duplicados.ts":
+    "a varredura de duplicados lê o nome da agenda para sugerir fichas parecidas (Spec 31); não monta mensagem",
+  "app/api/v1/contacts/duplicates/route.ts": "select da tela Duplicados (tela da equipe)",
+  "app/api/v1/contacts/compare/route.ts": "a comparação lado a lado da tela Duplicados (tela da equipe)",
+  "hooks/contacts/useContactDuplicates.ts": "tipo da lista de duplicados (tela da equipe)",
+  "hooks/contacts/useCompararFichas.ts": "tipo da comparação lado a lado (tela da equipe)",
+  "components/contacts/ComparacaoDeFichas.tsx": "a comparação mostra o nome da agenda à equipe, ao lado do nome da ficha",
 };
 
 function arquivos(dir: string): string[] {

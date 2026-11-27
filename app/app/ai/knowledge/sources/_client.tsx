@@ -15,6 +15,7 @@ import {
   useKnowledgeSources,
   useReindexAll,
   useReindexSource,
+  useRestaurarSource,
   type SourceRow,
 } from "@/hooks/ai/useKnowledgeSources";
 import { KnowledgeSourceCard } from "@/components/ai/KnowledgeSourceCard";
@@ -44,6 +45,7 @@ export function AcervoClient({ initialSources, initialChave, agentes }: Props) {
   const reindex = useReindexSource();
   const reindexAll = useReindexAll();
   const arquivar = useArquivarSource();
+  const restaurar = useRestaurarSource();
 
   const recarregar = useCallback(() => {
     qc.invalidateQueries({ queryKey: sourcesQueryKey() });
@@ -73,13 +75,13 @@ export function AcervoClient({ initialSources, initialChave, agentes }: Props) {
       <ChaveDeConhecimento estado={estado} onChaveCadastrada={recarregar} />
       <StatusDaBase materiais={lista} podeIndexar={estado.pode_indexar} />
 
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-text-muted">
           {lista.length === 0
             ? t("Nenhum material ainda.")
             : `${lista.length} ${lista.length === 1 ? t("material") : t("materiais")} ${t("no acervo.")}`}
         </p>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {lista.length > 0 ? (
             <Button
               variant="outline"
@@ -122,11 +124,15 @@ export function AcervoClient({ initialSources, initialChave, agentes }: Props) {
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {/* Cada cartão LINKAR para a leitura do material: era o que faltava
+              para a equipe não precisar de um sistema externo para consultar o
+              que já está guardado aqui. */}
           {lista.map((s) => (
             <KnowledgeSourceCard
               key={s.id}
               source={s}
               usadoPor={usadoPor(s.id)}
+              href={`/app/ai/knowledge/sources/${s.id}`}
               isReindexing={reindex.isPending && reindex.variables === s.id}
               onReindex={() => reindex.mutate(s.id)}
               onArquivar={() => arquivar.mutate(s.id)}
@@ -149,8 +155,19 @@ export function AcervoClient({ initialSources, initialChave, agentes }: Props) {
           </p>
           <ul className="mt-3 space-y-1 text-sm">
             {arquivados.map((s) => (
-              <li key={s.id} className="text-text-muted">
-                {s.name}
+              <li key={s.id} className="flex items-center justify-between gap-3 text-text-muted">
+                <span className="truncate">{s.name}</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => restaurar.mutate(s.id)}
+                  disabled={restaurar.isPending && restaurar.variables === s.id}
+                  data-testid="acervo-restaurar"
+                >
+                  {restaurar.isPending && restaurar.variables === s.id
+                    ? t("Tirando do arquivo…")
+                    : t("Tirar do arquivo")}
+                </Button>
               </li>
             ))}
           </ul>

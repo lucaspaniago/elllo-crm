@@ -60,7 +60,16 @@ export const PALAVRAS_DE_OPT_OUT: ReadonlySet<string> = new Set([
   "parar",
   "pare",
   "sair",
-  "cancelar",
+  // `cancelar` SOZINHO saiu desta lista (#4579). Medido num curso que atende
+  // pelo WhatsApp: a palavra solta gravava `is_blocked` na INGESTÃO, antes do
+  // modelo — e no canal ela é quase sempre a RESPOSTA a uma pergunta que a
+  // ofereceu ("confirmar, remarcar ou cancelar?"), inclusive um botão com esse
+  // rótulo, que chega como texto. Nenhum rodapé promete CANCELAR como palavra
+  // de saída (`PALAVRAS_DE_SAIDA_DO_RODAPE` é parar/pare/stop/baja): ninguém
+  // que seguiu a instrução deixa de sair. Não foi para as ambíguas de
+  // propósito — o ambíguo manda ao cliente "vou parar de te enviar mensagens"
+  // e cala a IA, o que para quem respondeu a um menu seria promessa falsa.
+  // Quem quer sair tem `parar`, `sair`, `stop` e as frases com objeto abaixo.
   "descadastrar",
   "remover",
   "unsubscribe",
@@ -156,6 +165,28 @@ const OBJETOS_NAO_COMUNICATIVOS =
   "fatura|faturas|boleto|boletos|cobranca|cobrancas|produto|produtos|" +
   "paquete|paquetes|envio|envios|factura|facturas|boleta|boletas|" +
   "cobro|cobros|producto|productos|pauta|pautas|presupuesto|presupuestos";
+
+/**
+ * "material promocional" é a mensagem, não a compra: o freio devolve ao pedido
+ * de saída o objeto de `OBJETOS_DE_COMPRA_RECEBIDOS` que vem qualificado como
+ * propaganda ("não quero receber material de propaganda", "kit promocional").
+ */
+const FREIO_DE_OBJETO_PROMOCIONAL =
+  "(?!\\s+(?:promocional|promocionais|publicitario|publicitarios|de\\s+(?:propaganda|divulgacao|marketing|publicidade|vendas)))";
+
+/**
+ * O que se RECEBE de uma compra e não é a mensagem: o pix, o cartão, o código,
+ * o comprovante, o material, o certificado (#4579). Só o padrão "não quero
+ * receber X" lê esta lista, somada à de cima. Medido num curso: "não quero
+ * receber o boleto" (quer pagar de outro jeito) e "não quero receber o pix"
+ * gravavam `is_blocked` na ingestão — a mesma classe de "não quero receber
+ * ligação, só whatsapp", que o padrão já isentava. Não entra em "parar de
+ * mandar", em que "pare de mandar link" pode ser o pedido.
+ */
+const OBJETOS_DE_COMPRA_RECEBIDOS =
+  "pix|cartao|cartoes|chave|codigo|codigos|comprovante|comprovantes|recibo|recibos|" +
+  "nota|notas|material|materiais|apostila|apostilas|certificado|certificados|livro|livros|" +
+  "kit|kits|reembolso|estorno|parcela|parcelas";
 
 /**
  * Determinantes que podem vir entre o verbo e o objeto não comunicativo —
@@ -311,8 +342,25 @@ const FRASES_DE_OPT_OUT: readonly RegExp[] = [
   ),
   // "não quero (mais) receber" — mas "não quero receber ligação, só whatsapp" é
   // troca de canal, não descadastro: quem diz isso QUER continuar no WhatsApp.
-  /\bnao\s+(?:quero|desejo|gostaria)\s+(?:de\s+)?(?:mais\s+)?receber\b(?!\s+(?:ligacao|ligacoes|chamada|chamadas|telefonema|telefonemas|telefone)\b)/u,
-  /\bnao\s+quero\s+receber\s+mais\b/u,
+  // E "não quero receber o boleto" é forma de pagamento (#4579): o segundo
+  // lookahead exclui o que se recebe de uma compra (`OBJETOS_NAO_COMUNICATIVOS`
+  // + `OBJETOS_DE_COMPRA_RECEBIDOS`), também com "mais" no meio ("não quero
+  // receber mais o boleto"). Sem objeto ("não quero receber mais nada") segue
+  // bloqueando: o lookahead só isenta a lista fechada.
+  // `(?!envios?)`: a lista é compartilhada com o espanhol, onde "envío" é a
+  // remessa; em português "envios" é o próprio disparo (ver `LISTAS_DE_ENVIO`),
+  // e "não quero receber mais envios" é pedido de saída.
+  new RegExp(
+    "\\bnao\\s+(?:quero|desejo|gostaria)\\s+(?:de\\s+)?(?:mais\\s+)?receber\\b" +
+      "(?!\\s+(?:ligacao|ligacoes|chamada|chamadas|telefonema|telefonemas|telefone)\\b)" +
+      `(?!\\s+(?:mais\\s+)?(?:${DETERMINANTES_DE_OBJETO})?\\s*(?!envios?\\b)(?:${OBJETOS_NAO_COMUNICATIVOS}|${OBJETOS_DE_COMPRA_RECEBIDOS})\\b${FREIO_DE_OBJETO_PROMOCIONAL})`,
+    "u",
+  ),
+  new RegExp(
+    "\\bnao\\s+quero\\s+receber\\s+mais\\b" +
+      `(?!\\s+(?:${DETERMINANTES_DE_OBJETO})?\\s*(?!envios?\\b)(?:${OBJETOS_NAO_COMUNICATIVOS}|${OBJETOS_DE_COMPRA_RECEBIDOS})\\b${FREIO_DE_OBJETO_PROMOCIONAL})`,
+    "u",
+  ),
   /\bnao\s+quero\s+mais\s+(?:mensagem|mensagens|contato|nada\s+de\s+voces)\b/u,
   // "não me mande mais" — mas NÃO "não me mande mais boletos": esta regra
   // ancorava só no VERBO, e mandar é verbo de comunicação mesmo quando o
@@ -382,27 +430,17 @@ const FRASES_DE_OPT_OUT: readonly RegExp[] = [
   // As duas leem hoje a MESMA constante (`LISTAS_DE_ENVIO`), que é o que torna
   // impossível uma voltar a divergir da outra.
   new RegExp(`\\bsair\\s+d(?:a|essa|esta)\\s+lista\\b${FREIO_DE_LISTA_QUALIFICADA}`, "u"),
-  // "cancelar a inscrição" — e NÃO "cancelar a assinatura" (#2886). A palavra
-  // `assinatura` saiu daqui para as ambíguas, abaixo, pelo mesmo motivo que a
-  // `subscricao` de Portugal saiu no #2343: ela serve às DUAS coisas, sair das
-  // mensagens e cancelar o plano do produto, e bloqueava quem só perguntava
-  // "posso cancelar a assinatura e voltar depois?" (medido: `is_blocked` gravado
-  // e nenhuma resposta depois).
-  //
-  // `inscricao` FICA, e não por esquecimento: medida na #2886, ela tem o mesmo
-  // formato de defeito ("posso cancelar a inscrição e voltar depois?" grava
-  // `is_blocked`), mas movê-la obriga a reverter uma guarda de INGESTÃO que hoje
-  // a fixa bloqueando (`tests/unit/pos-entrada-efeitos-do-canal.test.ts`), e o
-  // recorte desta fatia é `assinatura`/`suscripcion`. A medição dela está na
-  // evidência da issue como medida-e-não-movida, com o número.
-  /\bcancelar?\s+(?:a\s+)?inscricao\b/u,
-  // ...mas "cancelar a assinatura DAS MENSAGENS" nomeia o objeto de
-  // comunicação, e aí bloqueia na hora — a regra do cabeçalho. A ambígua lá
-  // embaixo só cobre a frase SEM objeto. Vale também para a `subscricao` de
-  // Portugal (#2872), que tinha o mesmo buraco. "do whatsapp" e "de vocês"
-  // ficam DE FORA de propósito: também podem ser o plano, então seguem só
-  // escalando para uma pessoa.
-  /\bcancelar?\s+(?:a\s+)?(?:minha\s+)?(?:assinatura|subscricao)\s+(?:d(?:as|essas|estas)\s+(?:mensagens|notificacoes|promocoes|ofertas|novidades)|d(?:os|esses|estes)\s+(?:avisos|disparos|envios)|d(?:a|essa|esta)\s+newsletter)\b/u,
+  // "cancelar a assinatura/subscrição/inscrição DAS MENSAGENS" nomeia o objeto
+  // de comunicação, e aí bloqueia na hora — a regra do cabeçalho. A frase SEM
+  // objeto fica nas ambíguas, abaixo: `assinatura` desde o #2886, `subscricao`
+  // (Portugal) desde o #2343 e `inscricao` agora (#4579), pelo mesmo motivo — a
+  // palavra serve às DUAS coisas, sair das mensagens e desfazer a matrícula ou
+  // a inscrição num concurso. Medido num curso: "quero cancelar a inscrição" e
+  // "posso cancelar a inscrição e voltar depois?" gravavam `is_blocked` (a
+  // própria #2886 já tinha medido o segundo e deixado para depois). "do
+  // whatsapp" e "de vocês" ficam DE FORA de propósito: também podem ser o plano,
+  // então seguem só escalando para uma pessoa.
+  /\bcancelar?\s+(?:a\s+)?(?:minha\s+)?(?:assinatura|subscricao|inscricao)\s+(?:d(?:as|essas|estas)\s+(?:mensagens|notificacoes|promocoes|ofertas|novidades)|d(?:os|esses|estes)\s+(?:avisos|disparos|envios)|d(?:a|essa|esta)\s+newsletter)\b/u,
   // ── PORTUGUÊS DE PORTUGAL: o pronome vem PRESO ao verbo, DEPOIS dele ──────
   //
   // Em pt-PT o pronome átono é ENCLÍTICO ("remova-me da lista"), enquanto o
@@ -533,6 +571,13 @@ const FRASES_AMBIGUAS_DE_OPT_OUT: readonly RegExp[] = [
   // Aqui escala para um humano, que decide o bloqueio de verdade — o custo
   // aceito (campanhas seguem até alguém decidir) está na #2886.
   /\bcancelar?\s+(?:a\s+)?(?:minha\s+)?assinatura\b/u,
+  // "cancelar a inscrição" — a MESMA decisão, pela mesma razão (#4579). É o
+  // "cancelar inscrição" dos rodapés de e-mail E é a matrícula de um curso ou a
+  // inscrição num concurso. Bloqueava na ingestão (ver `FRASES_DE_OPT_OUT`);
+  // agora escala. O recorte é o que já bloqueava (`cancelar?\s+(?:a\s+)?inscricao`),
+  // sem alargar: "cancelar minha inscrição no curso" não era sinal e continua
+  // não sendo.
+  /\bcancelar?\s+(?:a\s+)?inscricao\b/u,
   // ── espanhol ──────────────────────────────────────────────────────────────
   //
   // Esta lista tinha ZERO entradas em espanhol. Não por decisão: o ambíguo é
@@ -576,27 +621,155 @@ function ehPalavraIsolada(normalizado: string): boolean {
 }
 
 /**
- * É pedido de descadastro INEQUÍVOCO? Só este autoriza gravar `is_blocked` —
- * ver o cabeçalho deste arquivo sobre por que o ambíguo não entra aqui.
+ * ─── A ASSINATURA DA ATENDENTE NA PRIMEIRA LINHA (#3078, ajustada no #3158) ──
+ *
+ * Num WhatsApp Business com vários atendentes, a assinatura é prefixada ao
+ * texto — a mensagem chega assim:
+ *
+ *   *Amanda Nobre:*
+ *   PARAR
+ *
+ * A decisão lia o texto INTEIRO: `*amanda nobre:*\nparar` faz `ehPalavraIsolada`
+ * colar as letras ("amandanobreparar", fora do conjunto) e nenhuma frase de
+ * `FRASES_DE_OPT_OUT` casa — o pedido se perdia. Efeito medido no relato
+ * (1.85.0): o contato não era bloqueado, o card não ia para perdido e a IA
+ * respondia — quem pediu para sair seguia recebendo prospecção (risco de
+ * denúncia do número e de LGPD, art. 18).
+ *
+ * O recorte NÃO é regra nova: a assinatura muda o TEXTO analisado, e o pedido
+ * continua julgado pela MESMA régua — palavra sozinha ou frase de
+ * `FRASES_DE_OPT_OUT`. Nenhuma palavra duvidosa vira inequívoca aqui, e o
+ * limiar que grava `is_blocked` não se move.
+ *
+ * ─── O AJUSTE DO #3158: a marca da assinatura é o NEGRITO + DOIS PONTOS ──────
+ *
+ * A primeira versão aceitava também a forma SEM asteriscos (`Nome:` com até 4
+ * palavras) e julgava SÓ o recortado. Medido pelo mantenedor com 28 frases (o
+ * mesmo corpus desta seção de teste), os dois detalhes erravam dos dois lados:
+ *
+ *   `Consulta de amanhã:` + `cancelar`   → bloqueava (rótulo curto lido como
+ *   `Pedido 123:` + `cancelar`              assinatura; o resto vira a palavra
+ *   `Sua mensagem:` + `PARAR`               isolada e o contato é silenciado
+ *   `Dúvida:`/`Remédio:` + `parar?`         para sempre por um rótulo)
+ *   `*Não quero mais receber*` + `obrigado` → NÃO bloqueava (a primeira linha É
+ *   `*Pare de me mandar mensagem*` + `chato`   o pedido e o recorte a jogava
+ *   `Não quero mais receber:` + `obrigado`     fora, sobrando só "obrigado")
+ *
+ * São 9 frases × as duas funções = 18 resultados que mudavam de veredito contra
+ * a `main` (medido, ver o comentário do PR #3158). Duas decisões desfazem as 18:
+ *
+ *   1. só o NEGRITO do WhatsApp Business é assinatura, e ele termina em dois
+ *      pontos — `*Amanda Nobre:*`, `*Amanda Nobre*:`. Sem asteriscos, `Nome:` é
+ *      um rótulo qualquer ("Consulta de amanhã:") e deixa de ser assinatura; a
+ *      forma sem dois pontos (`*Não quero mais receber*`) é uma FRASE em
+ *      negrito, não um nome — ela nem chega a ser recortada;
+ *   2. quem julga é sempre o par: o texto ORIGINAL **ou** o recortado, e basta
+ *      um dos dois bloquear. É o item 2 que sustenta o item 1 — sem ele, jogar
+ *      fora a primeira linha apagaria o pedido que VIVE nela.
+ *
+ * Limites declarados (não são silêncio, são escolha):
+ *   - um rótulo em negrito com dois pontos (`*Remédio:*` + `parar?`) continua
+ *     sendo lido como assinatura e bloqueia. Estruturalmente é idêntico a um
+ *     nome em negrito (`*Ana:*`); separar os dois exigiria um dicionário de
+ *     nomes próprios. Custo aceito: prefere-se o bloqueio (falso positivo) à
+ *     perda do pedido de quem assina — os dois erros estão medidos nesta seção;
+ *   - a primeira linha em negrito SEM dois pontos (`*Amanda Nobre*` + `PARAR`)
+ *     e o rótulo sem asteriscos (`Amanda Nobre:` + `PARAR`) deixam de ser
+ *     assinatura. Quando o que vem depois é uma FRASE de pedido, nada se perde
+ *     (o texto original é julgado também); o que se perde é só a palavra
+ *     solta depois de um rótulo sem a marca de assinatura. É a troca que
+ *     desfaz os 5 falsos positivos: a assinatura real do relato tem o negrito.
  */
-export function ehPedidoDeOptOut(texto: string | null | undefined): boolean {
-  if (!texto) return false;
+
+/**
+ * A primeira linha é uma ASSINATURA de atendente?
+ *
+ * A marca é o NEGRITO do WhatsApp Business MAIS os dois pontos do rótulo, com
+ * a linha INTEIRA (nada antes, nada depois — o chamador já passou `trim`):
+ *   `*Amanda Nobre:*` / `*Amanda Nobre*:` — dois pontos dentro ou fora dos
+ *     asteriscos. É a forma que a issue #3078 descreve e a que o relato traz;
+ *   `*Dra. Amanda Nobre:*` — o ponto de abreviação do nome não atrapalha: o que
+ *     se exige é o `:` do rótulo, não a ausência de `.`.
+ *
+ * Ficam de fora, de propósito (#3158):
+ *   - `Nome:` SEM asteriscos — era aqui que "Consulta de amanhã:" e "Dúvida:"
+ *     viravam assinatura e o contato era silenciado por um rótulo;
+ *   - `*Não quero mais receber*` — negrito SEM dois pontos: é uma frase em
+ *     negrito, e recortá-la comia o próprio pedido.
+ */
+function ehAssinaturaDaAtendente(linha: string): boolean {
+  if (linha === "") return false;
+  return /^\*[^*\n]+:\*:?$/u.test(linha) || /^\*[^*\n]+\*:$/u.test(linha);
+}
+
+/**
+ * O texto SEM a assinatura da atendente na primeira linha — pura e pequena,
+ * para rodar na ENTRADA de toda decisão que hoje olha o texto cru.
+ *
+ * Limites do recorte, medidos com os casos de `opt-out-deteccao.test.ts`:
+ *   - só recorta quando a primeira linha INTEIRA é uma assinatura E existe
+ *     texto DEPOIS dela. Mensagem de UMA linha só é preservada — é o que
+ *     mantém `*PARAR:*` sozinho bloqueando (recortar devolveria vazio e o
+ *     pedido morreria), e o que protege uma mensagem legítima de duas linhas
+ *     cujo começo não é assinatura (`Bom dia\nvamos falar amanha`);
+ *   - o RESTO é devolvido intacto: o recorte não decide nada, só tira o ruído
+ *     da frente;
+ *   - o texto ORIGINAL continua sendo julgado junto com o recortado (#3158):
+ *     quem decide é `ehPedidoDeOptOut`/`ehOptOutProvavel`, e eles olham os dois.
+ */
+export function semAssinaturaDaAtendente(texto: string): string {
+  const quebra = texto.indexOf("\n");
+  if (quebra === -1) return texto;
+  const resto = texto.slice(quebra + 1);
+  if (resto.trim() === "") return texto;
+  return ehAssinaturaDaAtendente(texto.slice(0, quebra).trim()) ? resto : texto;
+}
+
+/**
+ * A régua de UM texto: a palavra sozinha ou uma frase de `FRASES_DE_OPT_OUT`.
+ * É a mesma régua de sempre — não sabe nada sobre assinatura.
+ */
+function ehPedidoInequivoco(texto: string): boolean {
   const normalizado = normalizarTexto(texto.trim());
   if (normalizado === "") return false;
   if (ehPalavraIsolada(normalizado)) return true;
   return FRASES_DE_OPT_OUT.some((re) => re.test(normalizado));
 }
 
+/** A régua do AMBÍGUO sobre um texto — o irmão conservador de cima. */
+function ehSinalAmbiguo(texto: string): boolean {
+  const normalizado = normalizarTexto(texto.trim());
+  if (normalizado === "") return false;
+  return FRASES_AMBIGUAS_DE_OPT_OUT.some((re) => re.test(normalizado));
+}
+
+/**
+ * É pedido de descadastro INEQUÍVOCO? Só este autoriza gravar `is_blocked` —
+ * ver o cabeçalho deste arquivo sobre por que o ambíguo não entra aqui.
+ *
+ * Julga os DOIS textos e basta UM bloquear (#3158):
+ *   - o ORIGINAL, para o pedido que VIVE na primeira linha em negrito
+ *     (`*Não quero mais receber*` + `obrigado`) — o recorte o apagaria;
+ *   - o RECORTADO, para o pedido que vem depois da assinatura
+ *     (`*Amanda Nobre:*` + `PARAR`) — o texto cru cola as letras e não casa
+ *     nada.
+ * O `ou` é obrigatório: cada texto cobre o erro do outro, e é ele que permite
+ * estreitar o que conta como assinatura sem perder pedido nenhum.
+ */
+export function ehPedidoDeOptOut(texto: string | null | undefined): boolean {
+  if (!texto) return false;
+  return ehPedidoInequivoco(texto) || ehPedidoInequivoco(semAssinaturaDaAtendente(texto.trim()));
+}
+
 /**
  * É pedido de descadastro INEQUÍVOCO **ou** sinal ambíguo de que a pessoa quer
  * parar? Sinal conservador do runtime: para de responder e escala; o bloqueio
- * real fica com o humano.
+ * real fica com o humano. Mesmo par de textos de `ehPedidoDeOptOut` (#3158).
  */
 export function ehOptOutProvavel(texto: string | null | undefined): boolean {
   if (!texto) return false;
   if (ehPedidoDeOptOut(texto)) return true;
-  const normalizado = normalizarTexto(texto.trim());
-  return FRASES_AMBIGUAS_DE_OPT_OUT.some((re) => re.test(normalizado));
+  return ehSinalAmbiguo(texto) || ehSinalAmbiguo(semAssinaturaDaAtendente(texto.trim()));
 }
 
 /**

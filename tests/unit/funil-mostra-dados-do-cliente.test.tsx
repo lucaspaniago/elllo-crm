@@ -24,11 +24,24 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const useContact = vi.hoisted(() => vi.fn());
+const useContatosRelacionados = vi.hoisted(() => vi.fn());
+const adicionarParticipante = vi.hoisted(() => vi.fn());
+const removerParticipante = vi.hoisted(() => vi.fn());
+const useContactList = vi.hoisted(() => vi.fn());
 const mutateAsync = vi.hoisted(() => vi.fn());
 const toast = vi.hoisted(() => ({ error: vi.fn(), success: vi.fn() }));
 
 vi.mock("@/hooks/i18n/useT", () => ({ useT: () => (texto: string) => texto }));
 vi.mock("@/hooks/contacts/useContact", () => ({ useContact }));
+vi.mock("@/hooks/contacts/useContactList", () => ({ useContactList }));
+// O ESCRITOR do vínculo (#3083 F1): o dossiê ganhou adicionar, remover e dar
+// papel. Aqui os dois hooks entram dublados — o que este arquivo prova é a
+// TELA (o controle existe, manda o que deve e some quando não há âncora).
+vi.mock("@/hooks/leads/useContatosRelacionados", () => ({ useContatosRelacionados }));
+vi.mock("@/hooks/leads/useParticipantesDoNegocio", () => ({
+  useAdicionarParticipante: () => ({ mutateAsync: adicionarParticipante, isPending: false }),
+  useRemoverParticipante: () => ({ mutate: removerParticipante, isPending: false }),
+}));
 vi.mock("@/hooks/contacts/useUpdateContact", () => ({
   useUpdateContact: () => ({ mutateAsync, isPending: false }),
 }));
@@ -61,13 +74,32 @@ const CONTATO = {
   email: "ana@exemplo.com",
   phone_number: "+5511999998888",
   updated_at: "2026-09-19T10:00:00Z",
-  custom_fields: { cor_favorita: "azul", link_instagram: "instagram.com/loja" } as Record<string, unknown>,
+  custom_fields: { cor_favorita: "azul", link_instagram: "instagram.com/loja" } as Record<
+    string,
+    unknown
+  >,
+};
+
+/** O candidato a PARTICIPANTE que a busca do dossiê oferece (#3083 F1). */
+const OUTRO = {
+  id: "c-2",
+  name: "João Souza",
+  display_name: null,
+  email: null,
+  phone_number: null,
+  updated_at: "2026-09-19T10:00:00Z",
+  custom_fields: {} as Record<string, unknown>,
 };
 
 beforeEach(() => {
   vi.clearAllMocks();
   useContact.mockReturnValue({ data: { data: CONTATO }, isLoading: false, isError: false });
   mutateAsync.mockResolvedValue({ data: CONTATO });
+  // Sem `leadId` a lista não consulta nada; quem passa a âncora devolve o que
+  // cada teste montar.
+  useContatosRelacionados.mockReturnValue({ data: { data: [] }, isLoading: false, isError: false });
+  useContactList.mockReturnValue({ data: { pages: [{ data: [OUTRO] }] }, isLoading: false });
+  adicionarParticipante.mockResolvedValue({ data: {} });
 });
 
 afterEach(cleanup);
@@ -92,8 +124,16 @@ describe("ContatoNoCard", () => {
       />,
     );
 
-    expect(screen.getByText("+5511999998888")).toBeInTheDocument();
-    expect(screen.getByText("ana@exemplo.com")).toBeInTheDocument();
+    const telefone = screen.getByText("+5511999998888");
+    expect(telefone).toBeInTheDocument();
+    expect(telefone.className).toContain("shrink-0");
+    const email = screen.getByText("ana@exemplo.com");
+    expect(email).toBeInTheDocument();
+    expect(email).toHaveAttribute("title", "ana@exemplo.com");
+    expect(email.className).toContain("min-w-0");
+    expect(email.className).toContain("overflow-hidden");
+    expect(email.className).toContain("text-ellipsis");
+    expect(email.className).toContain("whitespace-nowrap");
 
     const instagram = screen.getByRole("link", { name: "Abrir Instagram" });
     expect(instagram).toHaveAttribute("href", "https://www.instagram.com/loja");
@@ -246,6 +286,88 @@ describe("ContatoDoNegocio — as abas do dossiê", () => {
   });
 });
 
+describe("ContatoDoNegocio — o escritor das pessoas relacionadas (a #3083 F1)", () => {
+  it("⭐ lista vazia NÃO some: ela diz que está vazia e oferece o controle de adicionar", () => {
+    comQuery(<ContatoDoNegocio contactId="c-1" pipelineId="p-1" leadId="l-1" />);
+
+    // A seção existir com a lista vazia é o ponto: se ela devolvesse null (como
+    // na versão só-leitora), o único controle que ADICIONA a primeira pessoa
+    // ficaria inalcançável justo nos negócios que mais precisam dele.
+    expect(screen.getByTestId("pessoas-relacionadas")).toBeInTheDocument();
+    expect(screen.getByText("Nenhuma pessoa relacionada ainda.")).toBeInTheDocument();
+    expect(screen.getByTestId("adicionar-participante")).toBeInTheDocument();
+  });
+
+  it("sem a âncora do negócio, o bloco inteiro não renderiza — e ninguém consulta nada", () => {
+    comQuery(<ContatoDoNegocio contactId="c-1" pipelineId="p-1" />);
+
+    expect(useContatosRelacionados).toHaveBeenCalledWith(null);
+    expect(screen.queryByTestId("pessoas-relacionadas")).toBeNull();
+    expect(screen.queryByTestId("adicionar-participante")).toBeNull();
+    // A busca só existe com o formulário aberto: sem âncora, nenhuma chamada.
+    expect(useContactList).not.toHaveBeenCalled();
+  });
+
+  it("⭐ adicionar manda o POST com o papel digitado e relê a lista", async () => {
+    comQuery(<ContatoDoNegocio contactId="c-1" pipelineId="p-1" leadId="l-1" />);
+
+    // Fechado, o formulário não existe: a lista de contatos só é buscada quando
+    // alguém abre o controle.
+    expect(screen.queryByTestId("formulario-de-participante")).toBeNull();
+    fireEvent.click(screen.getByTestId("adicionar-participante"));
+
+    const form = screen.getByTestId("formulario-de-participante");
+    expect(within(form).getByText("João Souza")).toBeInTheDocument();
+    fireEvent.change(within(form).getByLabelText("Papel"), { target: { value: "Pagante" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Adicionar" }));
+
+    await waitFor(() =>
+      expect(adicionarParticipante).toHaveBeenCalledWith({ contact_id: "c-2", papel: "Pagante" }),
+    );
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Participante adicionado."));
+    // Fechou: o dossiê volta ao estado de leitura depois do gesto.
+    await waitFor(() => expect(screen.queryByTestId("formulario-de-participante")).toBeNull());
+  });
+
+  it("papel em branco vai como null — o servidor limpa o papel sem tirar a pessoa", async () => {
+    comQuery(<ContatoDoNegocio contactId="c-1" pipelineId="p-1" leadId="l-1" />);
+    fireEvent.click(screen.getByTestId("adicionar-participante"));
+    const form = screen.getByTestId("formulario-de-participante");
+
+    fireEvent.click(within(form).getByRole("button", { name: "Adicionar" }));
+
+    await waitFor(() =>
+      expect(adicionarParticipante).toHaveBeenCalledWith({ contact_id: "c-2", papel: null }),
+    );
+  });
+
+  it("⭐ remover manda o DELETE do contato daquela linha", () => {
+    useContatosRelacionados.mockReturnValue({
+      data: {
+        data: [{ contact_id: "c-2", nome: "João Souza", papel: "Pagante", anonimizado: false }],
+      },
+      isLoading: false,
+      isError: false,
+    });
+    comQuery(<ContatoDoNegocio contactId="c-1" pipelineId="p-1" leadId="l-1" />);
+
+    expect(screen.getByText("João Souza")).toBeInTheDocument();
+    expect(screen.getByText("(Pagante)")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Remover João Souza" }));
+
+    expect(removerParticipante).toHaveBeenCalledWith(
+      "c-2",
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    );
+    // A confirmação só sai depois que o servidor removeu: é o onSuccess da
+    // mutação que a dispara, não o clique.
+    expect(toast.success).not.toHaveBeenCalled();
+    const [, opcoes] = removerParticipante.mock.calls[0] ?? [];
+    opcoes?.onSuccess();
+    expect(toast.success).toHaveBeenCalledWith("Participante removido.");
+  });
+});
+
 describe("a fiação — quem usa a regra a chama", () => {
   it("⭐ a rota lê o dado do contato na MESMA consulta dos marcadores e o aplica nos leads", () => {
     const rota = fonte("app/api/v1/pipelines/[id]/board/route.ts");
@@ -254,8 +376,10 @@ describe("a fiação — quem usa a regra a chama", () => {
     expect(inicio, "a etapa dos marcadores sumiu da rota").toBeGreaterThan(-1);
     const etapa = rota.slice(inicio, fim);
 
-    expect(etapa, "a consulta não traz telefone, e-mail e custom_fields").toMatch(
-      /\.select\(\s*"id, tags, phone_number, email, custom_fields, is_anonymized"\s*\)/,
+    // `avatar_storage_path` entra na MESMA consulta (a foto do card): nenhuma
+    // leitura nova de `contacts` por quadro.
+    expect(etapa, "a consulta não traz telefone, e-mail, custom_fields e a foto").toMatch(
+      /\.select\(\s*"id, tags, phone_number, email, custom_fields, is_anonymized, avatar_storage_path"\s*\)/,
     );
     expect(etapa, "anexarDadosDoContato não é chamada na etapa").toMatch(
       /anexarDadosDoContato\(\s*leadsDoQuadro,\s*linhas\s*\)/,

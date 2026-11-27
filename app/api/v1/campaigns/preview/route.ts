@@ -11,12 +11,14 @@ import { randomUUID } from "node:crypto";
 
 import type { NextRequest } from "next/server";
 
+import { resolveAuthDual, tetoDeEscritaDoToken } from "@/lib/api/auth-dual";
 import { fail, ok } from "@/lib/api/wrappers";
-import { requireRole } from "@/lib/auth/require-role";
 import { requireSupportWrite } from "@/lib/impersonate/support";
-import { preverAudiencia } from "@/lib/campanhas/preparacao";
+import { conferirModeloDaCampanha } from "@/lib/campanhas/modelo-da-conexao";
+import { preverAudiencia, type ModeloPreparado } from "@/lib/campanhas/preparacao";
 import { previaSchema } from "@/lib/campanhas/schemas";
 import { TEXTO_DA_EXCLUSAO } from "@/lib/campanhas/tipos";
+import { IDIOMA_PADRAO } from "@/lib/i18n/idiomas";
 import { traduzir } from "@/lib/i18n/dicionario";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -32,9 +34,19 @@ export async function POST(req: NextRequest): Promise<Response> {
   if (negado) return negado;
 
   const requestId = randomUUID();
-  const authz = await requireRole("manager", { requestId, resource: "campaigns" });
+  const authz = await resolveAuthDual(req, {
+    requestId,
+    resource: "campaigns",
+    role: "manager",
+    scope: "mcp:write",
+  });
   if (!authz.ok) return authz.response;
-  const t = (texto: string) => traduzir(texto, authz.user.idioma);
+  // POST sem gravação: pede o escopo de escrita (decisão conservadora, como
+  // toda POST da API). A prévia não grava nada.
+  const teto = await tetoDeEscritaDoToken(authz, "campaigns_previa", requestId);
+  if (teto) return teto;
+  const t = (texto: string) => traduzir(texto, authz.idioma ?? IDIOMA_PADRAO);
+  const org = { orgId: authz.organizationId };
 
   const parsed = previaSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {
@@ -49,12 +61,37 @@ export async function POST(req: NextRequest): Promise<Response> {
   // o usuário não veria por outro caminho — e é isso que ela precisa contar.
   const admin = createAdminClient();
   try {
+    // Com modelo, quem sai por "falta um dado" é decidido pelo MAPA de variáveis
+    // — a mesma conferência de salvar e de preparar. Modelo que ainda não serve
+    // (mapa incompleto) não derruba a prévia: ela conta pelo público, e a tela
+    // já mostra o que falta no mapa.
+    let modelo: ModeloPreparado | undefined;
+    if (parsed.data.modelo) {
+      const m = parsed.data.modelo;
+      const conferencia = await conferirModeloDaCampanha(
+        admin,
+        {
+          organizationId: org.orgId,
+          channelSessionId: m.channel_session_id,
+          name: m.name,
+          language: m.language,
+        },
+        m.variables,
+      );
+      if (conferencia.ok) {
+        modelo = { definicao: conferencia.definicao, contrato: conferencia.contrato, variaveis: m.variables };
+      }
+    }
     const resumo = await preverAudiencia(admin, {
-      organizationId: authz.org.orgId,
+      organizationId: org.orgId,
       filtro: parsed.data.audience_filter,
+      // No e-mail o corpo é o do e-mail: as variáveis (`{{nome}}`) saem daqui,
+      // como no WhatsApp — o que muda é o endereço exigido (#3441).
       corpo: parsed.data.message_body,
       agora: new Date(),
       campanhaId: parsed.data.campaign_id,
+      ...(modelo ? { modelo } : {}),
+      ...(parsed.data.canal === "email" ? { canal: "email" as const } : {}),
     });
     return ok(
       {

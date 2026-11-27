@@ -37,6 +37,7 @@ import {
   type LeadContextMessage,
 } from '../edge/crm/get-lead-context';
 import { applySaveLeadNote } from './lead-notes';
+import { CATEGORIAS_DO_DOSSIE, SIGNIFICADO_DA_CATEGORIA, ehCategoriaDoDossie } from './dossie';
 
 /** Knobs da compaction (env COMPACTION_*; defaults conservadores no .env.example). */
 export interface CompactionKnobs {
@@ -53,14 +54,38 @@ export interface CompactionKnobs {
   transcriptMaxTokens: number;
 }
 
+/**
+ * Flush e compaction não levam o `system` do turno, onde mora a regra de autoria
+ * (`AUTORIA_SYSTEM_BLOCK`): sem esta frase, o que o cliente afirma que a empresa disse
+ * viraria fato no resumo durável. O checkpoint não precisa dela — o fechamento leva o `system`.
+ */
+export const ALEGACAO_DO_CLIENTE =
+  'O que o cliente diz que a empresa disse ou concedeu, sem mensagem nossa que o mostre, é ' +
+  'alegação dele ("o cliente diz que…"), nunca compromisso nem fato. ';
+
+/**
+ * Fork elllo (9005): o dossiê do contato. A categoria é do modelo; quem contou, do código
+ * (`fonteDaEscritaDoAgente`). O que a pessoa contou de TERCEIROS não entra: nada de
+ * fofoca automática (a mesma regra da madrugada do Hermes).
+ */
+export const REGRA_DO_DOSSIE =
+  'Cada nota tem uma categoria, para o rapport com esta pessoa: ' +
+  CATEGORIAS_DO_DOSSIE.map((c) => `${c} (${SIGNIFICADO_DA_CATEGORIA[c]})`).join('; ') +
+  '. Guarde só o que a pessoa contou de si mesma, do negócio dela, ou o que você notou do jeito e ' +
+  'do tom dela; nunca o que ela contou de outra pessoa. Não repita nota que já existe. ';
+
 /** Instrução FIXA do flush — marcador estável (como CHECKPOINT_INSTRUCTION) para os testes. */
 export const FLUSH_INSTRUCTION =
   'Turno interno de memória (NÃO é resposta ao lead). A conversa acima vai ser compactada e o ' +
   'histórico detalhado será descartado. ANTES disso, extraia os fatos DURÁVEIS que valem lembrar ' +
   'em conversas futuras: preferências, contexto pessoal, restrições, o que já foi oferecido ou ' +
-  'combinado. Responda SOMENTE com um JSON no formato ' +
-  '{"notes": [{"headline": string, "body": string}]} — headline é uma linha curta para o índice; ' +
-  'body é o detalhe. Sem fatos duráveis? Responda {"notes": []}. Nada fora do JSON.';
+  'combinado. ' +
+  REGRA_DO_DOSSIE +
+  'Responda SOMENTE com um JSON no formato ' +
+  '{"notes": [{"headline": string, "body": string, "categoria": string}]} — headline é uma linha ' +
+  'curta para o índice; body é o detalhe. Sem fatos duráveis? Responda {"notes": []}. ' +
+  ALEGACAO_DO_CLIENTE +
+  'Nada fora do JSON.';
 
 /** Instrução FIXA da compaction — marcador estável para os testes. */
 export const COMPACTION_INSTRUCTION =
@@ -68,7 +93,9 @@ export const COMPACTION_INSTRUCTION =
   'assumidos, objeções do lead, dados pessoais citados e o estágio do funil. Responda SOMENTE com ' +
   'um JSON no formato {"commitments": string[], "objections": string[], "personal_data": string[], ' +
   '"stage": string|null, "rolling_summary": string} — rolling_summary acumula o fio da conversa ' +
-  '(inclua o que o resumo anterior já dizia). Sem texto fora do JSON.';
+  '(inclua o que o resumo anterior já dizia). ' +
+  ALEGACAO_DO_CLIENTE +
+  'Sem texto fora do JSON.';
 
 export const compactionOutputSchema = z.object({
   commitments: z.array(z.string()).default([]),
@@ -80,8 +107,19 @@ export const compactionOutputSchema = z.object({
 export type CompactionOutput = z.infer<typeof compactionOutputSchema>;
 
 const flushOutputSchema = z.object({
-  notes: z.array(z.object({ headline: z.string().min(1), body: z.string().min(1) })).default([]),
+  notes: z
+    .array(
+      z.object({
+        headline: z.string().min(1),
+        body: z.string().min(1),
+        // Categoria fora do vocabulário vira `fato` (o modelo auxiliar erra a grafia; a
+        // nota não se perde por isso).
+        categoria: z.string().optional().transform((c) => (ehCategoriaDoDossie(c) ? c : 'fato')),
+      }),
+    )
+    .default([]),
 });
+export type NotaDoFlush = z.infer<typeof flushOutputSchema>['notes'][number];
 
 /**
  * Extrai o JSON do texto do modelo (tolerante a cerca de código/prosa e a
@@ -131,7 +169,7 @@ export function trimTranscriptToBudget(
 }
 
 function buildTranscriptMessage(
-  context: LeadContext,
+  context: LeadContext | TranscriptDoAtendimento,
   previousSummary: string,
   instruction: string,
 ): string {
@@ -157,8 +195,10 @@ async function runFlush(
   cfg: LlmEdgeConfig,
   ids: { tenantId: string; leadId: string | null; jobId?: string },
   args: {
-    context: LeadContext;
+    context: LeadContext | TranscriptDoAtendimento;
     previousSummary: string;
+    /** Fork elllo (9005): o resumo do atendimento fechado usa a sua instrução. */
+    instruction?: string;
     model?: string;
     llmOverride?: LlmResolveOverride;
     notesIndexMaxTokens: number;
@@ -168,7 +208,7 @@ async function runFlush(
     log: Logger;
     noteSink?: (note: { headline: string; body: string }) => void;
   },
-): Promise<void> {
+): Promise<number> {
   const call = await runModelCall(
     db,
     cfg,
@@ -182,7 +222,7 @@ async function runFlush(
       messages: [
         {
           role: 'user',
-          content: buildTranscriptMessage(args.context, args.previousSummary, FLUSH_INSTRUCTION),
+          content: buildTranscriptMessage(args.context, args.previousSummary, args.instruction ?? FLUSH_INSTRUCTION),
         },
       ],
     },
@@ -198,9 +238,10 @@ async function runFlush(
     deps.log.warn(
       'flush pré-compaction: saída do modelo auxiliar sem JSON de notas — nenhuma nota gravada',
     );
-    return;
+    return 0;
   }
 
+  let gravadas = 0;
   for (const note of notes) {
     if (deps.noteSink) {
       deps.noteSink(note);
@@ -220,8 +261,66 @@ async function runFlush(
       deps.log.warn('flush pré-compaction: nota durável recusada pelo cap do índice de notas', {
         code: res.error.code,
       });
+      continue;
     }
+    gravadas++;
   }
+  return gravadas;
+}
+
+/**
+ * Fork elllo (9005): o transcript de UM atendimento fechado, montado pelo laço do
+ * dossiê (`dossie-ao-fechar.ts`) a partir de `messages` — só texto, do mais antigo ao
+ * mais novo. Mesmo papel do `LeadContext` no flush da compaction.
+ */
+export interface TranscriptDoAtendimento {
+  atendimento: { inicio: string; fim: string };
+  mensagens: Array<{ quem: 'contato' | 'nos'; em: string; texto: string }>;
+}
+
+/** A instrução do resumo do atendimento fechado (marcador estável para os testes). */
+export const FLUSH_DO_FECHAMENTO_INSTRUCTION =
+  'Turno interno de memória (NÃO é resposta ao contato). Este atendimento acabou de ser ' +
+  'encerrado. Extraia o que vale lembrar desta pessoa nos próximos contatos, para o rapport e ' +
+  'para não perguntar de novo o que ela já contou. As notas que já existem estão em "Resumo ' +
+  'acumulado": não repita nenhuma. ' +
+  REGRA_DO_DOSSIE +
+  'Responda SOMENTE com um JSON no formato ' +
+  '{"notes": [{"headline": string, "body": string, "categoria": string}]}, no máximo 6 notas — ' +
+  'headline é uma linha curta; body é o detalhe. Nada que valha? Responda {"notes": []}. ' +
+  ALEGACAO_DO_CLIENTE +
+  'Nada fora do JSON.';
+
+/**
+ * Fork elllo (9005): grava no dossiê o que um atendimento FECHADO deixou (o "flush ao
+ * fechar"). Mesmo caminho do flush da compaction — `applySaveLeadNote`, com a fonte
+ * posta pelo código e o teto do índice —, outra instrução. Devolve quantas gravou.
+ */
+export async function gravarDossieDoAtendimento(
+  db: pg.Pool,
+  cfg: LlmEdgeConfig,
+  ids: { tenantId: string; leadId: string },
+  args: {
+    transcript: TranscriptDoAtendimento;
+    notasAtuais: string;
+    model?: string;
+    notesIndexMaxTokens: number;
+  },
+  deps: { registry?: ProviderRegistry; log: Logger },
+): Promise<number> {
+  return runFlush(
+    db,
+    cfg,
+    ids,
+    {
+      context: args.transcript,
+      previousSummary: args.notasAtuais,
+      instruction: FLUSH_DO_FECHAMENTO_INSTRUCTION,
+      ...(args.model !== undefined ? { model: args.model } : {}),
+      notesIndexMaxTokens: args.notesIndexMaxTokens,
+    },
+    deps,
+  );
 }
 
 /**

@@ -1,5 +1,5 @@
 /**
- * Convite de time, em PT-BR, sem React Email. Devolve subject/html/text.
+ * Convite de time, sem React Email. Devolve subject/html/text.
  * Estilo inline apenas (compatibilidade com cliente de e-mail); zero asset
  * externo.
  *
@@ -14,8 +14,20 @@
  * renderizado por ninguém. Um e-mail que diz o nome do revendedor mas mostra a
  * arte de ninguém é meia marca; e este é o e-mail que a pessoa abre antes de
  * ter visto qualquer tela do produto.
+ *
+ * O IDIOMA (#4302) chega resolvido em `idioma` e vale para assunto, título,
+ * corpo, botão, validade e texto puro. Quem convida é quem tem a organização —
+ * a pessoa convidada ainda não tem preferência salva, então a cadeia
+ * `destinatário → organização → APP_LOCALE` cai no idioma da empresa. O texto
+ * vive no dicionário da interface; este arquivo não guarda frase nenhuma.
  */
+import { rotuloDoPapel } from "@/lib/auth/types";
 import { NEUTROS_DE_SAIDA, type MarcaDeSaida } from "@/lib/branding/saida";
+import { traduzir } from "@/lib/i18n/dicionario";
+import { IDIOMA_PADRAO, type Idioma } from "@/lib/i18n/idiomas";
+
+import { estruturaDeEmail } from "./estrutura";
+import { preencher } from "./texto";
 
 export interface InviteEmailOptions {
   inviterName: string;
@@ -25,6 +37,8 @@ export interface InviteEmailOptions {
   expiresAt: Date;
   /** A marca de quem convidou. Obrigatória — sem ela o e-mail não tem dono. */
   marca: MarcaDeSaida;
+  /** O idioma de quem recebe. Sem ele, `pt-BR` — o comportamento de antes. */
+  idioma?: Idioma;
 }
 
 export function buildInviteEmail(opts: InviteEmailOptions): {
@@ -32,67 +46,59 @@ export function buildInviteEmail(opts: InviteEmailOptions): {
   html: string;
   text: string;
 } {
-  const expiresStr = opts.expiresAt.toLocaleString("pt-BR", {
+  const idioma = opts.idioma ?? IDIOMA_PADRAO;
+  const t = (texto: string, valores: Readonly<Record<string, string>> = {}) =>
+    preencher(traduzir(texto, idioma), valores);
+
+  const expiresStr = opts.expiresAt.toLocaleString(idioma, {
     timeZone: "America/Sao_Paulo",
   });
   const marca = opts.marca.nome;
-  const subject = `${opts.inviterName} convidou você para a ${opts.orgName} no ${marca}`;
+  const subject = t("{convidador} convidou você para a {organizacao} no {marca}", {
+    convidador: opts.inviterName,
+    organizacao: opts.orgName,
+    marca,
+  });
 
-  /**
-   * O logo de quem convidou, quando há um.
-   *
-   * `<img>` solto e não background: cliente de e-mail não carrega CSS externo e
-   * boa parte ignora `background-image`. Dimensão no ATRIBUTO além do style
-   * porque Outlook desktop descarta `height` de style em imagem, e sem dimensão
-   * ele renderiza a arte no tamanho original — um PNG de 1200px arrebentaria a
-   * largura de 560 do corpo.
-   *
-   * A URL passa por `escapeHtml` como qualquer outro valor: ela vem de
-   * `platform_branding.logo_url`, que é `text` livre no banco (a tela de marca
-   * ainda não a edita), e uma aspa ali escaparia do atributo.
-   *
-   * Sem logo, NADA é renderizado: um espaço reservado vazio é pior que ausência
-   * — o cliente de e-mail desenharia o ícone de imagem quebrada no topo do
-   * primeiro e-mail que a pessoa recebe do sistema.
-   */
-  const logo = opts.marca.logoUrl
-    ? `<p style="margin:0 0 24px"><img src="${escapeHtml(opts.marca.logoUrl)}" alt="${escapeHtml(marca)}" height="40" style="height:40px;width:auto;max-width:200px;border:0;display:block"></p>`
-    : "";
+  // O papel pelo NOME (« Atendente »), não pelo código (« agent »): o convite dizia
+  // « convidou você como agent » em toda instalação. O nome é traduzido pelo
+  // mesmo dicionário do seletor de papel, então em espanhol sai « Asesor ».
+  const papel = traduzir(rotuloDoPapel(opts.role), idioma);
 
-  const html = `<!doctype html>
-<html lang="pt-BR">
-<body style="margin:0;padding:0;background:${NEUTROS_DE_SAIDA.fundo};font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:${NEUTROS_DE_SAIDA.texto}">
-  <div style="max-width:560px;margin:0 auto;padding:32px 24px">
-    ${logo}
-    <h1 style="font-size:22px;line-height:1.3;margin:0 0 16px;color:${NEUTROS_DE_SAIDA.texto}">
-      Você foi convidado para a ${escapeHtml(opts.orgName)}
+  const html = estruturaDeEmail(
+    opts.marca,
+    `    <h1 style="font-size:22px;line-height:1.3;margin:0 0 16px;color:${NEUTROS_DE_SAIDA.texto}">
+      ${escapeHtml(t("Você foi convidado para a {organizacao}", { organizacao: opts.orgName }))}
     </h1>
     <p style="margin:0 0 16px;font-size:15px;line-height:1.5">
-      ${escapeHtml(opts.inviterName)} convidou você como
-      <strong>${escapeHtml(opts.role)}</strong> no ${escapeHtml(marca)}.
+      ${escapeHtml(t("{convidador} convidou você como", { convidador: opts.inviterName }))}
+      <strong>${escapeHtml(papel)}</strong> ${escapeHtml(t("no {marca}.", { marca }))}
     </p>
     <p style="margin:24px 0">
-      <a href="${opts.acceptUrl}" style="display:inline-block;padding:12px 24px;background:${opts.marca.accent};color:${opts.marca.accentFg};border-radius:6px;text-decoration:none;font-weight:600">
-        Aceitar convite
+      <a href="${escapeHtml(opts.acceptUrl)}" style="display:inline-block;padding:12px 24px;background:${opts.marca.accent};color:${opts.marca.accentFg};border-radius:6px;text-decoration:none;font-weight:600">
+        ${escapeHtml(t("Aceitar convite"))}
       </a>
     </p>
     <p style="margin:0 0 8px;font-size:13px;color:${NEUTROS_DE_SAIDA.suave}">
-      Ou copie e cole este link no navegador:<br>
-      <span style="word-break:break-all;color:${opts.marca.accent}">${opts.acceptUrl}</span>
+      ${escapeHtml(t("Ou copie e cole este link no navegador:"))}<br>
+      <span style="word-break:break-all;color:${opts.marca.accent}">${escapeHtml(opts.acceptUrl)}</span>
     </p>
     <p style="margin:24px 0 0;font-size:13px;color:${NEUTROS_DE_SAIDA.suave}">
-      Este link expira em <strong>${expiresStr}</strong>. Se você não esperava este convite, pode ignorá-lo.
-    </p>
-  </div>
-</body>
-</html>`;
+      ${escapeHtml(t("Este link expira em"))} <strong>${expiresStr}</strong>. ${escapeHtml(t("Se você não esperava este convite, pode ignorá-lo."))}
+    </p>`,
+    idioma,
+  );
 
   const text = [
-    `Você foi convidado para a ${opts.orgName} como ${opts.role} no ${marca}.`,
+    t("Você foi convidado para a {organizacao} como {papel} no {marca}.", {
+      organizacao: opts.orgName,
+      papel,
+      marca,
+    }),
     "",
-    `Aceitar: ${opts.acceptUrl}`,
+    t("Aceitar: {url}", { url: opts.acceptUrl }),
     "",
-    `Expira em ${expiresStr}.`,
+    t("Expira em {data}.", { data: expiresStr }),
   ].join("\n");
 
   return { subject, html, text };

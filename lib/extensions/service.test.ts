@@ -103,9 +103,11 @@ import { MOTIVO_PACOTE_ILEGIVEL } from "./instalada";
 import {
   configureExtension,
   listExtensions,
+  loadCrmExtensions,
   readExtensionOperation,
   removeExtension,
   revertExtension,
+  switchExtension,
 } from "./service";
 
 const ORG_A = randomUUID();
@@ -485,6 +487,78 @@ describe("auditoria só quando a chamada fez a transição", () => {
     expect(mocks.auditForOrganizations).not.toHaveBeenCalled();
   });
 
+  it("o interruptor chama a RPC com os cinco parâmetros e só audita quando a chamada aplicou", async () => {
+    const installation = randomUUID();
+    const operation = randomUUID();
+    let aplicado = true;
+    const admin = fakeClient({}, {
+      fn_extensions_set_switch: () => ({
+        data: {
+          ...operationRow({
+            id: operation,
+            kind: "switch",
+            installation_id: installation,
+            result: { from_revision: 4, from_version: "1.0.0", disabled: true },
+          }),
+          applied_now: aplicado,
+        },
+        error: null,
+      }),
+    });
+    mocks.admin = admin;
+
+    const recibo = await switchExtension(ACTOR, operation, installation, {
+      expected_installation_revision: 4,
+      disabled: true,
+    });
+
+    expect(admin.rpcCalls).toEqual([
+      {
+        name: "fn_extensions_set_switch",
+        args: {
+          p_actor: ACTOR,
+          p_operation: operation,
+          p_installation: installation,
+          p_disabled: true,
+          p_expected_installation_revision: 4,
+        },
+      },
+    ]);
+    expect(recibo).toMatchObject({ id: operation, kind: "switch", from_revision: 4, installation_id: installation });
+    expect(mocks.audit).toHaveBeenCalledTimes(1);
+    expect(mocks.audit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "extension.switched",
+        actorUserId: ACTOR,
+        resourceType: "extension_installation",
+        resourceId: installation,
+        metadata: { operation_id: operation, disabled: true },
+      }),
+    );
+    // A instalação mudou para todos: não há linha por organização, como em remover.
+    expect(mocks.auditForOrganizations).not.toHaveBeenCalled();
+
+    // A repetição idempotente do mesmo recibo não grava de novo.
+    aplicado = false;
+    mocks.audit.mockReset();
+    await switchExtension(ACTOR, operation, installation, { expected_installation_revision: 4, disabled: true });
+    expect(mocks.audit).not.toHaveBeenCalled();
+  });
+
+  it("o interruptor devolve o erro conhecido do banco, sem auditar, para pacote que não é conectado", async () => {
+    mocks.admin = fakeClient({}, {
+      fn_extensions_set_switch: () => ({
+        data: null,
+        error: { code: "P0001", message: "extension_switch_not_applicable" },
+      }),
+    });
+
+    await expect(
+      switchExtension(ACTOR, randomUUID(), randomUUID(), { expected_installation_revision: 1, disabled: true }),
+    ).rejects.toMatchObject({ code: "extension_switch_not_applicable", status: 409 });
+    expect(mocks.audit).not.toHaveBeenCalled();
+  });
+
   it("desfazer projeta a contagem de organizações ativas no recibo e na auditoria, inclusive zero", async () => {
     const installation = randomUUID();
     for (const ativas of [3, 0]) {
@@ -531,5 +605,34 @@ describe("auditoria só quando a chamada fez a transição", () => {
       configuration: { density: "compact", show_description: true },
     });
     expect(mocks.audit).not.toHaveBeenCalled();
+  });
+});
+
+describe("loadCrmExtensions", () => {
+  it("o hub segue a ordem de instalação, não a ordem da chave no banco", async () => {
+    const [a, b, c] = ["fase-1", "fase-2", "fase-3"].map((name) => artifact(name));
+    const [ia, ib, ic] = [
+      installationRow(a!, { installed_at: "2026-10-28T15:32:40.456564+00:00" }),
+      installationRow(b!, { installed_at: "2026-10-28T15:32:41.8+00:00" }),
+      installationRow(c!, { installed_at: "2026-10-28T15:32:43.368924+00:00" }),
+    ];
+    const vinculo = (installation: Row): Row => ({
+      organization_id: ORG_A,
+      installation_id: installation.id,
+      enabled: true,
+      configuration: { density: "comfortable", show_description: true },
+      revision: 1,
+      deactivated_by_removal_at: null,
+    });
+    mocks.admin = fakeClient({
+      extension_installations: [ic!, ia!, ib!],
+      extension_artifacts: [a!, b!, c!],
+    });
+    // A sessão não enxerga extension_installations, como `authenticated` no banco.
+    mocks.session = fakeClient({ organization_extensions: [vinculo(ic!), vinculo(ia!), vinculo(ib!)] });
+
+    const guias = await loadCrmExtensions(ORG_A);
+
+    expect(guias.map((guia) => guia.manifest.name)).toEqual(["fase-1", "fase-2", "fase-3"]);
   });
 });

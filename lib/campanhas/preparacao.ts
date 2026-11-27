@@ -34,15 +34,42 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { FILTRO_VAZIO, filtroDeAudienciaSchema, type FiltroDeAudiencia } from "./audiencia";
-import { buscarCandidatos, contatosJaEmCampanha } from "./consulta-de-audiencia";
+import type { TemplateContract } from "@/lib/channels/meta/template-contract";
+
+import {
+  buscarCandidatos,
+  contatosJaEmCampanha,
+  contatosQueRecusaramMarketingNaPlataforma,
+} from "./consulta-de-audiencia";
 import { hashDoEndereco, hashesExcluidos } from "./exclusoes";
 import {
   classificarAudiencia,
   contarExclusoes,
+  normalizarEmail,
+  type CanalDaAudiencia,
   type CandidatoDaAudiencia,
 } from "./elegibilidade";
+import {
+  camposDoNegocioUsados,
+  resolverValoresDaCampanha,
+  textoDoModeloParaAConversa,
+  type VariaveisDaCampanha,
+} from "./modelo";
+import type { DefinicaoDoModelo } from "./modelo-da-conexao";
 import { renderizar } from "./renderizador";
 import type { MotivoDeExclusao } from "./tipos";
+
+/**
+ * O modelo aprovado de uma campanha oficial, já conferido
+ * (`conferirModeloDaCampanha`). Com ele, quem sai por `variavel_ausente` é
+ * decidido pelo MAPA de variáveis, e o texto congelado é o do modelo com os
+ * valores de cada contato.
+ */
+export interface ModeloPreparado {
+  definicao: DefinicaoDoModelo;
+  contrato: TemplateContract;
+  variaveis: VariaveisDaCampanha;
+}
 
 export interface ResumoDoSnapshot {
   total: number;
@@ -69,6 +96,13 @@ export async function preverAudiencia(
     agora: Date;
     /** Campanha a ignorar na conta de "já em campanha" (a que está sendo editada). */
     campanhaId?: string;
+    modelo?: ModeloPreparado;
+    /**
+     * Por onde a campanha fala (#3441). Omitido = WhatsApp, que é toda campanha
+     * anterior ao canal de e-mail. Muda o ENDEREÇO exigido e contado, não o
+     * recorte: o filtro de público é exatamente o mesmo.
+     */
+    canal?: CanalDaAudiencia;
   },
 ): Promise<
   ResumoDoSnapshot & {
@@ -99,34 +133,64 @@ async function classificar(
     corpo: string;
     agora: Date;
     campanhaId?: string;
+    modelo?: ModeloPreparado;
+    canal?: CanalDaAudiencia;
   },
-): Promise<{ linhas: ReturnType<typeof classificarAudiencia>; truncado: boolean }> {
-  const { candidatos, truncado } = await buscarCandidatos(admin, {
+): Promise<{
+  linhas: ReturnType<typeof classificarAudiencia>;
+  truncado: boolean;
+  /** Os valores do modelo de cada contato elegível — só em campanha com modelo. */
+  valoresDoModelo: Map<string, Record<string, string>>;
+}> {
+  const modelo = entrada.modelo;
+  const { candidatos: lidos, truncado } = await buscarCandidatos(admin, {
     organizationId: entrada.organizationId,
     filtro: entrada.filtro,
     agora: entrada.agora,
-    corpo: entrada.corpo,
+    corpo: modelo ? "" : entrada.corpo,
+    lerCamposDoNegocio: modelo ? camposDoNegocioUsados(modelo.variaveis).length > 0 : false,
   });
+  // No número oficial, quem já desligou o marketing NA PLATAFORMA sai como quem
+  // recusou pelo cadastro: o envio não entregaria e conta como falha do número.
+  const recusaramNaPlataforma = modelo
+    ? await contatosQueRecusaramMarketingNaPlataforma(admin, entrada.organizationId)
+    : new Set<string>();
+  const candidatos = recusaramNaPlataforma.size
+    ? lidos.map((c) => (recusaramNaPlataforma.has(c.contactId) ? { ...c, recusouMarketing: true } : c))
+    : lidos;
   const jaEmCampanha = await contatosJaEmCampanha(
     admin,
     entrada.organizationId,
     entrada.campanhaId,
   );
   const suprimidos = await hashesExcluidos(admin, entrada.organizationId);
+  const valoresDoModelo = new Map<string, Record<string, string>>();
   return {
     linhas: classificarAudiencia(candidatos, {
       excluidosAMao: new Set(entrada.filtro.excluir_contatos),
       jaEmCampanha,
       suprimidos,
       hashDoEndereco,
-      // A saudação NÃO é resolvida aqui: ela é da hora do envio. O token fica no
-      // corpo congelado e o despacho o troca — ver `rodada.ts`.
-      renderizar: (c: CandidatoDaAudiencia) => {
-        const r = renderizar(entrada.corpo, { nome: c.nome, lead: c.lead, contato: c.contato });
-        return { texto: r.texto, faltando: r.faltando };
-      },
+      canal: entrada.canal ?? "whatsapp",
+      renderizar: modelo
+        ? (c: CandidatoDaAudiencia) => {
+            const r = resolverValoresDaCampanha(modelo.contrato, modelo.variaveis, {
+              nomeDoContato: c.nome,
+              camposDoNegocio: (c.lead ?? {}) as Record<string, unknown>,
+            });
+            if (!r.ok) return { texto: "", faltando: r.problemas };
+            valoresDoModelo.set(c.contactId, r.values);
+            return { texto: textoDoModeloParaAConversa(modelo.definicao, r.values), faltando: [] };
+          }
+        : // A saudação NÃO é resolvida aqui: ela é da hora do envio. O token fica no
+          // corpo congelado e o despacho o troca — ver `rodada.ts`.
+          (c: CandidatoDaAudiencia) => {
+            const r = renderizar(entrada.corpo, { nome: c.nome, lead: c.lead, contato: c.contato });
+            return { texto: r.texto, faltando: r.faltando };
+          },
     }),
     truncado,
+    valoresDoModelo,
   };
 }
 
@@ -143,6 +207,9 @@ export async function prepararCampanha(
     corpo: string;
     contentVersion: number;
     agora: Date;
+    modelo?: ModeloPreparado;
+    /** Por onde a campanha fala (#3441); omitido = WhatsApp. */
+    canal?: CanalDaAudiencia;
   },
 ): Promise<ResumoDoSnapshot> {
   const filtro = filtroDeAudienciaSchema.safeParse(entrada.filtro);
@@ -150,12 +217,14 @@ export async function prepararCampanha(
     throw new Error(`Filtro de audiência inválido: ${filtro.error.issues[0]?.message ?? "sem critério"}`);
   }
 
-  const { linhas } = await classificar(admin, {
+  const { linhas, valoresDoModelo } = await classificar(admin, {
     organizationId: entrada.organizationId,
     filtro: filtro.data,
     corpo: entrada.corpo,
     agora: entrada.agora,
     campanhaId: entrada.campanhaId,
+    ...(entrada.modelo ? { modelo: entrada.modelo } : {}),
+    ...(entrada.canal ? { canal: entrada.canal } : {}),
   });
 
   // Reconstrução limpa: a rota só chega aqui quando nada saiu, então apagar a
@@ -173,14 +242,23 @@ export async function prepararCampanha(
     campaign_id: entrada.campanhaId,
     contact_id: l.candidato.contactId,
     // Endereço só de quem vai receber: o excluído não precisa dele, e guardar
-    // telefone que ninguém vai usar é PII sem finalidade.
-    recipient_address: l.elegivel ? l.candidato.telefone : null,
+    // telefone que ninguém vai usar é PII sem finalidade. O endereço é o do
+    // CANAL: telefone no WhatsApp, e-mail normalizado no e-mail (#3441).
+    recipient_address: l.elegivel
+      ? entrada.canal === "email"
+        ? normalizarEmail(l.candidato.email)
+        : l.candidato.telefone
+      : null,
     status: l.elegivel ? "pending" : "skipped",
     eligibility_status: l.elegivel ? "eligible" : "excluded",
     exclusion_reason: l.motivo,
     rendered_body: l.corpo,
     content_version: entrada.contentVersion,
-    variables: { nome: l.candidato.nome },
+    // Com modelo, os valores de cada variável ficam congelados aqui: é o que o
+    // despacho manda, e o que a LGPD apaga junto (`fn_redigir_campanhas_do_contato_anonimizado`).
+    variables: valoresDoModelo.has(l.candidato.contactId)
+      ? { nome: l.candidato.nome, modelo: valoresDoModelo.get(l.candidato.contactId) }
+      : { nome: l.candidato.nome },
     cancelled_at: null,
     created_at: agoraIso,
   }));

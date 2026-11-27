@@ -58,8 +58,17 @@ const NAO_AVALIAVEIS_SEM_TURNO: ReadonlyArray<{ gate: string; porque: string }> 
   { gate: "lgpd", porque: "depende da base legal registrada para o contato" },
   { gate: "pacing", porque: "depende de quantas mensagens o número já enviou hoje e do horário do envio" },
   { gate: "messaging_window", porque: "depende de quando o contato falou com você pela última vez" },
+  {
+    gate: "teto_de_respostas",
+    porque:
+      "depende de quantas respostas esta conversa já recebeu na janela — e o teste do agente não conta como resposta enviada",
+  },
   { gate: "spinning", porque: "depende das últimas mensagens enviadas por este número" },
   { gate: "promise", porque: "depende da tabela de preços e condições da organização" },
+  {
+    gate: "concessao_sem_lastro",
+    porque: "depende do que o cliente e a empresa já escreveram na conversa — não há conversa real no teste",
+  },
   { gate: "semantic_promise", porque: "esta checagem textual não chama modelo; a prévia do motor pode chamar um modelo adicional" },
   {
     gate: "factual_claim",
@@ -70,11 +79,30 @@ const NAO_AVALIAVEIS_SEM_TURNO: ReadonlyArray<{ gate: string; porque: string }> 
     gate: "agenda_stall",
     porque: "depende de a ferramenta de agenda ter sido chamada neste turno — não há turno real no teste",
   },
+  {
+    gate: "horario_da_agenda",
+    porque:
+      "depende do que as ferramentas de agenda devolveram neste turno — não há turno real no teste",
+  },
+  {
+    gate: "registro_sem_efeito",
+    porque:
+      "depende de a escrita de registro ter produzido efeito neste turno — não há turno real no teste",
+  },
   { gate: "disclosure", porque: "depende de esta ser a primeira mensagem ao contato" },
+  {
+    gate: "nota_do_lucas",
+    porque: "depende das notas que a equipe escreveu sobre um contato de verdade — o teste não tem contato",
+  },
   {
     gate: "clinical_claim",
     porque:
       "depende de a organização ter ligado \"Não fazer afirmação clínica\" em Segurança; quando ligada, a prévia do motor aplica",
+  },
+  {
+    gate: "commercial_restriction",
+    porque:
+      "depende de a organização ter ligado \"Deixar valores e negociação com a equipe\" em Segurança; quando ligada, a prévia do motor aplica",
   },
 ];
 
@@ -91,7 +119,7 @@ export function avaliarRespostaDeTeste(
   // silêncio-que-parece-aprovação que este módulo existe para corrigir.
   const corpo = texto ?? "";
   const avaliado = corpo.trim() !== "";
-  const achado = detectarVazamentoInterno(corpo);
+  const achado = detectarVazamentoInterno(corpo, { linkDoCliente: true });
   // #2490: texto limpo NÃO é aprovação quando a foto que a resposta promete
   // não passou pela mesma preparação do envio real — aí o teste é VERMELHO.
   const midiaPendente = midia.some((m) => m.falha !== undefined);

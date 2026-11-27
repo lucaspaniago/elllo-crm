@@ -1,4 +1,5 @@
 import { LinksRastreaveis } from "./_linksRastreaveis";
+import { CabecalhoDaSubTela } from "@/components/settings/CabecalhoDaSubTela";
 import { listarLinks, metricasLinks } from "@/lib/plataformas-de-anuncio/rastreio/links";
 /**
  * Configurações → Conversões. Onde o dono do tráfego conecta a conta de anúncios
@@ -59,7 +60,10 @@ import { lerEstadoDaCaptura } from "@/lib/plataformas-de-anuncio/landing-config"
 import { createAdminClient } from "@/lib/supabase/admin";
 
 import { ReprocessarConversao } from "./_reprocessar";
+import { LinkDoNegocio } from "./_linkDoNegocio";
 import { HistoricoDeEnvios } from "./_historico";
+import { HistoricoDeCliques } from "./_historicoCliques";
+import { lerHistoricoDeCliques } from "@/lib/conversoes/historico-de-cliques";
 import { DiagnosticoGoogle } from "./_diagnostico";
 import {
   lerDiagnosticoGoogle,
@@ -72,12 +76,16 @@ import { FormularioDeConversoes } from "./_form";
 import { FormularioDeConversoesGoogle } from "./_formGoogle";
 import { IdentidadeDaConversao } from "./_identidadeDaMeta";
 import { VendaPeloCanal } from "./_vendaPeloCanal";
+import { OrigemPorHorario } from "./_origemPorHorario";
+import { LeadSubmittedCausal } from "./_leadSubmittedCausal";
+import { ativacaoLeadMeta } from "@/lib/conversoes/ativacao-lead-meta";
 import { vendaPeloCanalLigada } from "@/lib/conversoes/venda-pelo-canal";
+import { origemPorHorarioLigada } from "@/lib/leads/origem-por-horario";
 import { identidadeDaMeta } from "@/lib/plataformas-de-anuncio/meta/identidade";
 import { RegrasDeConversaoGoogle, type EtapaAberta } from "./_regrasGoogle";
 import { listarRegrasGoogle } from "@/lib/conversoes/regras-google";
 import { RegrasDeConversaoMeta } from "./_regrasMeta";
-import { listarRegrasMeta, rotuloDoEventoDaMeta } from "@/lib/conversoes/regras-meta";
+import { listarRegrasMeta } from "@/lib/conversoes/regras-meta";
 
 export const metadata = { title: "Conversões" };
 export const dynamic = "force-dynamic";
@@ -137,9 +145,13 @@ export default async function ConversoesPage({
     lerEstadoDaCaptura(admin, "meta_ads_landing_pages", activeOrg.orgId),
     // Os números conectados viram SUGESTÃO no formulário de captura. Falhar
     // aqui não pode derrubar a tela inteira: sem sugestão, a pessoa digita.
-    listSelectableChannels(admin, activeOrg.orgId).catch(() => []),
+    listSelectableChannels(admin, activeOrg.orgId).catch(() => null),
     // O `slug` é o `[org]` da rota pública, e não está no `ActiveOrg`.
-    admin.from("organizations").select("slug, settings").eq("id", activeOrg.orgId).maybeSingle(),
+    admin
+      .from("organizations")
+      .select("slug, settings, meta_lead_birth_enabled_at")
+      .eq("id", activeOrg.orgId)
+      .maybeSingle(),
     lerEstadoDaCaptura(admin, "google_ads_landing_pages", activeOrg.orgId),
     admin
       .from("crm_stages")
@@ -154,14 +166,19 @@ export default async function ConversoesPage({
   ]);
   // O nome que a pessoa reconhece para cada evento de etapa, das duas
   // plataformas — o Histórico e as pendências leem daqui.
+  const nomePorEtapa = new Map((etapas.data ?? []).map((e) => [e.id, e.name]));
   const rotulosDeEtapa = [
     ...(regrasGoogle ?? []).map((r) => ({ eventName: r.eventName, label: r.label })),
     ...(regrasMeta ?? []).map((r) => ({
       eventName: r.eventName,
-      label: `${rotuloDoEventoDaMeta(r.metaEvent)} (Meta)`,
+      label: nomePorEtapa.get(r.stageId) ?? "",
     })),
   ];
-  const linhaDaOrganizacao = organizacao.data as { slug: string | null; settings?: unknown } | null;
+  const linhaDaOrganizacao = organizacao.data as unknown as {
+    slug: string | null;
+    settings?: unknown;
+    meta_lead_birth_enabled_at?: unknown;
+  } | null;
   const slug = linhaDaOrganizacao?.slug ?? null;
   // Página / WABA gravadas pela tela (#2098) — a MESMA leitura que a credencial
   // faz no caminho do envio, para a tela e o envio nunca divergirem.
@@ -201,6 +218,10 @@ export default async function ConversoesPage({
     aba === "historico"
       ? await lerHistorico(admin, activeOrg.orgId, filtrosDoHistorico).catch(() => null)
       : null;
+  const historicoCliques =
+    aba === "historico"
+      ? await lerHistoricoDeCliques(admin, activeOrg.orgId).catch(() => null)
+      : null;
   const diagnostico =
     aba === "diagnostico"
       ? await lerDiagnosticoGoogle(admin, activeOrg.orgId, {
@@ -218,7 +239,10 @@ export default async function ConversoesPage({
   const metricas =
     aba === "links" ? await metricasLinks(admin, activeOrg.orgId).catch(() => null) : null;
 
-  const numerosConectados = canais
+  // Lista ilegível não é "nenhum canal": a chave continua à mostra, e só some
+  // quando a leitura deu certo e nenhum canal tem a ponte da venda.
+  const temCanalQueEnvia = canais === null || canais.some((c) => c.reportaConversao);
+  const numerosConectados = (canais ?? [])
     .map((c) => c.phone_number)
     .filter((n): n is string => Boolean(n));
   const idioma = user.idioma;
@@ -240,14 +264,13 @@ export default async function ConversoesPage({
 
   return (
     <div className="flex h-full flex-col gap-6 overflow-y-auto p-6">
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight">{t("Conversões")}</h1>
+      <CabecalhoDaSubTela titulo={t("Conversões")} idioma={idioma}>
         <p className="max-w-2xl text-sm text-muted-foreground">
           {t(
             "Quando um negócio que veio de anúncio é marcado como ganho, o valor da venda volta para a plataforma que trouxe o cliente. É esse retorno que ensina o anúncio a procurar mais gente parecida com quem comprou.",
           )}
         </p>
-      </header>
+      </CabecalhoDaSubTela>
 
       <nav className="flex gap-1 border-b" aria-label={t("Seções de conversões")}>
         {(
@@ -275,7 +298,15 @@ export default async function ConversoesPage({
 
       {aba === "links" ? (
         links ? (
-          <LinksRastreaveis links={links} metricas={metricas} idioma={idioma} />
+          <div className="flex flex-col gap-4">
+            {/* A dedução só vale para link rastreável: é o clique dele que fica sem dono. */}
+            <OrigemPorHorario
+              key={`${activeOrg.orgId}:${origemPorHorarioLigada(linhaDaOrganizacao?.settings)}`}
+              ligada={origemPorHorarioLigada(linhaDaOrganizacao?.settings)}
+              idioma={idioma}
+            />
+            <LinksRastreaveis links={links} metricas={metricas} idioma={idioma} />
+          </div>
         ) : (
           <p role="alert">
             {t("Não foi possível ler os links. Atualize a página para tentar novamente.")}
@@ -283,13 +314,24 @@ export default async function ConversoesPage({
         )
       ) : aba === "historico" ? (
         historico ? (
-          <HistoricoDeEnvios
-            linhas={historico.linhas}
-            total={historico.total}
-            filtros={filtrosDoHistorico}
-            regras={rotulosDeEtapa}
-            idioma={idioma}
-          />
+          <div className="flex flex-col gap-8">
+            <HistoricoDeEnvios
+              linhas={historico.linhas}
+              total={historico.total}
+              filtros={filtrosDoHistorico}
+              regras={rotulosDeEtapa}
+              idioma={idioma}
+            />
+            {historicoCliques ? (
+              <HistoricoDeCliques linhas={historicoCliques} idioma={idioma} />
+            ) : (
+              <p role="alert" className="rounded-md border p-4 text-sm">
+                {t(
+                  "Não consegui ler o histórico de cliques agora. Atualize a página em instantes.",
+                )}
+              </p>
+            )}
+          </div>
         ) : (
           <p className="rounded-md border p-4 text-sm">
             {t("Não consegui ler o histórico agora. Atualize a página em instantes.")}
@@ -336,7 +378,24 @@ export default async function ConversoesPage({
           )}
 
           <FormularioDeConversoes estado={estado} idioma={idioma} />
-          <VendaPeloCanal ligada={vendaPeloCanal} idioma={idioma} />
+          {organizacao.error || !linhaDaOrganizacao ? (
+            <p role="alert" className="rounded-md border border-destructive/40 p-4 text-sm">
+              {t(
+                "Não foi possível ler a ativação de LeadSubmitted. Atualize a página para tentar novamente.",
+              )}
+            </p>
+          ) : (
+            <LeadSubmittedCausal
+              key={`${activeOrg.orgId}:${ativacaoLeadMeta(linhaDaOrganizacao.meta_lead_birth_enabled_at) !== null}`}
+              ligado={ativacaoLeadMeta(linhaDaOrganizacao.meta_lead_birth_enabled_at) !== null}
+              idioma={idioma}
+            />
+          )}
+          <VendaPeloCanal
+            ligada={vendaPeloCanal}
+            idioma={idioma}
+            temCanalQueEnvia={temCanalQueEnvia}
+          />
           {estado.conectada && (
             <IdentidadeDaConversao
               pageId={identidadeMeta.pageId}
@@ -426,15 +485,19 @@ export default async function ConversoesPage({
                     {pendencias.map((p) => (
                       <tr key={`${p.leadId}:${p.evento}`} className="border-t align-top">
                         <td className="p-3">
-                          <a
-                            className="underline underline-offset-2"
-                            href={`/app/kanban?lead=${p.leadId}`}
-                          >
+                          <LinkDoNegocio className="underline underline-offset-2" leadId={p.leadId}>
                             {p.tituloDoLead ?? t("(sem título)")}
-                          </a>
+                          </LinkDoNegocio>
                         </td>
                         <td className="p-3">
-                          {t(rotuloDoEvento(p.evento, rotulosDeEtapa))}
+                          {p.evento.startsWith("MetaEtapa:")
+                            ? [
+                                t("Entrada na etapa"),
+                                rotulosDeEtapa.find((r) => r.eventName === p.evento)?.label,
+                              ]
+                                .filter(Boolean)
+                                .join(" ")
+                            : t(rotuloDoEvento(p.evento, rotulosDeEtapa))}
                         </td>
                         <td className="p-3">
                           {p.plataforma === "meta_ads"

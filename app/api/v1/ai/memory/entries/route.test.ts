@@ -4,18 +4,30 @@ import { NextRequest } from "next/server";
 import { requireRole } from "@/lib/auth/require-role";
 import { audit } from "@/lib/audit";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { createClient } from "@/lib/supabase/server";
 import type { AuthUser } from "@/lib/auth/types";
+import { validateBearerToken } from "@/lib/mcp/auth";
 
 /**
  * Épico Operação Visível (F1, review T4) — POST /api/v1/ai/memory/entries:
  *  - cria entrada com organization_id do requireRole (nunca do body, mesmo se
  *    o body tentar mandar outro organization_id);
  *  - body inválido → 422 validation_failed.
+ *
+ * O handler agora resolve auth por `resolveAuthDual` (sessão OU token).
+ * Na sessão, `createClient()` é usado; no token, `createAdminClient()` e
+ * `validateBearerToken()`. Os testes de sessão mantêm `requireRole` e ganham
+ * `createClient` mockado com o mesmo dublê que `createAdminClient`.
  */
 
 vi.mock("@/lib/auth/require-role", () => ({ requireRole: vi.fn() }));
+vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
 vi.mock("@/lib/audit", () => ({ audit: vi.fn(async () => undefined) }));
+vi.mock("@/lib/mcp/auth", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/mcp/auth")>()),
+  validateBearerToken: vi.fn(),
+}));
 
 const ORG_ID = "22222222-2222-4222-8222-222222222222";
 const OTHER_ORG_ID = "99999999-9999-4999-8999-999999999999";
@@ -60,6 +72,8 @@ function mockAuthzOk() {
     user,
     org: { orgId: ORG_ID, name: "Org", role: "manager" },
   });
+  vi.mocked(createClient).mockResolvedValue(makeAdminStub({ id: "entry-1" }, { payload: null }) as never);
+  vi.mocked(validateBearerToken).mockResolvedValue(null as never);
 }
 
 function postReq(body: unknown) {
@@ -98,6 +112,44 @@ describe("POST /api/v1/ai/memory/entries", () => {
     expect(vi.mocked(audit)).toHaveBeenCalledWith(
       expect.objectContaining({ action: "ai.org_memory_entry_created", organizationId: ORG_ID }),
     );
+  });
+
+  it("#2369 — grava o prazo do aprendizado (#2369)", async () => {
+    mockAuthzOk();
+    const state: InsertState = { payload: null };
+    vi.mocked(createAdminClient).mockReturnValue(makeAdminStub({ id: "entry-1" }, state) as never);
+
+    const { POST } = await import("./route");
+    const res = await POST(
+      postReq({ title: "Programação da semana", body: "Sexta: Fulano. Sábado: Beltrano.", valid_until: "2026-11-01" }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(state.payload?.valid_until).toBe("2026-11-01");
+    expect(vi.mocked(audit)).toHaveBeenCalledWith(
+      expect.objectContaining({ metadata: { valid_until: "2026-11-01" } }),
+    );
+  });
+
+  it("#2369 — sem o campo, a entrada nasce SEM prazo (o cliente antigo não muda de comportamento)", async () => {
+    mockAuthzOk();
+    const state: InsertState = { payload: null };
+    vi.mocked(createAdminClient).mockReturnValue(makeAdminStub({ id: "entry-1" }, state) as never);
+
+    const { POST } = await import("./route");
+    const res = await POST(postReq({ title: "Lição", body: "Conteúdo" }));
+
+    expect(res.status).toBe(200);
+    expect(state.payload).toHaveProperty("valid_until", null);
+  });
+
+  it("#2369 — data em formato inválido → 422 (prazo é dia de calendário, não instante)", async () => {
+    mockAuthzOk();
+    const { POST } = await import("./route");
+    const res = await POST(
+      postReq({ title: "Programação", body: "Sexta: Fulano, sábado: Beltrano.", valid_until: "01/11/2026" }),
+    );
+    expect(res.status).toBe(422);
   });
 
   it("body inválido (title vazio) → 422 validation_failed", async () => {

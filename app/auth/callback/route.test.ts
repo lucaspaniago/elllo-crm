@@ -9,6 +9,7 @@ import { decidirConviteDoSignup } from "@/lib/auth/convite-no-signup";
 import { ensureTenantForUser, vinculoAtivo } from "@/lib/auth/provision";
 import { modoDeCadastro } from "@/lib/auth/politica-de-cadastro";
 import { acessoFoiRevogado } from "@/lib/auth/vinculo-revogado";
+import { reconhecerDispositivoConfiavel } from "@/lib/auth/dispositivo-confiavel";
 import { createClient } from "@/lib/supabase/server";
 
 /**
@@ -32,6 +33,7 @@ import { createClient } from "@/lib/supabase/server";
  */
 
 vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
+vi.mock("@/lib/auth/dispositivo-confiavel", () => ({ reconhecerDispositivoConfiavel: vi.fn(async () => false) }));
 vi.mock("@/lib/auth/aplicar-convite", () => ({ aplicarConvite: vi.fn() }));
 vi.mock("@/lib/auth/convite-no-signup", () => ({ decidirConviteDoSignup: vi.fn() }));
 vi.mock("@/lib/auth/provision", () => ({
@@ -59,7 +61,7 @@ const PAYLOAD = {
 
 interface Cenario {
   /** o que `exchangeCodeForSession` devolve */
-  troca: { data: { user: unknown } | null; error: { message: string } | null };
+  troca: { data: { user: unknown; session?: { access_token: string } } | null; error: { message: string } | null };
   /** fatores TOTP que a conta já tem verificados */
   fatores?: { id: string; status: string }[];
 }
@@ -189,7 +191,12 @@ describe("GET /auth/callback", () => {
 
     const res = await GET(requisicao("code=abc"));
 
-    expect(vi.mocked(ensureTenantForUser)).toHaveBeenCalledWith(USUARIO, { source: "signup" });
+    // As pistas da empresa nova (idioma da tela, fuso) viajam na URL de volta;
+    // sem elas na URL, vão nulas — e o `Accept-Language` do pedido junto.
+    expect(vi.mocked(ensureTenantForUser)).toHaveBeenCalledWith(USUARIO, {
+      source: "signup",
+      pistas: { idioma: null, fuso: null, acceptLanguage: null },
+    });
     expect(await destino(res)).toBe("/onboarding/welcome");
   });
 
@@ -203,6 +210,20 @@ describe("GET /auth/callback", () => {
 
     expect(await destino(res)).toBe("/login/mfa?factor=factor-1&next=%2Fapp%2Finbox");
     expect(vi.mocked(ensureTenantForUser)).not.toHaveBeenCalled();
+  });
+
+  it("TOTP verificado num dispositivo confiável: entra sem o código", async () => {
+    vi.mocked(vinculoAtivo).mockResolvedValue("org-1");
+    vi.mocked(reconhecerDispositivoConfiavel).mockResolvedValueOnce(true);
+    const { GET } = await comSupabase({
+      troca: { data: { user: USUARIO, session: { access_token: "jwt-da-troca" } }, error: null },
+      fatores: [{ id: "factor-1", status: "verified" }],
+    });
+
+    const res = await GET(requisicao("code=abc&next=%2Fapp%2Finbox"));
+
+    expect(vi.mocked(reconhecerDispositivoConfiavel)).toHaveBeenCalledWith(USUARIO.id, "factor-1", "jwt-da-troca");
+    expect(await destino(res)).toBe("/app/inbox");
   });
 
   it("code que não vira sessão: nenhum provisionamento, e a tela de login explica", async () => {
@@ -411,6 +432,71 @@ describe("GET /auth/callback", () => {
     expect(html.match(/<script>/g)).toHaveLength(1);
     expect(html).not.toContain("</script><script>");
   });
+
+  // ─── #4335: o PEDIDO do código também é tela que EXIGE sessão ─────────────
+  //
+  // `/login/mfa` lê a sessão com `getUser()` e, sem usuário, devolve para
+  // `/login`. O 302 que o ramo de TOTP usava continuava a cadeia de navegação
+  // começada em `accounts.google.com`: o cookie de sessão é `sameSite: "strict"`
+  // e não viaja nesse salto, a tela não achava ninguém e a pessoa nunca via o
+  // pedido do código. É a MESMA classe da #1646 e o MESMO conserto — a ponte
+  // same-origin —, e o que estes casos prendem é a ENTREGA (200, sem
+  // `Location`), porque o destino é idêntico nos dois defeitos.
+
+  it("TOTP verificado sem dispositivo confiável: a ponte leva ao pedido do código, com factor e next preservados", async () => {
+    const { GET } = await comSupabase({
+      troca: { data: { user: USUARIO }, error: null },
+      fatores: [{ id: "factor-1", status: "verified" }],
+    });
+
+    const res = await GET(requisicao("code=abc&next=%2Fapp%2Finbox"));
+
+    expect(
+      res.headers.get("location"),
+      "302 para /login/mfa continua a cadeia cross-site do Google: o cookie Strict não viaja e a tela manda de volta para /login",
+    ).toBeNull();
+    expect(res.status).toBe(200);
+    expect(await destino(res)).toBe("/login/mfa?factor=factor-1&next=%2Fapp%2Finbox");
+    // O fator é pedido ANTES de qualquer provisionamento: quem não passou pelo
+    // segundo fator não é dono da conta ainda.
+    expect(vi.mocked(ensureTenantForUser)).not.toHaveBeenCalled();
+  });
+
+  it("TOTP verificado em dispositivo confiável: segue ao destino de sucesso, também pela ponte", async () => {
+    vi.mocked(vinculoAtivo).mockResolvedValue("org-1");
+    vi.mocked(reconhecerDispositivoConfiavel).mockResolvedValueOnce(true);
+    const { GET } = await comSupabase({
+      troca: { data: { user: USUARIO, session: { access_token: "jwt-da-troca" } }, error: null },
+      fatores: [{ id: "factor-1", status: "verified" }],
+    });
+
+    const res = await GET(requisicao("code=abc&next=%2Fapp%2Finbox"));
+
+    // A confiança do dispositivo pula o pedido do código — e o destino continua
+    // sendo tela autenticada, logo ponte e não 302.
+    expect(res.headers.get("location")).toBeNull();
+    expect(res.status).toBe(200);
+    expect(await destino(res)).toBe("/app/inbox");
+  });
+
+  it.each([["//evil.com"], ["https://evil.com"]])(
+    "`next` hostil (%s) não é contornado pela ponte do MFA: o parâmetro entregue é /app",
+    async (hostil) => {
+      const { GET } = await comSupabase({
+        troca: { data: { user: USUARIO }, error: null },
+        fatores: [{ id: "factor-1", status: "verified" }],
+      });
+
+      const res = await GET(requisicao(`code=abc&next=${encodeURIComponent(hostil)}`));
+      const html = await res.clone().text();
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("location")).toBeNull();
+      expect(await destino(res)).toBe("/login/mfa?factor=factor-1&next=%2Fapp");
+      // Nem o valor cru nem o host do atacante entram no documento da ponte.
+      expect(html).not.toContain("evil.com");
+    },
+  );
 
   it("as recusas continuam 302 para a tela de login, com o cliente de jar Strict de sempre", async () => {
     // A ponte é só do SUCESSO. O caminho de falha termina em tela pública, onde

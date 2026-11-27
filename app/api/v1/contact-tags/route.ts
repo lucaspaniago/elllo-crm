@@ -1,36 +1,14 @@
-/**
- * GET /api/v1/contact-tags — tags em uso nos contatos da org ativa. Sugestões
- * para o editor de tags do contato no Inbox (#852, item 1).
- *
- * Irmã de `GET /api/v1/conversation-tags`: server route porque o cookie de
- * sessão é HttpOnly. A organização vem de `requireRole`, nunca do pedido, e o
- * client é o da SESSÃO — a RLS de `contacts` isola sozinha.
- *
- * Sem função no banco de propósito — e a S4 da #852, que traz essa função,
- * ENTROU NA MESMA RELEASE que esta rota: `GET /api/v1/tags/vocabulario`, sobre
- * `fn_vocabulario_de_tags`. A frase que estava aqui ("quando ele entrar, esta
- * rota passa a ler de lá") venceu no dia em que foi escrita; fica no lugar dela
- * o que ainda é verdade, que é a instrução.
- *
- * A troca NÃO é apagar esta rota. A da S4 exige `requireRole("manager")` mais
- * `mfaEmDivida()`, porque ela também ESCREVE o vocabulário de toda a
- * organização — e o editor do Inbox é usado por `agent` e por `viewer`, que a
- * S4 responde com 403. Consolidar é trocar o corpo da consulta abaixo por
- * `supabase.rpc("fn_vocabulario_de_tags", { p_org: authz.org.orgId })`, lendo o
- * campo `tag` de cada linha, MANTENDO o `requireRole("viewer")` daqui e
- * apagando `CONTATOS_LIDOS`, `TETO_DE_TAGS` e o `ponytail:` logo abaixo — a
- * função no banco não tem teto de leitura, que é exatamente a dívida que essas
- * duas constantes registram. Fora do escopo deste conserto porque mexe no
- * contrato de uma rota que a tela de Etiquetas acabou de estrear.
- */
+/** Sugestões do contato: sem busca mantém compatibilidade; com busca lê a página do
+ * vocabulário curado e em uso, com a sessão e a RLS. Não depende de clientes fictícios
+ * portando a etiqueta para que os atendentes possam escolher uma etiqueta importada. */
 import { randomUUID } from "node:crypto";
+import { tagsPageQuerySchema, tagsPageResultSchema } from "@/lib/schemas/tags";
 import type { NextRequest } from "next/server";
 
+import { resolveAuthDual, tetoDeEscritaDoToken } from "@/lib/api/auth-dual";
 import { ok, fail } from "@/lib/api/wrappers";
-import { requireRole } from "@/lib/auth/require-role";
 import { normalizarTag } from "@/lib/contacts/tag-normalizada";
 import { logger } from "@/lib/logger";
-import { createClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
 
@@ -42,14 +20,36 @@ const TETO_DE_TAGS = 200;
 
 export async function GET(_req: NextRequest): Promise<Response> {
   const requestId = randomUUID();
-  const authz = await requireRole("viewer", { requestId, resource: "contacts" });
+  // Sessão OU token de integração (Spec 33, R2): `mcp:read` e papel `viewer`. A
+  // organização sai da sessão ou da LINHA DO TOKEN; as duas leituras (a RPC do
+  // vocabulário e a tabela de contatos) levam essa organização.
+  const authz = await resolveAuthDual(_req, {
+    requestId,
+    resource: "contacts",
+    role: "viewer",
+    scope: "mcp:read",
+  });
   if (!authz.ok) return authz.response;
+  const teto = await tetoDeEscritaDoToken(authz, "contacts", requestId);
+  if (teto) return teto;
 
-  const supabase = await createClient();
+  const supabase = authz.supabase;
+  if (_req.nextUrl.searchParams.has("busca")) {
+    const query = tagsPageQuerySchema.safeParse({ busca: _req.nextUrl.searchParams.get("busca") });
+    if (!query.success) return fail("validation_failed", "Confira a busca e a página.", 422, { requestId });
+    const { data: result, error: readError } = await supabase.rpc("fn_vocabulario_de_tags_pagina", {
+      p_org: authz.organizationId, p_busca: query.data.busca, p_offset: 0, p_limit: 200,
+    });
+    const parsed = tagsPageResultSchema.safeParse(result);
+    if (readError || !parsed.success) return fail("internal_error", "Não foi possível carregar as tags.", 500, { requestId });
+    const tags = [...new Set(parsed.data.items.map(row => row.tag.trim().toLowerCase().slice(0,40)))];
+    return ok(tags, { requestId, meta: { total: parsed.data.total, has_more: parsed.data.total > tags.length } });
+  }
+
   const { data, error } = await supabase
     .from("contacts")
     .select("tags")
-    .eq("organization_id", authz.org.orgId)
+    .eq("organization_id", authz.organizationId)
     .neq("tags", "{}")
     .order("updated_at", { ascending: false })
     .limit(CONTATOS_LIDOS);
@@ -63,7 +63,7 @@ export async function GET(_req: NextRequest): Promise<Response> {
   if (error) {
     logger.error("contact-tags: leitura das tags do contato falhou", {
       requestId,
-      orgId: authz.org.orgId,
+      orgId: authz.organizationId,
       cause: error.message,
     });
     return fail("internal_error", "Não foi possível carregar as tags.", 500, { requestId });
@@ -73,15 +73,28 @@ export async function GET(_req: NextRequest): Promise<Response> {
   // chip tem de dizer exatamente o que o clique grava. Devolvendo a tag crua,
   // "VIP", "vip " e "vip" viravam TRÊS chips que gravam a mesma coisa, e dois
   // deles nunca sumiam da tela.
-  const tags = [
-    ...new Set(
-      (data ?? [])
-        .flatMap((c: { tags: string[] | null }) => c.tags ?? [])
-        .map(normalizarTag)
-        .filter(Boolean),
-    ),
-  ]
-    .sort((a, b) => a.localeCompare(b, "pt-BR"))
+  //
+  // ─── E A ORDEM PASSA A SER A DE USO (#3180) ───────────────────────────────
+  //
+  // O editor de etiquetas usa este caminho para SUGERIR, e com o campo vazio
+  // ele oferece as primeiras da lista. Em ordem alfabética era sempre o mesmo
+  // bloco do começo do alfabeto — com 73 etiquetas, as mesmas oito. As mais
+  // usadas são o que serve de sugestão para quem ainda não digitou nada.
+  //
+  // A contagem sai da MESMA leitura que a rota já fazia (o PostgREST não agrega
+  // `unnest`), e o desempate é alfabético para duas respostas iguais à mesma
+  // pergunta não saírem em ordens diferentes.
+  const contagem = new Map<string, number>();
+  for (const contato of data ?? []) {
+    for (const crua of contato.tags ?? []) {
+      const tag = normalizarTag(crua);
+      if (tag === "") continue;
+      contagem.set(tag, (contagem.get(tag) ?? 0) + 1);
+    }
+  }
+  const tags = [...contagem]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "pt-BR"))
+    .map(([tag]) => tag)
     .slice(0, TETO_DE_TAGS);
   return ok(tags, { requestId });
 }

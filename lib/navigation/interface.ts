@@ -6,6 +6,17 @@ import type { CapacidadeDaOrganizacao } from "@/lib/organizacao/capacidades";
 import { NAV_CATALOG, type NavMetadata, type NavDestinationId } from "./catalogo";
 
 const ids = NAV_CATALOG.map((d) => d.href);
+/**
+ * A preferência da ORGANIZAÇÃO, no mesmo jsonb que já existe (`interface_settings`).
+ *
+ * `compras_campos` é o recorte de "Últimas compras" (issue #3179): as CHAVES dos
+ * campos personalizados do negócio que a empresa quer ver na linha da compra
+ * (no caso de agência de viagens: destino, hospedagem, tipo de serviço). Lidas de
+ * `crm_leads.custom_fields`; sem escolha salva, a seção mostra o padrão (data,
+ * título, valor). Teto de 3 porque a linha do painel não cabe mais que isso.
+ *
+ * Nada de schema/tabela nova: é o MESMO campo que a interface da empresa já usa.
+ */
 export const interfaceSettingsSchema = z
   .object({
     preset: z.enum(["completa", "simplificada"]),
@@ -15,9 +26,53 @@ export const interfaceSettingsSchema = z
       .max(ids.length)
       .transform((values) => ids.filter((id) => values.includes(id)))
       .optional(),
+    compras_campos: z
+      .array(z.string().min(1).max(40))
+      .max(3)
+      .transform((values) => [...new Set(values)])
+      .optional(),
+    /**
+     * A caixa de mensagem do Inbox fica BLOQUEADA até o atendente assumir a
+     * conversa (#3012).
+     *
+     * Mora aqui porque `interface_settings` é a preferência de ORGANIZAÇÃO que
+     * já existe, atravessa a fronteira servidor/navegador pelo mesmo caminho do
+     * menu (`ActiveOrg.interface_settings`) e é gravada pela mesma tela — sem
+     * schema novo. Opcional e ausente = DESLIGADO: quem não liga não muda nada.
+     *
+     * É regra da ORGANIZAÇÃO, nunca do vínculo, e não é autorização: quem liga
+     * só esconde a caixa até alguém assumir; papel, RLS e permissões seguem
+     * decidindo o que cada pessoa alcança.
+     */
+    bloquearAteAssumir: z.boolean().optional(),
+    /**
+     * A TELA INICIAL (#4864) — por onde a pessoa ENTRA, não o que ela alcança.
+     *
+     * O menu enxuto já dizia o que aparece; a primeira tela continuava sendo
+     * regra fixa do produto (`homeDaInterface`: Inbox se visível, senão a
+     * primeira porta não essencial). Quem opera um nicho — dona de loja,
+     * vendedora — abre o sistema para UMA tela, e o Inbox é a tela errada.
+     *
+     * `inicio` é o href de uma porta do CATÁLOGO, nunca um caminho livre: o
+     * vocabulário fechado é o que impede a preferência de virar rota inventada
+     * e é a primeira das duas guardas. A segunda está em `homeDaInterface`, que
+     * só abre a porta escolhida se ela estiver VISÍVEL para o papel — escolha
+     * velha, porta oculta pela empresa ou módulo desligado caem na regra de
+     * sempre, e a entrada nunca devolve 404 nem tela vazia.
+     *
+     * Mora no mesmo jsonb (`interface_settings`) pelos mesmos motivos do menu:
+     * já atravessa servidor/navegador por `ActiveOrg.interface_settings`, já é
+     * gravado pela tela de Configurações e não precisa de coluna nova. Ausente =
+     * regra de sempre: quem não escolhe não vê diferença.
+     */
+    inicio: z
+      .enum(ids as [NavDestinationId, ...NavDestinationId[]])
+      .optional(),
   })
   .strict();
 export type InterfaceSettings = z.infer<typeof interfaceSettingsSchema>;
+/** O teto de campos que o painel do contato mostra por compra (issue #3179). */
+export const MAX_CAMPOS_DE_COMPRA = 3;
 export const INTERFACE_COMPLETA: InterfaceSettings = { preset: "completa" };
 const SIMPLIFICADA: readonly NavDestinationId[] = [
   "/app/inbox",
@@ -35,10 +90,23 @@ const SIMPLIFICADA: readonly NavDestinationId[] = [
  * porta que desfaz a decisão desaparece junto com as outras, e não há caminho de
  * volta pela tela — só por banco. Quem administra tem de poder desfazer o que
  * escolheu, sempre.
+ *
+ * As QUATRO portas pessoais — Perfil, Segurança, Notificações e App no celular —
+ * andam juntas (issue #3295). As duas últimas ficaram de fora e o resultado foi
+ * que, na interface simplificada, quem mais precisa da preferência não achava a
+ * tela: é em Notificações que a pessoa liga o lembrete de tarefa e informa o
+ * próprio WhatsApp, e é em App no celular que se instala o sistema na tela de
+ * início. São preferências de CADA UM — moram no `raw_user_meta_data` da própria
+ * pessoa, e o administrador não configura por ela. Escondidas, não havia porta
+ * nenhuma até elas: a tela só abria por URL digitada de memória. Nenhuma das
+ * duas entra em `ESSENCIAIS_DE_ADMIN`: sendo pessoais, ficam visíveis para todo
+ * vínculo em qualquer preset, como Perfil e Segurança.
  */
 export const PORTAS_ESSENCIAIS = [
   "/app/settings/profile",
   "/app/settings/security",
+  "/app/settings/notifications",
+  "/app/settings/aplicativo",
   "/app/team",
   "/app/settings/tenant",
 ] as const;
@@ -78,7 +146,7 @@ export function permitidos(
 ): NavMetadata[] {
   return (NAV_CATALOG as readonly NavMetadata[]).filter(
     (d) =>
-      canSee(d, platform, role) &&
+      !d.agenciaOnly && canSee(d, platform, role) &&
       (!modulos || !d.modulo || modulos.includes(d.modulo)) &&
       (!capacidades || !d.capacidade || capacidades.includes(d.capacidade)),
   );
@@ -94,15 +162,37 @@ export function lerInterface(raw: unknown): {
   const destinos = Array.isArray(value.destinos)
     ? ids.filter((id) => (value.destinos as unknown[]).includes(id))
     : undefined;
+  const compras = Array.isArray(value.compras_campos)
+    ? (value.compras_campos as unknown[]).filter((k): k is string => typeof k === "string")
+    : undefined;
+  // Tela inicial (#4864): href de catálogo, e só ele. Um valor que não é porta
+  // conhecida é DESCARTADO aqui — e o resultado cai na regra de sempre, em vez
+  // de derrubar a leitura do menu inteiro por causa de uma chave velha.
+  const inicio =
+    typeof value.inicio === "string" && (ids as readonly string[]).includes(value.inicio)
+      ? (value.inicio as NavDestinationId)
+      : undefined;
   const parsed = interfaceSettingsSchema.safeParse({
     preset: value.preset,
     ...(destinos ? { destinos } : {}),
+    ...(compras ? { compras_campos: compras } : {}),
+    ...(inicio ? { inicio } : {}),
+    // A regra do Inbox (#3012) é ESTRANHA ao menu, mas viaja no mesmo objeto:
+    // sem esta linha `lerInterface` a descartaria e a organização que ligou a
+    // opção a veria desligada depois de qualquer releitura.
+    ...(value.bloquearAteAssumir === true ? { bloquearAteAssumir: true } : {}),
   });
   if (!parsed.success) return { settings: INTERFACE_COMPLETA, needsAdjustment: true };
   return {
     settings: parsed.data,
-    needsAdjustment: !!destinos && destinos.length !== (value.destinos as unknown[]).length,
+    needsAdjustment:
+      (!!destinos && destinos.length !== (value.destinos as unknown[]).length) ||
+      (!!compras && compras.length !== parsed.data.compras_campos?.length),
   };
+}
+/** As chaves de campo que a empresa escolheu mostrar em cada compra (#3179). */
+export function camposDeCompraDaInterface(raw: unknown): string[] {
+  return lerInterface(raw).settings.compras_campos ?? [];
 }
 export function destinosDaInterface(
   raw: unknown,
@@ -156,8 +246,22 @@ export function interfaceTemDestino(
 ): boolean {
   return destinosDaInterface(settings, platform, role).some((d) => !essencial(d, role, platform));
 }
+/**
+ * A primeira tela depois de entrar (#4864).
+ *
+ * A ESCOLHA MANDA, MAS NÃO ABRE PORTA QUE NÃO ESTÁ NA TELA. A preferência é
+ * apresentação: `destinosDaInterface` já resolveu o que a pessoa enxerga
+ * (empresa ∩ vínculo ∩ papel ∩ módulos), e `inicio` só vale DENTRO desse
+ * conjunto. Escolha velha, área que a empresa ocultou depois ou papel que perdeu
+ * a porta caem na regra de sempre — Inbox, senão a primeira porta não essencial,
+ * senão Perfil. Nunca 404, nunca tela vazia: um href fora de `visible` não é
+ * devolvido por nenhum caminho.
+ */
 export function homeDaInterface(raw: unknown, platform: boolean, role: Role | null): string {
   const visible = destinosDaInterface(raw, platform, role);
+  const { inicio } = lerInterface(raw).settings;
+  const escolhida = inicio ? visible.find((d) => d.href === inicio) : undefined;
+  if (escolhida) return escolhida.href;
   return (
     visible.find((d) => d.href === "/app/inbox")?.href ??
     visible.find((d) => !essencial(d, role, platform))?.href ??
@@ -206,9 +310,45 @@ const SO_O_ESSENCIAL: readonly NavDestinationId[] = ids.filter((id) =>
 export function combinarInterfaces(daEmpresa: unknown, doVinculo: unknown): InterfaceSettings {
   const sEmpresa = lerInterface(daEmpresa).settings;
   const sVinculo = lerInterface(doVinculo).settings;
+  /**
+   * O BLOQUEIO ATÉ ASSUMIR (#3012) atravessa a combinação — e vem SEMPRE da
+   * EMPRESA.
+   *
+   * É regra da ORGANIZAÇÃO: um vínculo não liga nem desliga a trava para si, e
+   * a escolha por vínculo não a alcança. Sem esta carona, as QUATRO saídas
+   * abaixo devolveriam `{ preset }` reconstruído do zero e a organização que
+   * ligou a opção a encontraria desligada em `ActiveOrg.interface_settings` —
+   * o mesmo descuido que a nota do preset logo abaixo descreve para a exceção
+   * do módulo ligado.
+   */
+  const daOrganizacao: Pick<InterfaceSettings, "bloquearAteAssumir"> =
+    sEmpresa.bloquearAteAssumir ? { bloquearAteAssumir: true } : {};
   const empresa = conjuntoEscolhido(sEmpresa);
   const vinculo = conjuntoEscolhido(sVinculo);
-  if (!empresa && !vinculo) return INTERFACE_COMPLETA;
+  /**
+   * `compras_campos` (issue #3179) NÃO entra na interseção de portas: é a escolha
+   * da EMPRESA sobre COMO desenhar a compra, não uma porta de menu que o vínculo
+   * estreita. Ela só precisa ATRAVESSAR a combinação — sem isto, a leitura feita
+   * pela interface combinada (`lib/auth/server.ts`) descartaria a escolha, que é
+   * o mesmo estrago que o comentário do preset acima descreve.
+   */
+  const compras = sEmpresa.compras_campos ?? sVinculo.compras_campos;
+  const comCompras = compras ? { compras_campos: compras } : {};
+  /**
+   * A TELA INICIAL (#4864) atravessa a combinação, e NÃO entra na interseção de
+   * portas: não é limite, é destino. Vem do VÍNCULO quando ele escolheu — é a
+   * tela de ENTRADA daquela pessoa — e da EMPRESA quando não. O vínculo nunca
+   * abre nada com isso: se a porta que ele escolheu não sobrevive à interseção
+   * (a empresa ocultou a área depois), `homeDaInterface` a descarta e cai na
+   * regra de sempre.
+   *
+   * Sem esta carona, as saídas abaixo reconstruiriam o objeto do zero e a
+   * escolha salva sumiria do `ActiveOrg.interface_settings` — mesmo estrago que
+   * os comentários de `bloquearAteAssumir` e `compras_campos` descrevem.
+   */
+  const inicio = sVinculo.inicio ?? sEmpresa.inicio;
+  const comInicio = inicio ? { inicio } : {};
+  if (!empresa && !vinculo) return { ...INTERFACE_COMPLETA, ...comCompras, ...comInicio, ...daOrganizacao };
 
   /**
    * ⚠️ PRESET SOBREVIVE À COMBINAÇÃO, e sem isto a exceção da porta de módulo é CÓDIGO MORTO.
@@ -227,10 +367,10 @@ export function combinarInterfaces(daEmpresa: unknown, doVinculo: unknown): Inte
    * ter lista explícita para o resultado voltar a ser lista — aí existe decisão humana a respeitar.
    */
   const soPreset = sEmpresa.destinos === undefined && sVinculo.destinos === undefined;
-  if (soPreset) return { preset: "simplificada" };
+  if (soPreset) return { preset: "simplificada", ...comCompras, ...comInicio, ...daOrganizacao };
 
   const soUm = empresa ?? vinculo;
-  if (!empresa || !vinculo) return { preset: "completa", destinos: [...(soUm as readonly NavDestinationId[])] };
+  if (!empresa || !vinculo) return { preset: "completa", destinos: [...(soUm as readonly NavDestinationId[])], ...comCompras, ...comInicio, ...daOrganizacao };
   const comuns = empresa.filter((id) => vinculo.includes(id));
-  return { preset: "completa", destinos: [...(comuns.length > 0 ? comuns : SO_O_ESSENCIAL)] };
+  return { preset: "completa", destinos: [...(comuns.length > 0 ? comuns : SO_O_ESSENCIAL)], ...comCompras, ...comInicio, ...daOrganizacao };
 }
