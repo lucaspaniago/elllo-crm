@@ -33,6 +33,7 @@
  *    Ler `res.ok` e não o código exato é o que faz os dois caminhos
  *    conviverem.
  */
+import { barrarSaidaDaOrg } from "@/lib/channels/saida-bloqueada";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { FetchedMedia } from "@/lib/messaging/media/types";
 
@@ -174,6 +175,7 @@ export const zernioAdapter: ChannelAdapter = {
   },
 
   async send(envelope: OutboundEnvelope): Promise<{ externalId: string | null }> {
+    barrarSaidaDaOrg(envelope.organizationId, "zernio.send");
     if (envelope.kind === "contact") {
       throw new Error("zernio_contact_not_supported: envio de cartão de contato não suportado neste canal.");
     }
@@ -305,6 +307,7 @@ export const zernioAdapter: ChannelAdapter = {
     values: Record<string, string>;
     contrato?: TemplateContract | null;
   }): Promise<{ externalId: string | null }> {
+    barrarSaidaDaOrg(input.organizationId, "zernio.sendTemplate");
     const admin = createAdminClient();
     const creds = await resolveZernioCreds(admin, {
       organizationId: input.organizationId,

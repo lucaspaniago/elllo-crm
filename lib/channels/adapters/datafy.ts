@@ -23,6 +23,7 @@
  * o handler grava a mensagem como `queued` com o motivo, em vez de mandar por
  * um canal que a instalação desligou ou de fingir um `sent` sem id.
  */
+import { barrarSaidaDaOrg } from "@/lib/channels/saida-bloqueada";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 import { canalGraphParceiroLigado, graphPartnerGraphBase, resolveGraphPartnerCreds } from "../graph-parceiro/credentials";
@@ -108,6 +109,7 @@ export const datafyAdapter: ChannelAdapter = {
    * (`meta_templates`) e postado na Graph do parceiro.
    */
   async sendTemplate(input): Promise<{ externalId: string | null }> {
+    barrarSaidaDaOrg(input.organizationId, "datafy.sendTemplate");
     // Mesma régua do `send`: canal desligado na instalação não envia nada.
     if (!canalGraphParceiroLigado()) {
       throw new Error(`${NAO_CONFIGURADO}: o canal está desligado nesta instalação (DATAFY_ENABLED).`);
@@ -142,6 +144,7 @@ export const datafyAdapter: ChannelAdapter = {
   },
 
   async send(envelope: OutboundEnvelope): Promise<{ externalId: string | null }> {
+    barrarSaidaDaOrg(envelope.organizationId, "datafy.send");
     if (!canalGraphParceiroLigado()) {
       throw new Error(`${NAO_CONFIGURADO}: o canal está desligado nesta instalação (DATAFY_ENABLED).`);
     }

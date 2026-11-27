@@ -19,6 +19,7 @@
  *    da bolha de voz. E a Meta **não converte** — quem manda mp3 com `voice:true` erra;
  *    o outro canal converte por nós, este não.
  */
+import { barrarSaidaDaOrg } from "@/lib/channels/saida-bloqueada";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { metaContactsPayload } from "@/lib/channels/meta/contact-card";
 import { graphBaseUrl } from "@/lib/channels/meta/graph-base";
@@ -339,6 +340,7 @@ export const metaCloudAdapter: ChannelAdapter = {
   },
 
   async sendReaction(input: ChannelTenantScope & { sessionRef: string; recipient: string | null; externalId: string; emoji: string }): Promise<{ externalId: string | null }> {
+    barrarSaidaDaOrg(input.organizationId, "meta-cloud.sendReaction");
     if (!input.recipient) throw new Error("recipient_unavailable");
     const creds = await resolveMetaCreds(createAdminClient(), { organizationId: input.organizationId, phoneNumberId: input.sessionRef });
     if (!creds) throw new Error("meta_not_configured");
@@ -353,6 +355,7 @@ export const metaCloudAdapter: ChannelAdapter = {
   },
 
   async send(envelope: OutboundEnvelope): Promise<{ externalId: string | null }> {
+    barrarSaidaDaOrg(envelope.organizationId, "meta-cloud.send");
     // Sessão primeiro, env como fallback. O `sessionRef` do canal oficial É o
     // `phone_number_id` (ver `resolveSessionRef`), então ele é a chave da busca.
     const creds = await resolveMetaCreds(createAdminClient(), {

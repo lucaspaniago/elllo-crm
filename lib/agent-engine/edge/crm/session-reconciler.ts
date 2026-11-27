@@ -25,6 +25,7 @@
  * é o WATCHDOG (admin-plane), o único lugar do engine autorizado a falar com o
  * WAHA diretamente (o envio normal segue via sendMessageHandler).
  */
+import { CODIGO_DA_SAIDA_BLOQUEADA, MENSAGEM_DA_SAIDA_BLOQUEADA, saidaBloqueadaDaOrg, sessaoDeOrgBloqueada } from '@/lib/channels/saida-bloqueada';
 import type pg from 'pg';
 
 import { canonicalWahaExternalId, chatIdFromWaMessageId, parseWahaMessageId, wahaEchoExternalIds } from '@/lib/waha/message-id';
@@ -695,6 +696,16 @@ export async function redriveQueued(
           [m.id, m.organization_id],
         );
         log.info('watchdog: reenvio bloqueado pelo modo de teste', { message_id: m.id });
+        continue;
+      }
+      // Fork elllo (saida1): organização com a saída bloqueada não manda nada.
+      if (sessaoDeOrgBloqueada(m.waha_session_name) || saidaBloqueadaDaOrg(m.organization_id)) {
+        await pool.query(
+          `update messages set status = 'failed', error_code = $3, error_message = $4
+           where id = $1 and organization_id = $2 and status = 'queued'`,
+          [m.id, m.organization_id, CODIGO_DA_SAIDA_BLOQUEADA, MENSAGEM_DA_SAIDA_BLOQUEADA],
+        );
+        log.info('watchdog: reenvio bloqueado — saída da organização bloqueada', { message_id: m.id });
         continue;
       }
       const res = await fetch(`${cfg.wahaBaseUrl}/api/sendText`, {

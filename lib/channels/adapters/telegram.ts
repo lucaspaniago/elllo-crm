@@ -23,6 +23,7 @@
  * estourar devolve `429` com `retry_after`, e o erro sobe com ele para quem
  * decide esperar.
  */
+import { barrarSaidaDaOrg } from "@/lib/channels/saida-bloqueada";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 import { telegramCredsForBotId, telegramRequest } from "../bot/credentials";
@@ -85,6 +86,7 @@ export const telegramAdapter: ChannelAdapter = {
   },
 
   async send(envelope: OutboundEnvelope): Promise<{ externalId: string | null }> {
+    barrarSaidaDaOrg(envelope.organizationId, "telegram.send");
     if (envelope.kind !== "text") {
       // A T2 da issue (#3440) cobre mídia. Recusar nomeando o motivo é melhor
       // que mandar o texto de uma legenda e perder o anexo em silêncio.

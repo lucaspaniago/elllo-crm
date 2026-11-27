@@ -5,6 +5,7 @@
  *
  * Nenhuma regra de negócio mora neste arquivo (ver `ChannelAdapter` em ../types).
  */
+import { barrarSaidaDaOrg, barrarSaidaDaSessao } from "@/lib/channels/saida-bloqueada";
 import { wahaContactPayload } from "@/lib/waha/contact-card";
 import { fetchWahaMedia } from "@/lib/messaging/media/waha-source";
 import { getWahaClient } from "@/lib/waha/client";
@@ -229,6 +230,7 @@ export const wahaAdapter: ChannelAdapter = {
   },
 
   async sendReaction(input: { sessionRef: string; recipient: string | null; externalId: string; emoji: string }): Promise<{ externalId: null }> {
+    barrarSaidaDaSessao(input.sessionRef, "waha.adapter.sendReaction");
     const { client, messageId } = enderecoDaMensagem(input);
     await client.sendReaction(input.sessionRef, messageId, input.emoji);
     // O WAHA não retorna id próprio: o webhook é a fonte da linha persistida.
@@ -391,6 +393,8 @@ export const wahaAdapter: ChannelAdapter = {
   },
 
   async send(envelope: OutboundEnvelope): Promise<{ externalId: string | null }> {
+    barrarSaidaDaOrg(envelope.organizationId, "waha.adapter.send");
+    barrarSaidaDaSessao(envelope.sessionRef, "waha.adapter.send");
     const client = getWahaClient();
     // Sem env de WAHA o comportamento atual é NOOP, não erro: a UI mostra o
     // banner de "container não está no ar". Transformar em exceção mudaria o

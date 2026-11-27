@@ -401,6 +401,23 @@ Hermes (D0–D3); aqui a ficha é `lead_notes`.
 - **No rebase:** arquivos novos; a linha da porta, a da área, as 4 ações em `lib/audit/actions.ts`, a variável em
   `lib/agent-engine/env.ts` e no `.env.example`, e o filtro do apanhado.
 
+### M — saída bloqueada por organização (26/11/2026)
+
+- **Chave:** `SAIDA_BLOQUEADA_ORGS` (uuids). Vazia = nada muda. Feita para a instalação de teste de uma loja que só
+  RECEBE: nenhuma mensagem, mídia, áudio, reação, visto, presença, campanha, aniversário, follow-up, aviso, apanhado
+  ou envio pelo painel sai; a entrada segue até a caixa.
+- **Onde barra** (`lib/channels/saida-bloqueada.ts`): os 10 métodos que escrevem em `lib/waha/client.ts` (pela sessão,
+  que começa por `org_<8 hex>`); o redrive do watchdog em `session-reconciler.ts` (marca `failed` com
+  `saida_bloqueada`); `send`/`sendReaction`/`sendTemplate` dos adaptadores em `lib/channels/adapters/*`. O erro é
+  `FalhaDeEnvioDoCanal` permanente: a mensagem fica `failed` (o registro) e não há nova tentativa.
+- **Sem "online":** a sessão nasce e converge com `noweb.markOnline = false` (conferido no WAHA instalado:
+  `NowebConfig.markOnline`, padrão true). O "visto" (`sendSeen`) e o "digitando" (`setPresence`) ficam barrados.
+- **Teste que quebra:** `tests/unit/saida-bloqueada.test.ts` (os 10 métodos sem rede; a cerca de que todo método que
+  escreve no WAHA e todo envio dos adaptadores passa pela guarda; nenhum outro arquivo fala com os endpoints de envio).
+- **Fora de propósito:** o before-send (a cadeia tem testes de forma; o bloqueio abaixo dela cobre todo caminho).
+- **No rebase:** a guarda no começo de cada método de envio do cliente e dos adaptadores, o `markOnline` em
+  `createSession`/`convergirConfigDaSessao`/`startSession`, o bloco do redrive, a variável em `env.ts`/`.env.example`.
+
 ## Migrations do fork (faixa 9xxx)
 
 | Arquivo | O quê |

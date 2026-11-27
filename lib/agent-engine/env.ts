@@ -373,6 +373,8 @@ const envSchema = z.object({
   SONDAR_E_MISSAO_ORGS: z.string().optional().default(''),
   // Fork elllo (teste1): orgs em que POST /api/v1/hermes/teste responde. Vazio = desligado.
   TESTE_DO_HERMES_ORGS: z.string().optional().default(''),
+  // Fork elllo (saida1): orgs com a saída bloqueada (lib/channels/saida-bloqueada.ts). Vazio = o de sempre.
+  SAIDA_BLOQUEADA_ORGS: z.string().optional().default(''),
   // Contenção de egress — hosts EXTRA além do Supabase/WAHA (CSV). Fail-closed.
   EGRESS_EXTRA_ALLOWED_HOSTS: z.string().optional(),
   // Elegibilidade da IA (gate opt-in `channel_sessions.metadata.ai_gate=allowlist`):

@@ -5,6 +5,7 @@
  *
  * Auth: o contêiner recebe SHA512 hex; X-Api-Key recebe a chave plaintext.
  */
+import { barrarSaidaDaSessao, sessaoDeOrgBloqueada } from "@/lib/channels/saida-bloqueada";
 import { z } from "zod";
 import { describeWahaServer, type WahaServerCapabilities } from "@/lib/channels/waha-server";
 
@@ -136,6 +137,16 @@ function acervoEstaConferido(config: Record<string, unknown> | null | undefined,
   if (guardar === undefined) return true;
   const ligado = storeDaSessao(config)?.enabled === true;
   return guardar ? ligado : !ligado;
+}
+
+/**
+ * Fork elllo (saida1): a sessão de organização com a saída bloqueada tem `noweb.markOnline`
+ * = false. Fora dela, sempre conferida (nada muda).
+ */
+function presencaEstaConferida(config: Record<string, unknown> | null | undefined, nome: string): boolean {
+  if (!sessaoDeOrgBloqueada(nome)) return true;
+  const noweb = config?.noweb;
+  return !!noweb && typeof noweb === "object" && !Array.isArray(noweb) && (noweb as Record<string, unknown>).markOnline === false;
 }
 
 /** Grava (ou desliga) o acervo na config que vai no PUT, sem tocar no resto do `noweb`. */
@@ -372,6 +383,8 @@ export class WahaClient {
     // o corpo é byte a byte o de sempre. Ver ACERVO_DO_HISTORICO.
     const config: Record<string, unknown> = { ignore: CONVERSAS_IGNORADAS };
     if (opcoes.guardarHistorico) config.noweb = { store: ACERVO_DO_HISTORICO };
+    // Fork elllo (saida1): organização com a saída bloqueada nasce sem "online".
+    if (sessaoDeOrgBloqueada(name)) config.noweb = { ...((config.noweb as Record<string, unknown> | undefined) ?? {}), markOnline: false };
     const res = await this.fetchComTeto(`${this.baseUrl}/api/sessions`, {
       method: "POST",
       headers: { "X-Api-Key": this.apiKey, "Content-Type": "application/json" },
@@ -399,7 +412,8 @@ export class WahaClient {
     // fullSync é da vinculação). Sem a opção, o critério é o de sempre
     // e o store fica como estava (ver OpcoesDeAcervo).
     const acervoFalta = !acervoEstaConferido(creation.session.config, opcoes.guardarHistorico);
-    if (!creation.created && (!filtersCurrent || acervoFalta)) await this.convergirConfigDaSessao(name, opcoes);
+    const presencaFalta = !presencaEstaConferida(creation.session.config, name);
+    if (!creation.created && (!filtersCurrent || acervoFalta || presencaFalta)) await this.convergirConfigDaSessao(name, opcoes);
     return this.startExistingSession(name);
   }
 
@@ -527,9 +541,16 @@ export class WahaClient {
       // O acervo entra na MESMA régua do filtro: sem isto, quem ligou a opção em
       // um número já pareado nunca teria o PUT (o filtro já estava certo), e
       // quem desligou levaria um restart para reafirmar o default da engine.
-      if (filtroConferido && acervoEstaConferido(sessao.config, guardarHistorico)) return true;
+      if (filtroConferido && acervoEstaConferido(sessao.config, guardarHistorico) && presencaEstaConferida(sessao.config, name)) return true;
       const config: Record<string, unknown> = { ...sessao.config, ignore: { ...CHAVES_DO_FILTRO_FIXAS, groups: groupsAtual } };
       aplicarAcervoNaConfig(config, guardarHistorico);
+      // Fork elllo (saida1): saída bloqueada = sessão sem "online".
+      if (sessaoDeOrgBloqueada(name)) {
+        const noweb = config.noweb && typeof config.noweb === "object" && !Array.isArray(config.noweb)
+          ? { ...(config.noweb as Record<string, unknown>) } : {};
+        noweb.markOnline = false;
+        config.noweb = noweb;
+      }
 
       const res = await this.fetchComTeto(url, {
         method: "PUT",
@@ -969,6 +990,7 @@ export class WahaClient {
     text: string,
     replyTo?: string | null,
   ): Promise<unknown> {
+    barrarSaidaDaSessao(session, "waha.sendMessage");
     const res = await this.fetchComTeto(`${this.baseUrl}/api/sendText`, {
       method: "POST",
       headers: {
@@ -1007,6 +1029,7 @@ export class WahaClient {
    * ignora. Sem ids (ou lista vazia), o corpo é o de antes.
    */
   async sendSeen(session: string, chatId: string, messageIds?: readonly string[]): Promise<void> {
+    barrarSaidaDaSessao(session, "waha.sendSeen");
     const res = await this.fetchComTeto(`${this.baseUrl}/api/sendSeen`, {
       method: "POST",
       headers: {
@@ -1030,6 +1053,7 @@ export class WahaClient {
    * resultado de errar é ela tocar como tocava antes.
    */
   async rejectCall(session: string, from: string, callId: string): Promise<void> {
+    barrarSaidaDaSessao(session, "waha.rejectCall");
     const res = await this.fetchComTeto(
       `${this.baseUrl}/api/${encodeURIComponent(session)}/calls/reject`,
       {
@@ -1043,6 +1067,7 @@ export class WahaClient {
 
   /** O id completo identifica a mensagem no WAHA; o id curto do sendText não basta. */
   async editMessage(session: string, chatId: string, messageId: string, text: string): Promise<void> {
+    barrarSaidaDaSessao(session, "waha.editMessage");
     const path = `/api/${encodeURIComponent(session)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`;
     const res = await this.fetchComTeto(`${this.baseUrl}${path}`, {
       method: "PUT",
@@ -1054,6 +1079,7 @@ export class WahaClient {
 
   /** A API WAHA recebe o id completo, sem chatId separado. */
   async sendReaction(session: string, messageId: string, reaction: string): Promise<void> {
+    barrarSaidaDaSessao(session, "waha.sendReaction");
     const res = await this.fetchComTeto(`${this.baseUrl}/api/reaction`, {
       method: "PUT",
       headers: { "X-Api-Key": this.apiKey, "Content-Type": "application/json" },
@@ -1064,6 +1090,7 @@ export class WahaClient {
 
   /** Sem `forMe`: para mensagem enviada, WAHA revoga para todos. */
   async deleteMessage(session: string, chatId: string, messageId: string): Promise<void> {
+    barrarSaidaDaSessao(session, "waha.deleteMessage");
     const path = `/api/${encodeURIComponent(session)}/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`;
     const res = await this.fetchComTeto(`${this.baseUrl}${path}`, {
       method: "DELETE",
@@ -1107,6 +1134,7 @@ export class WahaClient {
     chatId: string,
     presence: "typing" | "recording" | "paused",
   ): Promise<void> {
+    barrarSaidaDaSessao(session, "waha.setPresence");
     const res = await this.fetchComTeto(
       `${this.baseUrl}/api/${encodeURIComponent(session)}/presence`,
       {
@@ -1222,6 +1250,7 @@ export class WahaClient {
       vcard: string;
     }>,
   ): Promise<unknown> {
+    barrarSaidaDaSessao(session, "waha.sendContactVcard");
     const res = await this.fetchComTeto(`${this.baseUrl}/api/sendContactVcard`, {
       method: "POST",
       headers: {
@@ -1241,6 +1270,7 @@ export class WahaClient {
     chatId: string,
     plan: { endpoint: string; payload: Record<string, unknown> },
   ): Promise<unknown> {
+    barrarSaidaDaSessao(session, "waha.sendMedia");
     // Teto MAIOR aqui: `media-send.ts` manda `convert: true` em vídeo e áudio, e
     // o WAHA roda ffmpeg e baixa a URL do Storage antes de responder. Com o teto
     // de texto, o envio de áudio legítimo seria cortado — o conserto do timeout
@@ -1274,6 +1304,7 @@ export class WahaClient {
     session: string,
     imagem: { mimetype: string; data: string; caption?: string; contacts?: string[] },
   ): Promise<unknown> {
+    barrarSaidaDaSessao(session, "waha.sendStatusImage");
     const res = await this.fetchComTeto(
       `${this.baseUrl}/api/${encodeURIComponent(session)}/status/image`,
       {
