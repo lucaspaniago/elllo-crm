@@ -32,6 +32,7 @@
  * coincida com outra organização da mesma instalação bloquearia as duas — o lado seguro.
  */
 import { FalhaDeEnvioDoCanal } from "./falha-de-envio";
+import { nomeCurtoDaSessao } from "./nome-da-sessao";
 
 export const CODIGO_DA_SAIDA_BLOQUEADA = "saida_bloqueada";
 export const MENSAGEM_DA_SAIDA_BLOQUEADA =
@@ -54,7 +55,9 @@ function orgsBloqueadas(fonte: NodeJS.ProcessEnv): string[] {
 
 /** O começo do nome de TODA sessão do WAHA da organização (`org_<8 hex>`). */
 export function prefixoDaSessaoDaOrg(orgId: string): string {
-  return `org_${orgId.toLowerCase().replaceAll("-", "").slice(0, 8)}`;
+  // Os 8 primeiros caracteres do uuid não têm hífen: as duas grafias do nome
+  // (`nomeCurtoDaSessao` e `nomeDaSessaoNovo`) começam pelo mesmo prefixo.
+  return nomeCurtoDaSessao(orgId.trim().toLowerCase());
 }
 
 export function saidaBloqueadaDaOrg(orgId: string | null | undefined, fonte: NodeJS.ProcessEnv = process.env): boolean {
