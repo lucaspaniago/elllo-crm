@@ -305,6 +305,9 @@ export const AUDIT_ACTIONS = [
   "teste_do_hermes.turn",
   "teste_do_hermes.closed",
   "teste_do_hermes.swept",
+  // Fork elllo (acervo1): o acervo de peças pelo mensageiro (`app/api/v1/acervo`).
+  "acervo.previewed",
+  "acervo.recorded",
   "ai_reply.approved",
   "ai_reply.rejected",
   "ai_agent.reverted",

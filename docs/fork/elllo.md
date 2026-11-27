@@ -418,6 +418,28 @@ Hermes (D0–D3); aqui a ficha é `lead_notes`.
 - **No rebase:** a guarda no começo de cada método de envio do cliente e dos adaptadores, o `markOnline` em
   `createSession`/`convergirConfigDaSessao`/`startSession`, o bloco do redrive, a variável em `env.ts`/`.env.example`.
 
+### N — o acervo de peças pelo mensageiro do Hermes (26/11/2026)
+
+- **Chave:** `ACERVO_ORGS` (uuids). Vazia = `POST /api/v1/acervo` responde 404 e nada muda. Só token (`mcp:write`;
+  sessão = 403), organização da linha do token. Nada manda mensagem.
+- **Dois passos** (`lib/acervo/acervo.ts`): `previa_cadastro`, `previa_publicar`, `previa_status`, `previa_reserva` e
+  `previa_cancelar_reserva` devolvem `id_previa` (30 min) e `vai_gravar`; `gravar {id_previa}` aplica exatamente aquilo,
+  uma vez só (repetir devolve `repetido: true`); se algo mudou, `mudou_desde_a_previa` e nada grava. Leituras sem
+  prévia: `disponibilidade {data_evento}` e `consultar`.
+- **Peça:** código sugerido `A-0001…` (ou o informado), modelo, cor, tamanho, uso (venda/locacao/ambos), preços em
+  centavos, descrição, observações, até 5 fotos. Nasce `disponivel` e não publicada. Mesmo modelo+cor+tamanho = aviso.
+  Espelho em `catalog_products` (mesmo id, `origem = 'acervo'`, o painel abre só leitura): `ativo` = publicada,
+  `quantidade` = 1 só quando disponível; em "ambos" o preço do catálogo é o da locação.
+- **Fotos:** o contêiner não tem `sharp`, então o CRM NÃO reduz: confere JPG/PNG pela assinatura, até 1600 px no lado
+  maior (cabeçalho IHDR/SOFn) e 800 KB (`lib/acervo/fotos-do-acervo.ts`). Sobem na prévia para
+  `catalog-photos/<org>/<id da peça>/`; prévia vencida sem gravar tem as fotos apagadas na próxima prévia.
+- **Status e reserva:** cada troca grava `acervo_status_historico`; entrar em `alugada` soma `vezes_alugada`;
+  `vendida` despublica. Reserva: retirada = evento − 1 dia; devolução = primeiro dia útil depois (sem fim de semana
+  nem feriado nacional, fuso da org); [retirada, devolução] fechado não pode encostar noutra reserva ativa.
+- **Migration 9006** e o bloco no baseline (depois do da 9005). Teste: `tests/unit/acervo.test.ts`.
+- **No rebase:** a pasta `lib/acervo/`, a rota, a porta em `operacao.ts`, `e("acervo")` em `areas.ts`, as ações
+  `acervo.previewed`/`acervo.recorded` em `lib/audit/actions.ts`, a variável em `env.ts`/`.env.example`.
+
 ## Migrations do fork (faixa 9xxx)
 
 | Arquivo | O quê |
@@ -427,11 +449,12 @@ Hermes (D0–D3); aqui a ficha é `lead_notes`.
 | `supabase/migrations/20261026120000_9003_tolerancia_de_sentimento.sql` | `sondagem_minutos` vira a janela da tolerância: default 10 → 30 e comentário da coluna (sem renomear; linhas existentes mantêm o valor) |
 | `supabase/migrations/20261116120000_9004_apanhado_do_dono.sql` | `itens_do_apanhado` (propaganda silenciada e grupo que vale resposta, só o ponteiro para a mensagem; `unique (organization_id, message_id, tipo)`; RLS leitura manager, escrita só servidor) |
 | `supabase/migrations/20261123190000_9005_dossie_do_contato.sql` | `lead_notes.categoria`, `fonte` (default `lucas`) e `liberada`, com CHECKs; `lead_dossie_flushes` (só o servidor); `fn_rapport_do_contato` (só `service_role`) |
+| `supabase/migrations/20261126200000_9006_acervo_de_pecas.sql` | `acervo_pecas` (FK pelo id para `catalog_products`), `acervo_status_historico`, `acervo_reservas`, `acervo_previas`; todas só do servidor |
 
-Os cinco blocos estão no `supabase/baseline.sql` **logo depois do bloco da 0687**
+Os seis blocos estão no `supabase/baseline.sql` **logo depois do bloco da 0687**
 (e portanto antes da VARREDURA anon), com os rótulos
 `-- ---- fork elllo: … (migration 9001) ----`, `… (migration 9002) ----` e
-`… (migration 9003) ----`, `… (migration 9004) ----` e `… (migration 9005) ----`.
+`… (migration 9003) ----`, `… (migration 9004) ----`, `… (migration 9005) ----` e `… (migration 9006) ----`.
 
 ## Como rebasear
 

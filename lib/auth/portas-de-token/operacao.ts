@@ -15,6 +15,9 @@ export const MODELOS_DA_OPERACAO: readonly ModeloDePorta[] = [
   // Fork elllo (teste1): o MODO TESTE do Hermes pelo CRM. Só POST, só token (a rota
   // recusa a sessão com 403) e só na organização de `TESTE_DO_HERMES_ORGS`.
   "/api/v1/hermes/teste",
+  // Fork elllo (acervo1): o ACERVO de peças pelo mensageiro do Hermes. Só POST, só token (a
+  // rota recusa a sessão com 403) e só na organização de `ACERVO_ORGS`.
+  "/api/v1/acervo",
   // TAREFAS, DEMANDAS E CHAMADAS (tarefa 9 da R2). Quem autentica é a própria
   // rota, por `resolveAuthDual` (sessão OU Bearer `dsk_…`, a organização vinda
   // da linha do token): `mcp:read` no GET e `mcp:write` na escrita, com o papel
